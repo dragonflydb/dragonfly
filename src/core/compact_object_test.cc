@@ -627,6 +627,91 @@ TEST_P(AsciiCodecTest, RejectsNonAscii) {
   }
 }
 
+// Like the codecs above, ascii_compare_packed() has a kernel per instruction set, and each one is
+// tested on its own.
+struct AsciiCompare {
+  const char* name;
+  bool (*compare)(const uint8_t* bin, size_t ascii_len, const char* ascii);
+};
+
+const AsciiCompare kAsciiCompares[] = {
+    {"Dispatch", detail::ascii_compare_packed},
+    {"Scalar", detail::impl::ascii_compare_packed_scalar},
+#if defined(ASCII_SSE4_1)
+    {"Sse", detail::impl::ascii_compare_packed_sse},
+#endif
+#if defined(ASCII_AVX2)
+    {"Avx2", detail::impl::ascii_compare_packed_avx2},
+#elif defined(ASCII_NEON)
+    {"Neon", detail::impl::ascii_compare_packed_neon},
+#endif
+};
+
+class AsciiCompareTest : public ::testing::TestWithParam<AsciiCompare> {};
+
+INSTANTIATE_TEST_SUITE_P(Kernel, AsciiCompareTest, testing::ValuesIn(kAsciiCompares),
+                         [](const testing::TestParamInfo<AsciiCompare>& info) {
+                           return string(info.param.name);
+                         });
+
+// A string has to match its packed form, and changing any single byte has to break the match. That
+// includes setting just the high bit, which packing would drop. Both buffers have their exact size,
+// so ASAN catches a kernel that reads past either of them.
+TEST_P(AsciiCompareTest, ComparesWithPacked) {
+  const AsciiCompare& kernel = GetParam();
+
+  for (size_t len : AsciiCodecLengths()) {
+    const string ascii = MakeAscii(len);
+    const size_t packed_len = detail::binpacked_len(len);
+    auto packed = make_unique<uint8_t[]>(packed_len);
+    ASSERT_EQ(detail::impl::ascii_try_pack_scalar(ascii.data(), len, packed.get()), packed_len)
+        << "len=" << len;
+
+    auto str = make_unique<char[]>(len);
+    memcpy(str.get(), ascii.data(), len);
+    EXPECT_TRUE(kernel.compare(packed.get(), len, str.get())) << "len=" << len;
+
+    for (size_t pos : NonAsciiPositions(len)) {
+      for (char flip : {'\x80', '\x01'}) {
+        str[pos] ^= flip;
+        EXPECT_FALSE(kernel.compare(packed.get(), len, str.get()))
+            << "len=" << len << " pos=" << pos << " flip=" << int(flip);
+        str[pos] ^= flip;
+      }
+    }
+  }
+}
+
+// Strings of 8n - 1 and 8n bytes both pack into 7n bytes, so their packed lengths alone cannot tell
+// them apart. Here the two keys are built to collide: the shorter one ends in the packed form of
+// the longer one's last group, so one's verbatim tail is the other's packed group.
+TEST_F(CompactObjectTest, AsciiKeyLengthCollision) {
+  for (size_t groups : {3, 37}) {  // SMALL_TAG and LARGE_STR_TAG
+    // Every packed byte of this group is ascii, so it can double as a verbatim tail.
+    const string longer = string(8 * groups - 8, 'k') + "@@@@@@@ ";
+    const size_t last_group = longer.size() - 8;
+    string shorter = longer.substr(0, longer.size() - 1);
+    uint8_t* shorter_tail = reinterpret_cast<uint8_t*>(shorter.data() + last_group);
+    ASSERT_EQ(detail::ascii_try_pack(longer.data() + last_group, 8, shorter_tail), 7u);
+
+    for (bool expire : {false, true}) {
+      CompactKey long_key(longer);
+      CompactKey short_key(shorter);
+      if (expire) {
+        long_key.SetExpireTime(1000);
+        short_key.SetExpireTime(1000);
+      }
+
+      ASSERT_EQ(long_key.GetRawString(), short_key.GetRawString())
+          << "groups=" << groups << " expire=" << expire;
+      EXPECT_TRUE(long_key == longer) << "groups=" << groups << " expire=" << expire;
+      EXPECT_TRUE(short_key == shorter) << "groups=" << groups << " expire=" << expire;
+      EXPECT_FALSE(long_key == shorter) << "groups=" << groups << " expire=" << expire;
+      EXPECT_FALSE(short_key == longer) << "groups=" << groups << " expire=" << expire;
+    }
+  }
+}
+
 TEST_F(CompactObjectTest, AsciiPackByte) {
   // Test ascii_pack_byte and ascii_unpack_byte for correctness.
   for (size_t len : {8, 16, 24, 31, 32, 33, 64, 100}) {
@@ -1698,20 +1783,24 @@ BENCHMARK(BM_PackNaive);
 
 using AsciiTryPackFunction = size_t (*)(const char*, size_t, uint8_t*);
 using AsciiUnpackFunction = void (*)(const uint8_t*, size_t, char*);
+using AsciiCompareFunction = bool (*)(const uint8_t*, size_t, const char*);
 
 template <auto operation> static void BM_AsciiCodec(benchmark::State& state) {
   constexpr bool kTryPack = is_same_v<decltype(operation), AsciiTryPackFunction>;
   constexpr bool kUnpack = is_same_v<decltype(operation), AsciiUnpackFunction>;
-  static_assert(kTryPack || kUnpack);
+  constexpr bool kCompare = is_same_v<decltype(operation), AsciiCompareFunction>;
+  static_assert(kTryPack || kUnpack || kCompare);
 
   string val(state.range(0), 'a');
   vector<uint8_t> buf(max<size_t>(detail::binpacked_len(val.size()), 1));
-  if constexpr (kUnpack)
+  if constexpr (!kTryPack)
     detail::ascii_try_pack(val.data(), val.size(), buf.data());
 
   while (state.KeepRunning()) {
     if constexpr (kTryPack)
       benchmark::DoNotOptimize(operation(val.data(), val.size(), buf.data()));
+    else if constexpr (kCompare)
+      benchmark::DoNotOptimize(operation(buf.data(), val.size(), val.data()));
     else
       operation(buf.data(), val.size(), val.data());
     benchmark::ClobberMemory();
@@ -1753,6 +1842,10 @@ BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_try_pack_sse)->Apply(Ascii
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_unpack_fast_sse)->Apply(AsciiCodecArgs);
 #endif
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_unpack_fast)->Apply(AsciiCodecArgs);
+#if defined(ASCII_SSE4_1)
+BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_compare_packed_sse)->Apply(AsciiCodecArgs);
+#endif
+BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_compare_packed)->Apply(AsciiCodecArgs);
 BENCHMARK_TEMPLATE(BM_AsciiTryPackReject, detail::ascii_try_pack)->Apply(AsciiTryPackRejectArgs);
 #if defined(ASCII_SSSE3)
 BENCHMARK_TEMPLATE(BM_AsciiTryPackReject, detail::impl::ascii_try_pack_sse)

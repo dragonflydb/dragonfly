@@ -29,6 +29,7 @@ ABSL_DECLARE_FLAG(uint64_t, lua_mem_gc_threshold);
 
 namespace dfly {
 using namespace std;
+using testing::HasSubstr;
 
 class TestSerializer : public ObjectExplorer {
  public:
@@ -153,13 +154,12 @@ bool InterpreterTest::Execute(string_view script, size_t max_elements) {
 
 TEST_F(InterpreterTest, Basic) {
   RunInline(R"(
-    function foo(n)
+    return function(n)
       return n,n+1
     end)",
-            "code1");
+            "code1", 1);
 
-  int type = lua_getglobal(lua(), "foo");
-  ASSERT_EQ(LUA_TFUNCTION, type);
+  ASSERT_EQ(LUA_TFUNCTION, lua_type(lua(), -1));
   lua_pushnumber(lua(), 42);
   lua_pcall(lua(), 1, 2, 0);
   int val1 = lua_tointeger(lua(), -1);
@@ -197,7 +197,7 @@ TEST_F(InterpreterTest, Basic) {
 
 TEST_F(InterpreterTest, UnknownFunc) {
   string_view code(R"(
-    function foo(n)
+    local function foo(n)
       return myunknownfunc(1, n)
     end)");
 
@@ -558,6 +558,117 @@ TEST_F(InterpreterTest, CjsonMaxDepth) {
   EXPECT_EQ("bool(1)", ser_.res);
 }
 
+// Strings are encoded with growth checks, also when escapes make the output much longer.
+TEST_F(InterpreterTest, CjsonEncodeEscapes) {
+  ASSERT_TRUE(Execute(R"(
+    for _, n in ipairs({1, 100, 10000, 100000}) do
+      local s = string.rep('\0', n)
+      local encoded = cjson.encode(s)
+      assert(#encoded == n * 6 + 2, #encoded)
+      assert(cjson.decode(encoded) == s)
+      encoded = cjson.encode({string.rep('"\\/', n)})
+      assert(#encoded == n * 6 + 4, #encoded)
+    end
+    local map = {s = string.rep('x', 70000), a = {'Some', 'String', 'Array'}, n = 100, b = true}
+    local decoded = cjson.decode(cjson.encode(map))
+    assert(decoded.s == map.s and decoded.a[3] == 'Array' and decoded.n == 100 and decoded.b)
+    local ok, err = pcall(cjson.decode, '[1, 2')
+    assert(not ok and err:find('at character 6', 1, true), err)
+    return true
+  )")) << error_;
+  EXPECT_EQ("bool(1)", ser_.res);
+}
+
+// Whole numbers become integers only when they fit into lua_Integer.
+TEST_F(InterpreterTest, CjsonIntegerBounds) {
+  EXPECT_TRUE(Execute(R"(
+    local res = {}
+    for _, s in ipairs({'9223372036854775808', '-9223372036854775808', '9223372036854774784',
+                        '1e19', '-1e19', '42', '42.5'}) do
+      table.insert(res, math.type(cjson.decode(s)))
+    end
+    return res
+  )")) << error_;
+  EXPECT_EQ("[str(float) str(integer) str(integer) str(float) str(float) str(integer) str(float)]",
+            ser_.res);
+}
+
+TEST_F(InterpreterTest, CmsgpackMaxDepth) {
+  ASSERT_TRUE(Execute(R"(
+    -- Arrays and maps with a single element, nested 'depth' times.
+    local function nested_array(depth)
+      return string.rep('\x91', depth) .. '\x01'
+    end
+    local function nested_map(depth)
+      return string.rep('\x81\x01', depth) .. '\x01'
+    end
+    for _, nested in ipairs({nested_array, nested_map}) do
+      local value = cmsgpack.unpack(nested(50))
+      for i = 1, 50 do
+        value = value[1]
+      end
+      assert(value == 1)
+      for _, depth in ipairs({51, 1000, 100000}) do
+        local ok, err = pcall(cmsgpack.unpack, nested(depth))
+        assert(not ok and err:find('Too many nested data structures', 1, true), err)
+      end
+    end
+
+    -- The limit applies to each top level value, not to the sum of them.
+    local offset, value = cmsgpack.unpack_one(nested_array(50) .. nested_array(50))
+    assert(offset == 51 and type(value) == 'table')
+    offset, value = cmsgpack.unpack_one(nested_array(50) .. nested_array(50), offset)
+    assert(offset == -1 and type(value) == 'table')
+    return true
+  )")) << error_;
+  EXPECT_EQ("bool(1)", ser_.res);
+}
+
+TEST_F(InterpreterTest, CmsgpackRoundTrip) {
+  ASSERT_TRUE(Execute(R"(
+    local strs = {string.rep('x', 30), string.rep('x', 250), string.rep('x', 65530),
+                  string.rep('x', 100000)}
+    local big_array, big_map = {}, {}
+    for i = 1, 100000 do
+      big_array[i] = i
+      big_map[tostring(i)] = i
+    end
+    local map = {s1 = strs[1], s2 = strs[2], s3 = strs[3], s4 = strs[4], d = 0.1, i1 = 1,
+                 i2 = 2^40, i3 = -3147483648, a1 = {1, 2, 3}, a2 = big_array, m = big_map,
+                 b = false}
+    local decoded = cmsgpack.unpack(cmsgpack.pack(map))
+    for k, v in pairs(map) do
+      if type(v) ~= 'table' then
+        assert(decoded[k] == v, k)
+      end
+    end
+    assert(#decoded.a2 == 100000 and decoded.a2[100000] == 100000)
+    assert(decoded.m['100000'] == 100000)
+
+    local packed = cmsgpack.pack(strs[1], strs[2], strs[3], strs[4])
+    local offset, obj = 0
+    for i = 1, 4 do
+      offset, obj = cmsgpack.unpack_limit(packed, 1, offset)
+      assert(obj == strs[i], i)
+    end
+    assert(offset == -1)
+
+    local ok, err = pcall(cmsgpack.unpack_limit, packed, -1, 0)
+    assert(not ok and err:find('offset of 0 and limit of -1', 1, true), err)
+    ok, err = pcall(cmsgpack.unpack_one, packed, #packed + 1)
+    assert(not ok and err:find('greater than input length', 1, true), err)
+
+    -- Packing tables with many keys needs stack space for the keys.
+    local wide = {}
+    for i = 1, 10000 do
+      wide['k' .. i] = {i}
+    end
+    assert(cmsgpack.unpack(cmsgpack.pack(wide)).k10000[1] == 10000)
+    return true
+  )")) << error_;
+  EXPECT_EQ("bool(1)", ser_.res);
+}
+
 // Check compatibility with Lua 5.1
 TEST_F(InterpreterTest, Compatibility) {
   // unpack is no longer global
@@ -766,51 +877,51 @@ TEST_F(InterpreterTest, ProtectedRawset) {
   EXPECT_TRUE(Execute("local t = {}; rawset(t, 'k', 'v'); return t['k']"));
   EXPECT_EQ("str(v)", ser_.res);
 
-  // rawset directly on _G is blocked
-  EXPECT_FALSE(Execute("rawset(_G, 'key', 'value')"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to access rawset with global environment"));
+  // rawset on _G or on a library table is blocked.
+  for (string_view script :
+       {"rawset(_G, 'key', 'value')", "rawset(_G, 'redis', 'value')",
+        "rawset(string, 'format', function() end)", "rawset(table, 'sort', function() end)"}) {
+    EXPECT_FALSE(Execute(script)) << script;
+    EXPECT_THAT(error_, HasSubstr("Attempt to modify a readonly table")) << script;
+  }
 
-  // getmetatable(_G) now errors, so rawset never runs
+  // getmetatable(_G) errors, so rawset never runs
   EXPECT_FALSE(Execute("rawset(getmetatable(_G), 'key', 'value')"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to access metatable of global environment"));
+  EXPECT_THAT(error_, HasSubstr("Script attempted to access metatable of global environment"));
 }
 
 TEST_F(InterpreterTest, ProtectedSetmetatable) {
   // setmetatable on a plain table is allowed
   EXPECT_TRUE(Execute("local t = {}; setmetatable(t, {}); return 'ok'"));
+  EXPECT_TRUE(Execute("local t = setmetatable({}, {}); setmetatable(t, nil); return 'ok'"));
 
-  // setmetatable on _G is blocked
-  EXPECT_FALSE(Execute("setmetatable(_G, {})"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to set metatable of global environment"));
+  // setmetatable on _G or on a library table is blocked.
+  for (string_view script :
+       {"setmetatable(_G, {})", "setmetatable(string, {})", "setmetatable(table, {})",
+        "setmetatable(math, {})", "setmetatable(redis, {})", "setmetatable(cjson, nil)"}) {
+    EXPECT_FALSE(Execute(script)) << script;
+    EXPECT_THAT(error_, HasSubstr("Attempt to modify a readonly table")) << script;
+  }
 
-  // getmetatable(_G) now errors — mt is unreachable.
+  // getmetatable(_G) errors - mt is unreachable.
   EXPECT_FALSE(Execute("return type(getmetatable(_G))"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to access metatable of global environment"));
+  EXPECT_THAT(error_, HasSubstr("Script attempted to access metatable of global environment"));
 
-  // setmetatable on global tables (stdlib) is blocked — prevents cross-script contamination.
-  EXPECT_FALSE(Execute("setmetatable(string, {})"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to set metatable of global environment"));
-  EXPECT_FALSE(Execute("setmetatable(table, {})"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to set metatable of global environment"));
-  EXPECT_FALSE(Execute("setmetatable(math, {})"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to set metatable of global environment"));
-}
+  // The second argument must be a table or nil; anything else used to crash the server.
+  for (string_view arg : {", 1", ", 'str'", ", true", ", function() end", ""}) {
+    string script = absl::StrCat("setmetatable({}", arg, ")");
+    EXPECT_FALSE(Execute(script)) << script;
+    EXPECT_THAT(error_, HasSubstr("bad argument #2 to 'setmetatable'")) << script;
+  }
+  EXPECT_FALSE(Execute("setmetatable(1, {})"));
+  EXPECT_THAT(error_, HasSubstr("bad argument #1 to 'setmetatable'"));
 
-TEST_F(InterpreterTest, ProtectedRawsetGlobalTables) {
-  // rawset on global stdlib tables is blocked — same contamination risk as setmetatable.
-  EXPECT_FALSE(Execute("rawset(string, 'format', function() end)"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to access rawset with global environment"));
-  EXPECT_FALSE(Execute("rawset(table, 'sort', function() end)"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to access rawset with global environment"));
+  // A metatable protected by __metatable can not be replaced.
+  EXPECT_FALSE(
+      Execute("local t = setmetatable({}, {__metatable = 'locked'}); setmetatable(t, {})"));
+  EXPECT_THAT(error_, HasSubstr("cannot change a protected metatable"));
+  EXPECT_TRUE(Execute("return getmetatable(setmetatable({}, {__metatable = 'locked'}))"));
+  EXPECT_EQ("str(locked)", ser_.res);
 }
 
 TEST_F(InterpreterTest, ProtectedGetmetatable) {
@@ -820,32 +931,104 @@ TEST_F(InterpreterTest, ProtectedGetmetatable) {
 
   // getmetatable on _G is blocked from Lua functions
   EXPECT_FALSE(Execute("local function f() return getmetatable(_G) end; f()"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to access metatable of global environment"));
+  EXPECT_THAT(error_, HasSubstr("Script attempted to access metatable of global environment"));
 
-  // top-level script call is also blocked — scripts run as Lua functions, not main chunks
+  // top-level script call is also blocked
   EXPECT_FALSE(Execute("return type(getmetatable(_G))"));
-  EXPECT_THAT(error_,
-              testing::HasSubstr("Script attempted to access metatable of global environment"));
-  ;
-
-  // global_guard __metatable on stdlib tables is still respected
-  EXPECT_TRUE(Execute("return type(getmetatable(string))"));
-  EXPECT_EQ("str(string)", ser_.res);
+  EXPECT_THAT(error_, HasSubstr("Script attempted to access metatable of global environment"));
 }
 
 TEST_F(InterpreterTest, ProtectedGlobalAssignment) {
-  // direct global assignment from a function is blocked
-  EXPECT_FALSE(Execute("local function f() x = 1 end; f()"));
-  EXPECT_THAT(error_, testing::HasSubstr("Script attempted to create global variable 'x'"));
+  // Creating a global is blocked, from a function, through _G and at the top level.
+  for (string_view script : {"local function f() x = 1 end; f()", "_G.newkey = 1",
+                             "x = 1; return x", "function f() end", "_G['k' .. 1] = 1"}) {
+    EXPECT_FALSE(Execute(script)) << script;
+    EXPECT_THAT(error_, HasSubstr("Attempt to modify a readonly table")) << script;
+  }
 
-  // direct field assignment on _G is blocked
-  EXPECT_FALSE(Execute("_G.newkey = 1"));
-  EXPECT_THAT(error_, testing::HasSubstr("Script attempted to create global variable 'newkey'"));
+  // Reading a nonexistent global is blocked.
+  EXPECT_FALSE(Execute("return nosuchglobal"));
+  EXPECT_THAT(error_, HasSubstr("Script attempted to access nonexistent global variable"));
 
-  // top-level script assignment is also blocked — scripts run as functions, not main chunk
-  EXPECT_FALSE(Execute("x = 1; return x"));
-  EXPECT_THAT(error_, testing::HasSubstr("Script attempted to create global variable 'x'"));
+  // The body is compiled as a chunk of its own, so it can not close the function early and run
+  // code at load time.
+  EXPECT_FALSE(Execute("return 1 end redis = nil function g()"));
+  EXPECT_TRUE(Execute("return type(redis)"));
+  EXPECT_EQ("str(table)", ser_.res);
+
+  // Precompiled bytecode is rejected.
+  EXPECT_FALSE(Execute("\x1bLua return 1"));
+  EXPECT_THAT(error_, HasSubstr("attempt to load a binary chunk"));
+
+  // Errors are reported at the line of the script body.
+  EXPECT_FALSE(Execute("local a = 1\nerror('boom')"));
+  EXPECT_THAT(error_, HasSubstr("user_script:2: boom"));
+}
+
+// Scripts can not change state that later scripts, including those of other connections, see.
+TEST_F(InterpreterTest, ProtectedSharedState) {
+  const string_view kScripts[] = {
+      "redis = nil",
+      "redis.call = function() return 'hijacked' end",
+      "string.rep = function() return 'hijacked' end",
+      "string.newfunc = function() end",
+      "table.insert(string, 'x')",
+      "table.remove(table)",
+      "math.pi = 3",
+      "cjson.encode = nil",
+      "cmsgpack.pack = nil",
+      "bit.band = nil",
+      "struct.pack = nil",
+      "dragonfly.randstr = nil",
+      "redis.LOG_WARNING = 0",
+      "tostring = nil",
+      "unpack = nil",
+      "getmetatable('').__index = {}",
+      "getmetatable('').__add = function() return 1 end",
+      "getmetatable('').__index.upper = nil",
+      "_G._G = nil",
+      "_ENV.redis = nil",
+      "local env = _ENV; env.pcall = nil",
+  };
+  for (string_view script : kScripts) {
+    EXPECT_FALSE(Execute(script)) << script;
+    EXPECT_THAT(error_, HasSubstr("Attempt to modify a readonly table")) << script;
+  }
+
+  // Nothing changed.
+  EXPECT_TRUE(Execute(R"(
+    return {type(redis), type(redis.call), string.rep('a', 2), math.pi > 3.14, type(cjson.encode),
+            type(tostring), type(unpack), ('a'):upper(), redis.LOG_WARNING, type(_G._G),
+            type(string.newfunc), '1' + 1}
+  )")) << error_;
+  EXPECT_EQ(
+      "[str(table) str(function) str(aa) bool(1) str(function) str(function) str(function) "
+      "str(A) i(3) str(table) str(nil) i(2)]",
+      ser_.res);
+
+  // Tables created by a script can be changed.
+  EXPECT_TRUE(Execute(R"(
+    local t = {}
+    t.a = 1
+    rawset(t, 'b', 2)
+    table.insert(t, 3)
+    local mt = setmetatable({}, {__index = string})
+    return {t.a, t.b, t[1], mt.upper('x'), cjson.decode('{"a":1}').a}
+  )")) << error_;
+  EXPECT_EQ("[i(1) i(2) i(3) str(X) i(1)]", ser_.res);
+
+  // KEYS and ARGV are set per call and the script can still change them.
+  SetGlobalArray("KEYS", {"k1"});
+  SetGlobalArray("ARGV", {"a1"});
+  EXPECT_TRUE(Execute("KEYS[2] = 'k2'; table.insert(ARGV, 'a2'); return {KEYS[2], ARGV[2]}"));
+  EXPECT_EQ("[str(k2) str(a2)]", ser_.res);
+  SetGlobalArray("KEYS", {"k3"});
+  EXPECT_TRUE(Execute("return {KEYS[1], KEYS[2]}"));
+  EXPECT_EQ("[str(k3)]", ser_.res);
+
+  // But can not replace them.
+  EXPECT_FALSE(Execute("KEYS = {}"));
+  EXPECT_THAT(error_, HasSubstr("Attempt to modify a readonly table"));
 }
 
 TEST_F(InterpreterTest, Robust) {

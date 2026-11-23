@@ -547,7 +547,7 @@ A save becomes the checkpoint depending only on where its output lives:
 
 | Save | Checkpoint? |
 |---|---|
-| Automatic trigger, shard-count change at restart | Yes: an AOF-owned base, `<name>-base-<ckpt>-*` |
+| Automatic trigger, shard-count change at restart | Yes: an AOF-owned base, `appendonly-base-<ckpt>-*` |
 | SAVE, BGSAVE, `--snapshot_cron` to a local file (in `--dir`) | Yes: the manifest references the dump by path |
 | S3 or other cloud storage | No, it stays a plain save |
 
@@ -600,7 +600,7 @@ threshold.
 
 Checkpoints bound the log only while they succeed. `INFO persistence` reports
 `aof_last_bgrewrite_status`, `aof_checkpoint_failures` (consecutive), `aof_current_size` and
-`aof_rewrite_trigger_size`. Each failure is logged, and retried with backoff.
+`aof_rewrite_trigger_size`. Each failure is logged, and the next once-a-second check retries it.
 
 **Open edge cases.**
 - The user deletes or moves the dump that is the current base. Replay fails at the next start.

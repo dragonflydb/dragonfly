@@ -1173,6 +1173,11 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
 
     EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("undeclared"));
 
+    // An invalid flag rejects the whole command, including the valid flags before it.
+    EXPECT_THAT(Run({"script", "flags", sha, "allow-undeclared-keys", "bogus"}),
+                ErrArg("Invalid flag: bogus"));
+    EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("undeclared"));
+
     EXPECT_EQ(Run({"script", "flags", sha, "allow-undeclared-keys"}), "OK");
 
     EXPECT_THAT(Run({"evalsha", sha, "0"}), "works");
@@ -1198,6 +1203,12 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   --!df flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
 )";
+
+  // A rejected SCRIPT FLAGS must not register the script, which would hide the embedded flags.
+  auto sha_buf = Interpreter::FuncSha1(s1);
+  string_view sha{sha_buf.data(), sha_buf.size()};
+  EXPECT_THAT(Run({"script", "flags", sha, "legacy-float", "bogus"}),
+              ErrArg("Invalid flag: bogus"));
 
   // Check eval finds script flags.
   Run({"set", "random-key", "works"});

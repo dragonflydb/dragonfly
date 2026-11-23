@@ -30,8 +30,13 @@ the key has none, otherwise GT or LT alone decides. Redis rejects these combinat
 incompatible.
 
 ## Lua
-We use lua 5.4.4 that has been released in 2022.
+We use lua 5.4.9.
 That means we also support [lua integers](https://github.com/redis/redis/issues/5261).
+
+As in Valkey 7, the global environment is read-only: scripts can not create or change globals, or
+change the library tables (`redis`, `string`, `cjson`, ...). Settings changed through library
+functions, such as `cjson.encode_max_depth()`, still apply to later scripts.
+`cjson.decode` and `cmsgpack.unpack` accept at most 50 levels of nested arrays and objects.
 
 Script replies may nest tables at most 128 levels deep; a deeper table is replaced by the error
 `reached lua stack limit`. A table reached several times, such as a shared or cyclic one, is

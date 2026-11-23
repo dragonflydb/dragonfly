@@ -81,7 +81,7 @@ ReplyStats::ReplyStats(ReplyStats&& other) noexcept {
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 88u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 72u + kSanitizerOverhead);
   ADD(io_write_calls);
   ADD(io_write_bytes);
 
@@ -101,7 +101,7 @@ ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
 #undef ADD
 
 ReplyStats& ReplyStats::operator=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 88u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 72u + kSanitizerOverhead);
 
   if (this == &o) {
     return *this;
