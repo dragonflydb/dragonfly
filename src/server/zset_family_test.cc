@@ -483,6 +483,38 @@ TEST_F(ZSetFamilyTest, ByLex) {
   ASSERT_THAT(resp, RespElementsAre("foo"));
 }
 
+// Sorted sets above zset_max_listpack_entries use SortedMap.
+TEST_F(ZSetFamilyTest, ByLexSentinelBoundsBig) {
+  vector<string> args = {"zadd", "key"};
+  for (unsigned i = 0; i < 200; ++i) {
+    args.push_back("0");
+    args.push_back(absl::StrCat("k", absl::Dec(i, absl::kZeroPad3)));
+  }
+  Run(args);
+
+  for (auto [min, max] : vector<pair<string, string>>{{"-", "-"}, {"[k005", "-"}, {"+", "+"}}) {
+    SCOPED_TRACE(min + " " + max);
+    EXPECT_THAT(Run({"zrangebylex", "key", min, max}), ArrLen(0));
+    EXPECT_THAT(Run({"zrevrangebylex", "key", max, min}), ArrLen(0));
+    EXPECT_EQ(0, CheckedInt({"zlexcount", "key", min, max}));
+    EXPECT_EQ(0, CheckedInt({"zremrangebylex", "key", min, max}));
+  }
+  EXPECT_EQ(200, CheckedInt({"zcard", "key"}));
+}
+
+TEST_F(ZSetFamilyTest, ZAddChUnchangedScoreBig) {
+  vector<string> args = {"zadd", "key"};
+  for (unsigned i = 0; i < 200; ++i) {
+    args.push_back(absl::StrCat(i));
+    args.push_back(absl::StrCat("m", i));
+  }
+  Run(args);
+
+  EXPECT_EQ(0, CheckedInt({"zadd", "key", "ch", "5", "m5"}));
+  EXPECT_EQ(0, CheckedInt({"zadd", "key", "ch", "xx", "5", "m5"}));
+  EXPECT_EQ(1, CheckedInt({"zadd", "key", "ch", "6", "m5", "7", "m7"}));
+}
+
 TEST_F(ZSetFamilyTest, ZRevRangeByLex) {
   Run({
       "zadd", "key",      "0", "alpha", "0", "bar",   "0", "cool", "0", "down",
