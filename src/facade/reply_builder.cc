@@ -524,51 +524,6 @@ void RedisReplyBuilder::SendBulkStrArr(const facade::ArgRange& strs, CollectionT
     SendBulkString(str);
 }
 
-namespace {
-
-// RESP3 nests a [member, score] pair per member, RESP2 sends them flat.
-template <typename Pairs, typename Unpack>
-void SendScoredPairs(RedisReplyBuilder* rb, Pairs arr, bool with_scores, Unpack unpack) {
-  RedisReplyBuilder::ReplyScope scope(rb);
-  rb->StartArray((with_scores && !rb->IsResp3()) ? arr.size() * 2 : arr.size());
-  for (const auto& elem : arr) {
-    const auto [member, score] = unpack(elem);
-    if (with_scores && rb->IsResp3())
-      rb->StartArray(2);
-    rb->SendBulkString(member);
-    if (with_scores)
-      rb->SendDouble(score);
-  }
-}
-
-}  // namespace
-
-void RedisReplyBuilder::SendScoredArray(ScoredArray arr, bool with_scores) {
-  SendScoredPairs(this, arr, with_scores, [](const auto& elem) {
-    return std::pair<std::string_view, double>{elem.first, elem.second};
-  });
-}
-
-void RedisReplyBuilder::SendScoredArray(ScoredViewArray arr, bool with_scores) {
-  SendScoredPairs(this, arr, with_scores, [](const auto& elem) {
-    return std::pair<std::string_view, double>{elem.second, elem.first};
-  });
-}
-
-void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr) {
-  ReplyScope scope(this);
-
-  StartArray(2);
-
-  SendBulkString(arr_label);
-  StartArray(arr.size());
-  for (const auto& [str, score] : arr) {
-    StartArray(2);
-    SendBulkString(str);
-    SendDouble(score);
-  }
-}
-
 template <typename I> void RedisReplyBuilder::SendLongArr(absl::Span<const I> longs) {
   static_assert(std::is_integral_v<I>, "Must use integral type");
   ReplyScope scope(this);

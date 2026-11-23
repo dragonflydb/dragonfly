@@ -286,11 +286,6 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 // Non essential redis reply builder functions implemented on top of the base resp protocol
 class RedisReplyBuilder : public RedisReplyBuilderBase {
  public:
-  using ScoredArray = absl::Span<const std::pair<std::string, double>>;
-
-  // Score first, as zset set operations compute them.
-  using ScoredViewArray = absl::Span<const std::pair<double, std::string_view>>;
-
   RedisReplyBuilder(util::FiberSocketBase* socket) : RedisReplyBuilderBase(socket) {
   }
 
@@ -315,9 +310,6 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = CollectionType::ARRAY);
   template <typename I> void SendLongArr(absl::Span<const I> longs);
 
-  void SendScoredArray(ScoredArray arr, bool with_scores);
-  void SendScoredArray(ScoredViewArray arr, bool with_scores);
-  void SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr);
   void StartArray(unsigned len);
   void SendEmptyArray();
 };

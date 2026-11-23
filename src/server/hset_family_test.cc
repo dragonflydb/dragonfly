@@ -329,19 +329,23 @@ TEST_F(HSetFamilyTest, HincrbyFloat) {
   EXPECT_EQ(Run({"hincrbyfloat", "k", "a", "1.5"}), "4.5");
 }
 
-// The value is replicated with its field TTL, not the increment.
+// The value is replicated with its field TTL in one record, not as the increment.
 TEST_F(HSetFamilyTest, HIncrByFloatJournalsValue) {
   Run({"hsetex", "key", "5", "fl", "1.1"});
+  Run({"hset", "key", "plain", "1"});
+  const auto deadline = Run({"hpexpiretime", "key", "FIELDS", "1", "fl"}).GetVec()[0].GetInt();
   const ShardId sid = Shard("key", shard_set->size());
   JournalRecorder recorder;
   const uint32_t id = StartJournalWithConsumer(&recorder, sid);
   EXPECT_EQ(Run({"hincrbyfloat", "key", "fl", "1.1"}), "2.2");
+  EXPECT_EQ(Run({"hincrbyfloat", "key", "plain", "1"}), "2");
   auto entries = pp_->at(sid)->Await([&] {
     journal::UnregisterConsumer(id);
     return recorder.entries;
   });
-  EXPECT_THAT(entries, ElementsAre(Pair("HSET", HasSubstr("2.2")),
-                                   Pair("HGETEX", AllOf(HasSubstr("PXAT"), HasSubstr("fl")))));
+  EXPECT_THAT(entries, ElementsAre(Pair("HSETEX", AllOf(HasSubstr(absl::StrCat(*deadline)),
+                                                        HasSubstr("FIELDS"), HasSubstr("2.2"))),
+                                   Pair("HSET", HasSubstr("plain"))));
 }
 
 TEST_F(HSetFamilyTest, HincrbyFloatCornerCases) {
@@ -727,22 +731,25 @@ TEST_F(HSetFamilyTest, HSetExRedisFormat) {
   EXPECT_THAT(
       Run({"HSETEX", "k", "PX", absl::StrCat(kMaxExpireDeadlineMs + 1), "FIELDS", "1", "f", "v"}),
       ErrArg("invalid expire time"));
-  // Non-positive inputs normalize to an expired deadline, which HSETEX rejects for every unit.
+  // A zero expiry deletes the field for every unit; a negative one is rejected.
   for (string_view type : {"EX", "PX", "EXAT", "PXAT"}) {
-    for (string_view value : {"0", "-1"}) {
-      EXPECT_THAT(Run({"HSETEX", "k", type, value, "FIELDS", "1", "f", "v"}),
-                  ErrArg("invalid expire time"));
-    }
+    Run({"HSET", "k", "f", "v"});
+    EXPECT_THAT(Run({"HSETEX", "k", type, "0", "FIELDS", "1", "f", "v2"}), IntArg(1));
+    EXPECT_THAT(Run({"HEXISTS", "k", "f"}), IntArg(0));
+    EXPECT_THAT(Run({"HSETEX", "k", type, "-1", "FIELDS", "1", "f", "v"}),
+                ErrArg("invalid expire time"));
   }
   // A non-integer expiry value still reports the integer error (matching Redis).
   EXPECT_THAT(Run({"HSETEX", "k", "EX", "abc", "FIELDS", "1", "f", "v"}),
               ErrArg("value is not an integer or out of range"));
-  // A past EXAT is in the past -> rejected.
-  EXPECT_THAT(Run({"HSETEX", "k", "EXAT", "1", "FIELDS", "1", "f", "v"}),
-              ErrArg("invalid expire time"));
+  // A past deadline, as a lagging replica replays it, deletes the fields and creates no key.
+  Run({"HSET", "k", "f", "v"});
   EXPECT_THAT(
-      Run({"HSETEX", "k", "PXAT", absl::StrCat(TEST_current_time_ms), "FIELDS", "1", "f", "v"}),
-      ErrArg("invalid expire time"));
+      Run({"HSETEX", "k", "PXAT", absl::StrCat(TEST_current_time_ms), "FIELDS", "1", "f", "v2"}),
+      IntArg(1));
+  EXPECT_THAT(Run({"HEXISTS", "k", "f"}), IntArg(0));
+  EXPECT_THAT(Run({"HSETEX", "nokey", "EXAT", "1", "FIELDS", "1", "f", "v"}), IntArg(1));
+  EXPECT_THAT(Run({"EXISTS", "nokey"}), IntArg(0));
 
   // Error: numfields must match the number of field/value pairs.
   EXPECT_THAT(Run({"HSETEX", "k", "FIELDS", "2", "f", "v"}), ErrArg("must match"));
@@ -764,6 +771,22 @@ TEST_F(HSetFamilyTest, HSetExRedisFormat) {
   // FXX needs `only` to exist; it's expired, so the condition fails and the now-empty hash is gone.
   EXPECT_THAT(Run({"HSETEX", "exp", "FXX", "FIELDS", "1", "only", "v2"}), IntArg(0));
   EXPECT_THAT(Run({"EXISTS", "exp"}), IntArg(0));
+}
+
+// Fields deleted by a passed deadline are deleted on replicas too.
+TEST_F(HSetFamilyTest, HSetExPastDeadlineJournalsDelete) {
+  Run({"hset", "key", "a", "1", "b", "2"});
+  const ShardId sid = Shard("key", shard_set->size());
+  JournalRecorder recorder;
+  const uint32_t id = StartJournalWithConsumer(&recorder, sid);
+  EXPECT_THAT(Run({"hsetex", "key", "PXAT", "1", "FIELDS", "1", "a", "x"}), IntArg(1));
+  EXPECT_THAT(Run({"hsetex", "key", "EX", "0", "FIELDS", "1", "b", "y"}), IntArg(1));
+  auto entries = pp_->at(sid)->Await([&] {
+    journal::UnregisterConsumer(id);
+    return recorder.entries;
+  });
+  EXPECT_THAT(entries, ElementsAre(Pair("HDEL", HasSubstr("a")), Pair("DEL", HasSubstr("key"))));
+  EXPECT_THAT(Run({"EXISTS", "key"}), IntArg(0));
 }
 
 TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {

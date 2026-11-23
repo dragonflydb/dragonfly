@@ -533,11 +533,14 @@ TEST_F(StringFamilyTest, IncrByFloat) {
   }
   // Large values print every digit, as printf does.
   if (numeric_limits<long double>::max_exponent10 > 4000) {
-    for (const char* v : {"1e40", "1e400", "-1e4000", "1.18973149535723176502e+4932"}) {
+    for (const char* v : {"1e40", "0x1p240", "1e400", "-1e4000", "1.18973149535723176502e+4932"}) {
       char expected[5000];
       snprintf(expected, sizeof(expected), "%.0Lf", strtold(v, nullptr));
       EXPECT_EQ(Run({"INCRBYFLOAT", absl::StrCat("huge", v), v}), expected) << v;
     }
+
+    // Subnormal values print as zero.
+    EXPECT_EQ(Run({"INCRBYFLOAT", "tiny", "1e-4950"}), "0");
   }
   EXPECT_EQ(Run({"INCRBYFLOAT", "hex", "0x10"}), "16");
   EXPECT_EQ(Run({"EVAL", "return type(redis.call('INCRBYFLOAT', KEYS[1], '1'))", "1", "lua"}),

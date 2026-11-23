@@ -392,7 +392,21 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
   return OpStatus::OK;
 }
 
-void JournalHSetEx(const OpArgs& op_args, ArgSlice args, const PrimeValue& pv);
+// One record keeps the value and its field TTL together, so replicas get both or neither.
+void JournalFieldValue(const OpArgs& op_args, string_view key, string_view field, string_view value,
+                       const PrimeValue& pv) {
+  if (pv.Encoding() == kEncodingStrMap2 && pv.HasMemberExpiration()) {
+    auto* sm = GetStringMap(pv, op_args.db_cntx);
+    if (auto it = sm->Find(field); it != sm->end() && it.HasExpiry()) {
+      const string deadline = absl::StrCat((uint64_t{it.ExpiryTime()} + kMemberExpiryBase) * 1000);
+      const string_view args[] = {key, "PXAT", deadline, "FIELDS", "1", field, value};
+      RecordJournal(op_args, "HSETEX", args);
+      return;
+    }
+  }
+  const string_view args[] = {key, field, value};
+  RecordJournal(op_args, "HSET", args);
+}
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.GetDbSlice();
@@ -452,8 +466,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   // A float result is journaled as the value: replicas may compute with another long double.
   if (is_float && op_args.shard->journal()) {
     add_res.post_updater.Run();
-    const string_view journal_args[] = {key, field, float_val};
-    JournalHSetEx(op_args, journal_args, pv);
+    JournalFieldValue(op_args, key, field, float_val, pv);
   }
   if (is_float)
     *param = std::move(float_val);
@@ -914,6 +927,27 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   return expiry.Apply(flags);
 }
 
+// Fields set with a deadline that has already passed expire at once, so they are deleted.
+OpResult<CbVariant<uint32_t>> OpSetExpired(const OpArgs& op_args, string_view key,
+                                           const ParsedArgs& values,
+                                           const DbSlice::ExpireParams& exp_params) {
+  auto op_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_HASH);
+  if (op_res.status() == OpStatus::KEY_NOTFOUND)
+    return CbVariant<uint32_t>{1u};
+  RETURN_ON_BAD_STATUS(op_res);
+
+  PrimeValue& pv = op_res->it->second;
+  if (pv.IsExternal() && !pv.IsCool())
+    return OpStatus::CANCELLED;  // can't mutate offloaded hashes synchronously
+
+  absl::InlinedVector<string_view, 4> names;
+  for (size_t i = 0; i < values.size(); i += 2)
+    names.push_back(values[i]);
+  const ParsedArgs fields{ArgSlice{names}};
+  FieldExpiry{op_args, key, fields, exp_params, *op_res}.Apply(ExpireFlags::EXPIRE_ALWAYS);
+  return CbVariant<uint32_t>{1u};
+}
+
 // Evaluates the FNX/FXX collective condition of HSETEX.
 //   fnx=true  (FNX): holds only if NONE of the fields exist.
 //   fnx=false (FXX): holds only if ALL of the fields exist.
@@ -962,6 +996,7 @@ struct HSetExParams {
   OpSetParams op_sp;
   ExpiryOption expiry;
   CmdArgParser::Range fields;  // field/value pairs; valid only when the parser has no error.
+  optional<DbSlice::ExpireParams> passed_deadline;
 };
 
 // Field deadlines are stored with second resolution and rounded up, so a maximal relative TTL
@@ -997,9 +1032,11 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name, uint64_t no
 
   if (expiry.value) {
     DbSlice::ExpireParams expire_params{expiry.type, *expiry.value, now_ms};
-    if (!IsValidFieldExpiry(expire_params, expiry.type, now_ms) ||
-        expire_params.IsExpired(now_ms)) {
+    // Zero and past deadlines are allowed, but negative input must not become "expire now".
+    if (*expiry.value < 0 || !IsValidFieldExpiry(expire_params, expiry.type, now_ms)) {
       parser->ReportCustom(InvalidExpireTime(cmd_name));
+    } else if (expire_params.IsExpired(now_ms)) {
+      res.passed_deadline = expire_params;
     } else {
       op_sp.ttl = expire_params.TtlSec(now_ms);
     }
@@ -1047,6 +1084,8 @@ void HSetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
       if (!*cond)
         return CbVariant<uint32_t>{uint32_t(0)};  // condition not met -> nothing set
     }
+    if (parsed.passed_deadline)
+      return OpSetExpired(op_args, key, parsed.fields, *parsed.passed_deadline);
     return OpSet(op_args, key, parsed.fields, op_sp);
   };
 

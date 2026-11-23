@@ -1272,6 +1272,10 @@ TEST_F(ZSetFamilyTest, Resp3) {
   ASSERT_THAT(resp, ArrLen(1));
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("b", DoubleArg(3)));
   EXPECT_THAT(Run({"zpopmin", "y"}), ArrLen(0));
+
+  // ZMPOP names the key and nests a [member, score] pair per member.
+  EXPECT_THAT(Run({"zmpop", "1", "x", "MIN"}),
+              RespElementsAre("x", RespElementsAre(RespElementsAre("b", DoubleArg(2)))));
 }
 
 TEST_F(ZSetFamilyTest, BlockingIsReleased) {

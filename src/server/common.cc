@@ -8,6 +8,7 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_format.h>
 #include <fast_float/fast_float.h>
 
 #include <algorithm>
@@ -162,7 +163,7 @@ bool ParseLongDouble(string_view src, long double* value) {
   char* end = nullptr;
   errno = 0;
   const long double res = strtold(str.c_str(), &end);
-  if (end != str.c_str() + str.size() || isnan(res) || errno == EINVAL ||
+  if (end != str.c_str() + str.size() || isnan(res) ||
       (errno == ERANGE && (isinf(res) || res == 0)))
     return false;
 
@@ -170,73 +171,14 @@ bool ParseLongDouble(string_view src, long double* value) {
   return true;
 }
 
-namespace {
-
-// Prints an integral long double of at least 2^digits with heap arithmetic.
-string FormatLongDoubleInteger(long double value) {
-  constexpr int kDigits = numeric_limits<long double>::digits;
-  int exp = 0;
-  const long double frac = frexpl(fabsl(value), &exp);
-  DCHECK_GT(exp, kDigits);
-  auto mantissa = static_cast<unsigned __int128>(ldexpl(frac, kDigits));
-
-  // |value| is mantissa * 2^shift, kept as little-endian 32-bit limbs.
-  const unsigned shift = exp - kDigits;
-  vector<uint32_t> limbs(shift / 32, 0);
-  for (; mantissa; mantissa >>= 32)
-    limbs.push_back(static_cast<uint32_t>(mantissa));
-  if (const unsigned bits = shift % 32; bits) {
-    uint32_t carry = 0;
-    for (size_t i = shift / 32; i < limbs.size(); ++i) {
-      const uint32_t next = limbs[i] >> (32 - bits);
-      limbs[i] = (limbs[i] << bits) | carry;
-      carry = next;
-    }
-    if (carry)
-      limbs.push_back(carry);
-  }
-
-  // Divides by 10^9 repeatedly; digits come out from the lowest.
-  string res;
-  while (!limbs.empty()) {
-    uint64_t rem = 0;
-    for (size_t i = limbs.size(); i-- > 0;) {
-      const uint64_t cur = (rem << 32) | limbs[i];
-      limbs[i] = static_cast<uint32_t>(cur / 1000000000);
-      rem = cur % 1000000000;
-    }
-    while (!limbs.empty() && limbs.back() == 0)
-      limbs.pop_back();
-    for (int i = 0; i < 9 && (rem || !limbs.empty()); ++i, rem /= 10)
-      res.push_back('0' + rem % 10);
-  }
-  if (value < 0)
-    res.push_back('-');
-  reverse(res.begin(), res.end());
-  return res;
-}
-
-}  // namespace
-
 string FormatLongDouble(long double value) {
   // Where long double is no wider than double, 17 decimals would show only binary noise.
   if constexpr (numeric_limits<long double>::digits <= numeric_limits<double>::digits) {
     char buf[64];
     return facade::RedisReplyBuilder::FormatDouble(static_cast<double>(value), buf, sizeof(buf));
   } else {
-    // Such values are integers, and printf needs up to ~35 KB of fiber stack to print them.
-    if (fabsl(value) >= ldexpl(1, numeric_limits<long double>::digits))
-      return FormatLongDoubleInteger(value);
-
-    char buf[128];
-    const int len = snprintf(buf, sizeof(buf), "%.17Lf", value);
-    string res;
-    if (size_t(len) < sizeof(buf)) {
-      res.assign(buf, len);
-    } else {
-      res.resize(len);
-      snprintf(res.data(), len + 1, "%.17Lf", value);
-    }
+    // printf needs up to ~35 KB of fiber stack for the widest values, StrFormat a few KB.
+    string res = absl::StrFormat("%.17Lf", value);
 
     // The fraction loses its trailing zeros, and the point if nothing is left.
     while (res.back() == '0')
