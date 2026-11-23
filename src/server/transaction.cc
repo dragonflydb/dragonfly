@@ -713,7 +713,7 @@ void Transaction::RunCallback(EngineShard* shard) {
       local_result_ = result;
     } else {
       if (result == OpStatus::OUT_OF_MEMORY) {
-        absl::base_internal::SpinLockHolder lk{&local_result_mu_};
+        absl::base_internal::SpinLockHolder lk{local_result_mu_};
         CHECK(local_result_ == OpStatus::OK || local_result_ == OpStatus::OUT_OF_MEMORY);
         local_result_ = result;
       } else {
@@ -722,7 +722,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     }
   } catch (std::bad_alloc&) {
     LOG_EVERY_T(ERROR, 1) << " out of memory";
-    absl::base_internal::SpinLockHolder lk{&local_result_mu_};
+    absl::base_internal::SpinLockHolder lk{local_result_mu_};
     local_result_ = OpStatus::OUT_OF_MEMORY;
   } catch (std::exception& e) {
     LOG(FATAL) << "Unexpected exception " << e.what();
@@ -1394,7 +1394,7 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   TxQueue* txq = shard->txq();
   bool was_head = txq->Head() == q_pos;
 
-  Transaction* trans = absl::get<Transaction*>(txq->At(q_pos));
+  Transaction* trans = std::get<Transaction*>(txq->At(q_pos));
   DCHECK(trans == this) << txq->size() << ' ' << sd.pq_pos << ' ' << trans->DebugId();
   txq->Remove(q_pos);
 
@@ -1582,7 +1582,7 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
 
     TxQueue* txq = shard->txq();
     DCHECK(!txq->Empty());
-    DCHECK_EQ(absl::get<Transaction*>(txq->At(sd.pq_pos)), this);
+    DCHECK_EQ(std::get<Transaction*>(txq->At(sd.pq_pos)), this);
 
     txq->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;

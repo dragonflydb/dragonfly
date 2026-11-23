@@ -502,10 +502,10 @@ error_code Replica::InitiatePSync() {
 
   RETURN_ON_ERR(ParseReplicationHeader(&io_buf, &repl_header));
 
-  string* token = absl::get_if<string>(&repl_header.fullsync);
+  string* token = std::get_if<string>(&repl_header.fullsync);
   size_t snapshot_size = SIZE_MAX;
   if (!token) {
-    snapshot_size = absl::get<size_t>(repl_header.fullsync);
+    snapshot_size = std::get<size_t>(repl_header.fullsync);
   }
   TouchIoTime();
 
