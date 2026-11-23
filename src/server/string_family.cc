@@ -681,6 +681,7 @@ void CollectKeys(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags
   VLOG_IF(1, total_size > 10000000) << "OpMGet: allocating " << total_size << " bytes";
 
   char* next = response->Reserve(total_size);
+  char* const buf_end = next + total_size;
   bool fetch_mcflag = cmd_flags.return_flags;
   bool fetch_cas = cmd_flags.return_cas;
   const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
@@ -715,7 +716,7 @@ void CollectKeys(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags
       };
       ReadTiered(t->GetDbIndex(), it.key(), value, std::move(cb), shard->tiered_storage());
     } else {
-      value.GetString(next);
+      value.GetString(absl::MakeSpan(next, buf_end));
     }
 
     if (!resp.borrowed) {

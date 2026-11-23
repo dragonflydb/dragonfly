@@ -26,7 +26,6 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "base/pod_array.h"
 #include "core/bloom.h"
 #include "core/cms.h"
 #include "core/cuckoo.h"
@@ -504,7 +503,6 @@ CompactObjBorrowOps g_borrow_ops;
 
 struct TL {
   MemoryResource* local_mr = PMR_NS::get_default_resource();
-  base::PODArray<uint8_t> tmp_buf;
   string tmp_str;
   size_t small_str_bytes;
   PinnedMap pin_map;
@@ -621,7 +619,6 @@ auto CompactObj::GetStatsThreadLocal() -> Stats {
 
 void CompactObj::InitThreadLocal(MemoryResource* mr) {
   tl.local_mr = mr;
-  tl.tmp_buf = base::PODArray<uint8_t>{mr};
   cmn::BorrowedStringOps::Set(&g_borrow_ops);
 }
 
@@ -1209,11 +1206,13 @@ bool CompactObj::TagAllowsEmptyValue() const {
 
 void __attribute__((noinline)) CompactObj::GetString(string* res) const {
   res->resize(Size());
-  GetString(res->data());
+  GetString(absl::MakeSpan(*res));
 }
 
-void CompactObj::GetString(char* dest) const {
+void CompactObj::GetString(absl::Span<char> sp_dest) const {
   CHECK(!IsExternal());
+  DCHECK_GE(sp_dest.size(), Size());
+  auto dest = sp_dest.data();
 
   if (IsInline()) {
     GetStrEncoding().Decode({u_.inline_str, taglen_}, dest);
@@ -1228,7 +1227,7 @@ void CompactObj::GetString(char* dest) const {
 
   if (encoding_) {
     StrEncoding str_encoding = GetStrEncoding();
-    string_view decode_blob = GetEncodedBlob(str_encoding, dest);
+    string_view decode_blob = GetEncodedBlob(str_encoding, sp_dest);
 
     str_encoding.Decode(decode_blob, dest);
     return;
@@ -1313,7 +1312,7 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   return {offset, size_t(u_.ext_ptr.serialized_size)};
 }
 
-string_view CompactObj::GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const {
+string_view CompactObj::GetEncodedBlob(StrEncoding str_encoding, absl::Span<char> dest) const {
   if (taglen_ == LARGE_STR_TAG) {
     return u_.large_str.AsView();
   } else if (IsInline()) {
@@ -1324,15 +1323,11 @@ string_view CompactObj::GetEncodedBlob(StrEncoding str_encoding, char* opt_dest)
 
   CHECK_EQ(taglen_, SMALL_TAG);
   auto& ss = u_.small_str;
-  char* copy_dest = nullptr;
-  if (opt_dest) {
-    // Write to rightmost location of dest buffer to leave some bytes for inline unpacking.
-    size_t decoded_len = str_encoding.DecodedSize(ss.size());
-    copy_dest = opt_dest + (decoded_len - ss.size());
-  } else {
-    tl.tmp_buf.resize(ss.size());
-    copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
-  }
+
+  // Write to rightmost location of dest buffer to leave some bytes for inline unpacking.
+  size_t decoded_len = str_encoding.DecodedSize(ss.size());
+  DCHECK_LE(decoded_len, dest.size());
+  char* copy_dest = dest.data() + (decoded_len - ss.size());
   ss.Get(copy_dest);
   return {copy_dest, ss.size()};
 }
@@ -1403,7 +1398,8 @@ bool CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
 
   if (encoding_) {
     StrEncoding str_encoding = GetStrEncoding();
-    string_view decode_blob = GetEncodedBlob(str_encoding, nullptr);
+    char buf[ascii_len(SmallString::kMaxSize)];  // fits any decoded SmallString
+    string_view decode_blob = GetEncodedBlob(str_encoding, absl::MakeSpan(buf));
 
     if (!str_encoding.DecodeByte(decode_blob, idx, res)) {
       VLOG(1) << "Offset out of bounds for encoded string: " << idx
@@ -1708,21 +1704,33 @@ void CompactObj::EncodeString(string_view str) {
   DCHECK_GT(str.size(), kInlineLen);
   DCHECK_EQ(NONE_ENC, encoding_);
 
+  // A string that may fit a SmallString once packed is packed on the stack, a longer one straight
+  // into a new LargeString, which replaces the current value only if packing succeeds. Binary
+  // strings mostly fail within their first chars, so trying those of a longer one on the stack
+  // first spares it an allocation that would be thrown away.
+  constexpr size_t kProbeLen = 64;
+  uint8_t buf[SmallString::kMaxSize];
+  static_assert(binpacked_len(kProbeLen) <= sizeof(buf));
+
   string_view encoded = str;
   size_t encode_len = binpacked_len(str.size());
   bool is_ascii = false;
 
   if (kUseAsciiEncoding) {
-    if (encode_len <= tl.tmp_buf.capacity()) {
-      tl.tmp_buf.resize(encode_len);
-      is_ascii = detail::ascii_try_pack(str.data(), str.size(), tl.tmp_buf.data()) != 0;
-    } else {
-      // tmp_buf never shrinks, so grow it only for ASCII strings, not for binary ones: pack into a
-      // new buffer and keep it only if packing succeeds.
-      base::PODArray<uint8_t> new_buf(encode_len, tl.tmp_buf.mr());
-      is_ascii = detail::ascii_try_pack(str.data(), str.size(), new_buf.data()) != 0;
-      if (is_ascii)
-        tl.tmp_buf.swap(new_buf);
+    if (encode_len <= sizeof(buf)) {
+      is_ascii = detail::ascii_try_pack(str.data(), str.size(), buf) != 0;
+    } else if (detail::ascii_try_pack(str.data(), kProbeLen, buf)) {
+      detail::LargeString packed{};
+      packed.ReserveString(encode_len, tl.local_mr);
+      is_ascii =
+          detail::ascii_try_pack(str.data(), str.size(), static_cast<uint8_t*>(packed.ptr)) != 0;
+      if (is_ascii) {
+        packed.sz = encode_len;
+        SetMeta(LARGE_STR_TAG, mask_);
+        u_.large_str = packed;
+      } else {
+        packed.Free(tl.local_mr);
+      }
     }
   }
 
@@ -1736,7 +1744,10 @@ void CompactObj::EncodeString(string_view str) {
       encoding_ = ASCII1_ENC;  // str is shorter than its highest bound.
     }
 
-    encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), encode_len};
+    if (encode_len > sizeof(buf))
+      return;  // already packed into its LargeString
+
+    encoded = string_view{reinterpret_cast<char*>(buf), encode_len};
 
     if (encoded.size() <= kInlineLen) {
       SetMeta(encoded.size(), mask_);
