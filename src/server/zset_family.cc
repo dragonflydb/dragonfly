@@ -2736,9 +2736,11 @@ void CmdZRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   OpResult<ScoredArray> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (result) {
-    // Without a count the member is sent alone.
+    // Without a count the member is sent alone; a RESTOREd sorted set can be empty.
     if (is_count)
       SendScoredArray(result.value(), params.with_scores, rb);
+    else if (result->empty())
+      rb->SendNull();
     else
       rb->SendBulkString(result->front().first);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {

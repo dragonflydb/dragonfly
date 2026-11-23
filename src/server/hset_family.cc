@@ -29,6 +29,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
+#include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
@@ -393,11 +394,18 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
 }
 
 // One record keeps the value and its field TTL together, so replicas get both or neither.
-void JournalFieldValue(const OpArgs& op_args, string_view key, string_view field, string_view value,
-                       const PrimeValue& pv) {
+void JournalFieldValue(const OpArgs& op_args, string_view key, string_view field, string_view incr,
+                       string_view value, const PrimeValue& pv) {
   if (pv.Encoding() == kEncodingStrMap2 && pv.HasMemberExpiration()) {
     auto* sm = GetStringMap(pv, op_args.db_cntx);
     if (auto it = sm->Find(field); it != sm->end() && it.HasExpiry()) {
+      // Replicas before VER7 can't parse that HSETEX, so they get the increment, as before.
+      if (DflyCmd::GetMinReplicaVersion() < DflyVersion::VER7) {
+        const string_view args[] = {key, field, incr};
+        RecordJournal(op_args, "HINCRBYFLOAT", args);
+        return;
+      }
+
       const string deadline = absl::StrCat((uint64_t{it.ExpiryTime()} + kMemberExpiryBase) * 1000);
       const string_view args[] = {key, "PXAT", deadline, "FIELDS", "1", field, value};
       RecordJournal(op_args, "HSETEX", args);
@@ -408,7 +416,8 @@ void JournalFieldValue(const OpArgs& op_args, string_view key, string_view field
   RecordJournal(op_args, "HSET", args);
 }
 
-OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
+OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, string_view incr_arg,
+                  IncrByParam* param) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_HASH);
   RETURN_ON_BAD_STATUS(op_res);
@@ -466,7 +475,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   // A float result is journaled as the value: replicas may compute with another long double.
   if (is_float && op_args.shard->journal()) {
     add_res.post_updater.Run();
-    JournalFieldValue(op_args, key, field, float_val, pv);
+    JournalFieldValue(op_args, key, field, incr_arg, float_val, pv);
   }
   if (is_float)
     *param = std::move(float_val);
@@ -1383,7 +1392,7 @@ void CmdHIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
   IncrByParam param{ival};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
+    return OpIncrBy(t->GetOpArgs(shard), key, field, {}, &param);
   };
 
   OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
@@ -1420,7 +1429,7 @@ void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
   IncrByParam param{incr};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
+    return OpIncrBy(t->GetOpArgs(shard), key, field, incr_arg, &param);
   };
 
   OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));

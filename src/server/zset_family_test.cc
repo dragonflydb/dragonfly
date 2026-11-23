@@ -292,6 +292,13 @@ TEST_F(ZSetFamilyTest, ZRandMember) {
   ASSERT_THAT(Run({"ZRandMember", "empty::zset", "3"}), ArrLen(0));
   ASSERT_THAT(Run({"ZRandMember", "empty::zset", "-4"}), ArrLen(0));
 
+  // RESTORE accepts an empty listpack, so a sorted set can exist without members.
+  uint8_t empty_lp[] = {0x11, 0x07, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0b,
+                        0x00, 0xd5, 0xe0, 0xb0, 0xd2, 0x28, 0xdc, 0xda, 0x90};
+  EXPECT_EQ(Run({"restore", "empty::lp", "0", ToSV(empty_lp)}), "OK");
+  EXPECT_THAT(Run({"ZRandMember", "empty::lp"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"ZRandMember", "empty::lp", "3"}), ArrLen(0));
+
   // Test if key does not exist
   ASSERT_THAT(Run({"ZRandMember", "y"}), ArgType(RespExpr::NIL));
   ASSERT_THAT(Run({"ZRandMember", "y", "0"}), ArrLen(0));

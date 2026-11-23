@@ -17,6 +17,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
+#include "server/dflycmd.h"
 #include "server/journal/journal.h"
 #include "server/test_utils.h"
 
@@ -339,13 +340,25 @@ TEST_F(HSetFamilyTest, HIncrByFloatJournalsValue) {
   const uint32_t id = StartJournalWithConsumer(&recorder, sid);
   EXPECT_EQ(Run({"hincrbyfloat", "key", "fl", "1.1"}), "2.2");
   EXPECT_EQ(Run({"hincrbyfloat", "key", "plain", "1"}), "2");
+
+  // A replica before VER7 can't parse that HSETEX, so it gets the increment, as before.
+  DflyCmd* dfly_cmd = service_->server_family().GetDflyCmd();
+  ConnectionState replica;
+  pp_->at(0)->Await([&] {
+    replica.replication_info.repl_session_id = dfly_cmd->CreateSyncSession(&replica).first;
+    dfly_cmd->SetDflyClientVersion(&replica, DflyVersion::VER6);
+  });
+  EXPECT_EQ(Run({"hincrbyfloat", "key", "fl", "1.1"}), "3.3");
+  pp_->at(0)->Await([&] { dfly_cmd->OnClose(replica.replication_info.repl_session_id); });
+
   auto entries = pp_->at(sid)->Await([&] {
     journal::UnregisterConsumer(id);
     return recorder.entries;
   });
   EXPECT_THAT(entries, ElementsAre(Pair("HSETEX", AllOf(HasSubstr(absl::StrCat(*deadline)),
                                                         HasSubstr("FIELDS"), HasSubstr("2.2"))),
-                                   Pair("HSET", HasSubstr("plain"))));
+                                   Pair("HSET", HasSubstr("plain")),
+                                   Pair("HINCRBYFLOAT", HasSubstr("1.1"))));
 }
 
 TEST_F(HSetFamilyTest, HincrbyFloatCornerCases) {
