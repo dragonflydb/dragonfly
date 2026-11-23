@@ -155,6 +155,8 @@ class Interpreter {
   // Same as above with a budget of max_elements.
   void SerializeResult(ObjectExplorer* serializer, size_t max_elements);
 
+  // Resets the stack and drops the redis.call callback, which captures per-request state
+  // and must not outlive the script run (e.g. be invoked from __gc finalizers).
   void ResetStack();
 
   // run gc and returns size of freed memory in bytes
@@ -169,10 +171,6 @@ class Interpreter {
 
   template <typename U> void SetRedisFunc(U&& u) {
     redis_func_ = std::forward<U>(u);
-  }
-
-  void ClearRedisFunc() {
-    redis_func_ = nullptr;
   }
 
   // An empty check disables polling.

@@ -1381,6 +1381,7 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
 
 void Interpreter::ResetStack() {
   lua_settop(lua_, 0);
+  redis_func_ = nullptr;
 }
 
 int64_t Interpreter::RunGC() {

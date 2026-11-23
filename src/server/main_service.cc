@@ -2391,9 +2391,6 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     conn_cntx->conn_state.db_index = caller_db;
     interpreter->ResetStack();
     interpreter->SetAbortCheck(nullptr);
-    // The callback captures cmd_cntx, which must not be reachable after the script ends
-    // (e.g. from __gc finalizers run by SCRIPT FLUSH).
-    interpreter->ClearRedisFunc();
     cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
 
