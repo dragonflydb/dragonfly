@@ -21,6 +21,7 @@ extern "C" {
 #include "absl/flags/declare.h"
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/memory_accounting.h"
 #include "core/overloaded.h"
 #include "core/string_map.h"
 #include "facade/cmd_arg_parser.h"
@@ -310,9 +311,15 @@ auto ExecuteW(Transaction* tx, F&& f,
           return;
         }
 
-        HMapWrap hw{*res.value()->GetMutable()};
-        fut.Resolve(f(hw));
-        hw.Launder(res.value());
+        // This operation might happen outside tx callback, as tiered storage operations are
+        // enqueued. So it needs its own scope to attribute memory changes to hash type.
+        auto mutate = [&] {
+          HMapWrap hw{*res.value()->GetMutable()};
+          auto result = f(hw);
+          hw.Launder(res.value());
+          return result;
+        };
+        fut.Resolve(HashScope(mutate));
       };
 
       es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
@@ -776,11 +783,14 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
         return;
       }
 
-      auto& lw = *res.value()->GetMutable();
       uint32_t created = 0;
-      for (size_t i = 0; i < values.size(); i += 2) {
-        created += lw.Insert(values[i], values[i + 1], skip_existing);
-      }
+      auto mutate_cb = [&] {
+        auto& lw = *res.value()->GetMutable();
+        for (size_t i = 0; i < values.size(); i += 2) {
+          created += lw.Insert(values[i], values[i + 1], skip_existing);
+        }
+      };
+      HashScope(mutate_cb);
       fut.Resolve(SetReply(op_sp, created));
     };
 

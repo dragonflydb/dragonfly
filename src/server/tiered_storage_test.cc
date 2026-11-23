@@ -22,6 +22,7 @@
 #include "server/search/doc_index.h"
 #endif
 #include "core/detail/listpack_wrap.h"
+#include "core/memory_accounting.h"
 #include "server/test_utils.h"
 #include "server/tiering/decoders.h"
 #include "strings/human_readable.h"
@@ -36,6 +37,7 @@ using namespace testing;
 using namespace util;
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
+ABSL_DECLARE_FLAG(bool, enable_scope_based_mem_track);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
@@ -75,6 +77,7 @@ class TieredStorageTest : public BaseFamilyTest {
       SetFlag(&FLAGS_registered_buffer_size, 0);
     }
 
+    SetFlag(&FLAGS_enable_scope_based_mem_track, true);
     SetFlag(&FLAGS_tiered_max_pending_bytes, 32_MB);
     if (GetFlag(FLAGS_tiered_prefix).empty()) {
       // Suffixed with the pid so each test run gets its own directory.
@@ -126,6 +129,9 @@ class TieredStorageTest : public BaseFamilyTest {
       Run(absl::MakeSpan(add));
     }
   }
+
+ private:
+  absl::FlagSaver flag_saver_;
 };
 
 // Test that should run with both modes of "cooling"
@@ -632,6 +638,8 @@ TEST_F(PureDiskTSTest, BackgroundOffloading) {
 
 // Verify correctness of our offloading startegy, offloading values only after second access.
 TEST_F(PureDiskTSTest, OffloadingStrategy) {
+  const auto baseline = GetMetrics().type_attributed_memory_bytes[OBJ_STRING];
+
   // Create value and wait to be offlaoded
   string value = BuildString(3000);
   Run({"set", "key", value});
@@ -642,6 +650,7 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
   EXPECT_EQ(metrics.tiered_stats.total_fetches, 0);
   EXPECT_EQ(metrics.tiered_stats.total_uploads, 0);
   EXPECT_EQ(metrics.tiered_stats.total_stashes, 1);
+  EXPECT_EQ(metrics.type_attributed_memory_bytes[OBJ_STRING], baseline);
 
   // Repeat a few times
   for (size_t i = 1; i <= 3; i++) {
@@ -662,6 +671,7 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
     metrics = GetMetrics();
     EXPECT_EQ(metrics.tiered_stats.total_offloading_stashes, i);
     EXPECT_EQ(metrics.tiered_stats.total_stashes, i + 1);
+    EXPECT_EQ(metrics.type_attributed_memory_bytes[OBJ_STRING], baseline);
   }
 }
 
@@ -1162,6 +1172,7 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
   absl::SetFlag(&FLAGS_tiered_experimental_hash_support, true);
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);  // never upload
   UpdateFromFlags();
+  const auto baseline = GetMetrics().type_attributed_memory_bytes[OBJ_HASH];
 
   static constexpr size_t kNUM = 100;
 
@@ -1238,7 +1249,9 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
     string key = absl::StrCat("k", i);
     EXPECT_THAT(Run({"HSET", key, c_key, "Even more recent value"}), IntArg(0));
     EXPECT_EQ(Run({"HGET", key, c_key}), "Even more recent value");
+    EXPECT_THAT(Run({"DEL", key}), IntArg(1));
   }
+  EXPECT_EQ(GetMetrics().type_attributed_memory_bytes[OBJ_HASH], baseline);
 }
 
 // Regression: the hash field-TTL commands read/mutate the StringMap directly via pv.RObjPtr().
@@ -1641,6 +1654,7 @@ TEST_F(ListNodeTieringTest, LPopStashedNodes) {
 // Node loads and stash completions during a mutating list operation must not be double counted
 // by the key's memory updater.
 TEST_F(ListNodeTieringTest, MemoryAccountingWithStashedNodes) {
+  const auto baseline = GetMetrics().type_attributed_memory_bytes[OBJ_LIST];
   auto list_memory = [this] { return GetMetrics().db_stats[0].memory_usage_by_type[OBJ_LIST]; };
 
   const int kItems = 12;
@@ -1658,6 +1672,7 @@ TEST_F(ListNodeTieringTest, MemoryAccountingWithStashedNodes) {
   Run({"DEL", "mylist"});
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
   EXPECT_EQ(list_memory(), 0u);
+  EXPECT_EQ(GetMetrics().type_attributed_memory_bytes[OBJ_LIST], baseline);
 }
 
 // MOVE a list whose interior nodes are fully offloaded to a different DB.
@@ -1902,6 +1917,11 @@ TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
   auto metrics_after = GetMetrics();
   EXPECT_EQ(metrics_after.tiered_stats.cold_storage_bytes, 0)
       << "Cool queue should be flushed after MEMORY DECOMMIT COOL";
+  for (int type : {int(OBJ_STRING), kUntrackedMemory}) {
+    EXPECT_LT(metrics_after.type_attributed_memory_bytes[type],
+              metrics_before.type_attributed_memory_bytes[type])
+        << type;
+  }
 }
 
 // Ensure that uploading still happens even if the memory if occupied by cool entries.

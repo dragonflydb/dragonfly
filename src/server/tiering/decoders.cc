@@ -9,6 +9,7 @@
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/memory_accounting.h"
 #include "core/qlist.h"
 
 extern "C" {
@@ -93,7 +94,8 @@ std::string* StringDecoder::Write() {
 
 ListpackMapDecoder::~ListpackMapDecoder() {
   if (owned_lw_) {
-    zfree(owned_lw_->GetPointer());
+    // If upload was skipped, debit the hash bytes charged by the read callback.
+    HashScope([&] { zfree(owned_lw_->GetPointer()); });
   }
 }
 
