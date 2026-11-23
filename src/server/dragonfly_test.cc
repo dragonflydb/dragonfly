@@ -57,6 +57,7 @@ using testing::Contains;
 using testing::ElementsAre;
 using testing::HasSubstr;
 using testing::Key;
+using testing::Not;
 using testing::Pair;
 using testing::UnorderedElementsAre;
 
@@ -141,6 +142,21 @@ TEST_F(DflyEngineTest, LuaErrors) {
 
   resp = Run({"eval", "return redis.pcall('incrby', 'foo', 'bar')", "1"});
   EXPECT_THAT(resp, ErrArg("ERR Number of keys can't be greater than number of args"));
+
+  // Precompiled bytecode is rejected.
+  const string kBytecode = "\x1bLua return 1";
+  EXPECT_THAT(Run({"eval", kBytecode, "0"}), ErrArg("attempt to load a binary chunk"));
+  EXPECT_THAT(Run({"script", "load", kBytecode}), ErrArg("attempt to load a binary chunk"));
+
+  // Error stats keys must not grow with errors chosen by scripts.
+  for (string_view msg : {"script-err-1", "script-err-2", "-script-err-3"}) {
+    EXPECT_THAT(Run({"eval", "return {err = ARGV[1]}", "0", msg}),
+                ErrArg(absl::StripPrefix(msg, "-")));
+  }
+  const string errorstats = Run({"INFO", "ERRORSTATS"}).GetString();
+  EXPECT_THAT(errorstats, Not(HasSubstr("script-err")));
+  EXPECT_THAT(errorstats, Not(HasSubstr("some error")));
+  EXPECT_THAT(errorstats, HasSubstr("script_error:"));
 }
 
 TEST_F(DflyEngineTest, EvalStallTimeout) {
