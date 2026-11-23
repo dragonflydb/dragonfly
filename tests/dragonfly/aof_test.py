@@ -530,4 +530,4 @@ async def test_auto_checkpoint_disabled(df_factory: DflyInstanceFactory, tmp_pat
     await asyncio.sleep(3)
     assert "checkpoint 0\n" in read_manifest(tmp_path)
     assert not list(tmp_path.glob("appendonly-base-*"))
-    assert (await client.info("persistence"))["aof_rewrite_trigger_size"] == 0
+    assert (await client.info("persistence"))["aof_rewrite_trigger_size"] == 2**64 - 1

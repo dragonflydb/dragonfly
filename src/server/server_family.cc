@@ -4,7 +4,6 @@
 
 #include "server/server_family.h"
 
-#include <absl/algorithm/container.h>
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>  // for master_replid generation.
 #include <absl/strings/match.h>
@@ -1129,11 +1128,11 @@ string AofSaveError(bool dfs_format, string_view basename) {
   return {};
 }
 
-// The log size at which an automatic checkpoint runs, as in Valkey; 0 if they are disabled.
-size_t AofRewriteTriggerSize(size_t base_size) {
+// The log size at which an automatic checkpoint runs, as in Valkey; never reached if disabled.
+size_t AofRewriteThreshold(size_t base_size) {
   uint32_t percentage = GetFlag(FLAGS_aof_rewrite_percentage);
   if (percentage == 0)
-    return 0;
+    return SIZE_MAX;
   size_t min_size = GetFlag(FLAGS_aof_rewrite_min_size).value;
   return max(min_size, base_size * percentage / 100);
 }
@@ -1415,7 +1414,7 @@ void AppendAofInfo(const SaveInfoData& save_info, const Metrics& m, string* info
   append("aof_current_size", log_size);
   append("aof_base_size", save_info.aof_base_size);
   append("aof_base_file", save_info.aof_base_file);
-  append("aof_rewrite_trigger_size", AofRewriteTriggerSize(save_info.aof_base_size));
+  append("aof_rewrite_trigger_size", AofRewriteThreshold(save_info.aof_base_size));
   append("aof_checkpoint_failures", save_info.aof_checkpoint_failures);
   append("aof_buffered_bytes",
          per_shard_list([](const AofStats& st) { return st.buffered_bytes; }));
@@ -2104,14 +2103,13 @@ void ServerFamily::AofCheckpointScheduling() {
     if (save_info.save_in_progress)
       continue;
 
-    // Each shard fills its own slot.
-    vector<size_t> shard_log_sizes(shard_set->size());
+    atomic_size_t total_log_size = 0;
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
       if (AofStreamer* streamer = shard->aof_streamer(); streamer)
-        shard_log_sizes[shard->shard_id()] = streamer->GetStats().log_size;
+        total_log_size.fetch_add(streamer->GetStats().log_size);
     });
-    size_t log_size = absl::c_accumulate(shard_log_sizes, size_t{0});
-    size_t trigger_size = AofRewriteTriggerSize(save_info.aof_base_size);
+    size_t log_size = total_log_size.load();
+    size_t trigger_size = AofRewriteThreshold(save_info.aof_base_size);
     if (log_size < trigger_size)
       continue;
 
