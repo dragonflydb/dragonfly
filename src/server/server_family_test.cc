@@ -443,7 +443,8 @@ TEST_F(ServerFamilyTest, ClientKillMasterLink) {
   EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "master"}), IntArg(0));
 
   // Unlike REPLICAOF, Replicate keeps the link to an unreachable master; .onion is never resolved.
-  pp_->at(0)->Await([&] { service_->server_family().Replicate("x.onion", "1"); });
+  pp_->at(0)->Await(
+      [&] { service_->server_family().replication_family().Replicate("x.onion", "1"); });
   const string row = Run({"CLIENT", "LIST", "TYPE", "master"}).GetString();
   ASSERT_THAT(row, StartsWith("id="));
   const string id = row.substr(3, row.find(' ') - 3);

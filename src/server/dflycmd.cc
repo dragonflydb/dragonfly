@@ -1111,6 +1111,23 @@ void DflyCmd::CancelReplicas() {
   }
 }
 
+void DflyCmd::ForceReplicasToFullSync() {
+  CancelReplicas();
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    if (shard->journal())
+      journal::ClearBuffer();
+  });
+}
+
+bool DflyCmd::AreAllReplicasInStableSync() const {
+  auto roles = GetReplicasRoleInfo();
+  if (roles.empty()) {
+    return true;
+  }
+  auto match = SyncStateName(DflyCmd::SyncState::STABLE_SYNC);
+  return std::ranges::all_of(roles, [&match](auto& elem) { return elem.state == match; });
+}
+
 void FlowInfo::TryShutdownSocket() {
   // Close socket for clean disconnect.
   if (conn->socket()->IsOpen()) {
