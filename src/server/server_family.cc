@@ -451,7 +451,7 @@ void ClientList(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
         return;
 
       string info = dcon->GetClientInfo(thread_index);
-      absl::base_internal::SpinLockHolder l(&mu);
+      absl::base_internal::SpinLockHolder l(mu);
       client_info.push_back(std::move(info));
     };
 
