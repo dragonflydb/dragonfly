@@ -40,6 +40,9 @@ struct SaveStagesInputs {
   bool is_bg_save_;
   // A local DFS save under --aof: it becomes the AOF checkpoint.
   bool aof_checkpoint_ = false;
+
+  // An automatic checkpoint: its base is owned by the AOF, which deletes it once unused.
+  bool aof_owned_base_ = false;
 };
 
 class RdbSnapshot {
