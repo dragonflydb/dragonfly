@@ -1128,6 +1128,9 @@ string AofSaveError(bool dfs_format, string_view basename) {
   return {};
 }
 
+// How often the checkpoint fiber checks the log against the threshold.
+constexpr auto kAofCheckpointCheckInterval = 1s;
+
 // The log size at which an automatic checkpoint runs, as in Valkey; never reached if disabled.
 size_t AofRewriteThreshold(size_t base_size) {
   uint32_t percentage = GetFlag(FLAGS_aof_rewrite_percentage);
@@ -1309,6 +1312,8 @@ void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
 struct AofBase {
   // Summary file name, empty without a base.
   string file;
+
+  // Bytes on disk of the base: the summary plus every shard file.
   size_t size = 0;
 };
 
@@ -2097,7 +2102,7 @@ void ServerFamily::AofCheckpointScheduling() {
     return;
 
   // A failed checkpoint is simply retried by the next wake.
-  while (!aof_checkpoint_done_.WaitFor(1s)) {
+  while (!aof_checkpoint_done_.WaitFor(kAofCheckpointCheckInterval)) {
     // A running save becomes the checkpoint anyway.
     SaveInfoData save_info = GetLastSaveInfo();
     if (save_info.save_in_progress)
