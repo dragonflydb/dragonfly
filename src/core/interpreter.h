@@ -171,6 +171,10 @@ class Interpreter {
     redis_func_ = std::forward<U>(u);
   }
 
+  void ClearRedisFunc() {
+    redis_func_ = nullptr;
+  }
+
   // An empty check disables polling.
   void SetAbortCheck(AbortCheck check) {
     abort_check_ = std::move(check);

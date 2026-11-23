@@ -1046,6 +1046,19 @@ TEST_F(InterpreterTest, ResetRetiresOnlyBorrowed) {
   EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt, before);
 }
 
+TEST_F(InterpreterTest, ErrorHandlerNotReplaceable) {
+  EXPECT_FALSE(Execute("__redis__err__handler = function() return {} end return 1"));
+  EXPECT_FALSE(Execute("error('boom')"));
+  EXPECT_THAT(error_, testing::HasSubstr("boom"));
+}
+
+TEST_F(InterpreterTest, ClearedRedisFunc) {
+  intptr_.SetRedisFunc([](auto ca) { ca.translator->OnStatus("OK"); });
+  intptr_.ClearRedisFunc();
+  EXPECT_FALSE(Execute("return redis.call('get', 'x')"));
+  EXPECT_THAT(error_, testing::HasSubstr("redis function not defined"));
+}
+
 TEST_F(InterpreterTest, UsedBytesDropsWithInterpreter) {
   const uint64_t before = InterpreterManager::tl_stats().used_bytes;
   InterpreterManager im(2);
