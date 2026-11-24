@@ -712,14 +712,16 @@ TEST_F(CompactObjectTest, AsciiKeyLengthCollision) {
   }
 }
 
-// SetString packs long ascii strings into a new LargeString, which it must free when one turns out
-// to be binary past its first chars. Overwriting every value with every other goes through all
-// transitions, including the reuse of a SMALL_TAG allocation, and checks that nothing leaks.
+// SetString packs long ascii strings into a new LargeString, whose allocation it must reuse or free
+// when one turns out to be binary past its first chars. Overwriting every value with every other
+// goes through all transitions, including the reuse of a SMALL_TAG allocation, and checks that
+// nothing leaks.
 TEST_F(CompactObjectTest, EncodeStringOverwrites) {
   vector<string> values;
 
   // Packed, these lengths are kept inline (17, 18), in a SmallString (up to 291) or a LargeString.
-  for (size_t len : {17, 18, 19, 100, 255, 256, 291, 292, 1000}) {
+  // mimalloc rounds the 263 bytes that 300 chars pack into up to 320, which also fit them raw.
+  for (size_t len : {17, 18, 19, 100, 255, 256, 291, 292, 300, 1000}) {
     string ascii(len, ' ');
     for (size_t i = 0; i < len; i++)
       ascii[i] = 'a' + i % 26;
@@ -754,7 +756,7 @@ TEST_F(CompactObjectTest, EncodeStringOverwrites) {
         auto raw = key.GetRawString();
         ASSERT_EQ(raw[0].size() + raw[1].size(), stored);
       }
-      const bool is_small = stored > 16 && stored <= 255;
+      const bool is_small = stored > 16 && stored <= SmallString::kMaxSize;
       ASSERT_EQ(CompactObj::GetStatsThreadLocal().small_string_bytes - small_bytes,
                 is_small ? key.MallocUsed() : 0);
     }

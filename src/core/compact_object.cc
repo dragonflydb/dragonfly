@@ -1705,9 +1705,8 @@ void CompactObj::EncodeString(string_view str) {
   DCHECK_EQ(NONE_ENC, encoding_);
 
   // A string that may fit a SmallString once packed is packed on the stack, a longer one straight
-  // into a new LargeString, which replaces the current value only if packing succeeds. Binary
-  // strings mostly fail within their first chars, so trying those of a longer one on the stack
-  // first spares it an allocation that would be thrown away.
+  // into a new LargeString. Binary strings mostly fail within their first chars, so trying those
+  // of a longer one on the stack first spares it an allocation that would be thrown away.
   constexpr size_t kProbeLen = 64;
   uint8_t buf[SmallString::kMaxSize];
   static_assert(binpacked_len(kProbeLen) <= sizeof(buf));
@@ -1715,12 +1714,12 @@ void CompactObj::EncodeString(string_view str) {
   string_view encoded = str;
   size_t encode_len = binpacked_len(str.size());
   bool is_ascii = false;
+  detail::LargeString packed{};
 
   if (kUseAsciiEncoding) {
     if (encode_len <= sizeof(buf)) {
       is_ascii = detail::ascii_try_pack(str.data(), str.size(), buf) != 0;
     } else if (detail::ascii_try_pack(str.data(), kProbeLen, buf)) {
-      detail::LargeString packed{};
       packed.ReserveString(encode_len, tl.local_mr);
       is_ascii =
           detail::ascii_try_pack(str.data(), str.size(), static_cast<uint8_t*>(packed.ptr)) != 0;
@@ -1728,8 +1727,6 @@ void CompactObj::EncodeString(string_view str) {
         packed.sz = encode_len;
         SetMeta(LARGE_STR_TAG, mask_);
         u_.large_str = packed;
-      } else {
-        packed.Free(tl.local_mr);
       }
     }
   }
@@ -1770,6 +1767,7 @@ void CompactObj::EncodeString(string_view str) {
   }
 
   SetMeta(LARGE_STR_TAG, mask_);
+  u_.large_str = packed;
   u_.large_str.SetString(encoded, tl.local_mr);
 }
 
