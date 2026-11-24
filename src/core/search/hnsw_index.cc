@@ -226,7 +226,7 @@ struct HnswlibAdapter {
   void DoAdd(const void* data, GlobalDocId id) {
     while (true) {
       try {
-        absl::ReaderMutexLock resize_lock(&resize_mutex_);
+        absl::ReaderMutexLock resize_lock(resize_mutex_);
         world_.addPoint(data, id);
         return;
       } catch (const std::exception& e) {
@@ -242,7 +242,7 @@ struct HnswlibAdapter {
   }
 
   void DoRemove(GlobalDocId id) {
-    absl::ReaderMutexLock resize_lock(&resize_mutex_);
+    absl::ReaderMutexLock resize_lock(resize_mutex_);
     hnswlib::tableint internal_id = 0;
     HnswErrorStatus status = world_.markDelete(id, &internal_id);
     if (status != HnswErrorStatus::SUCCESS) {
@@ -265,7 +265,7 @@ struct HnswlibAdapter {
   void ResizeIfFull() {
     {
       // First check with reader lock to avoid contention.
-      absl::ReaderMutexLock lock(&resize_mutex_);
+      absl::ReaderMutexLock lock(resize_mutex_);
       if (world_.getCurrentElementCount() < world_.getMaxElements() ||
           (world_.allow_replace_deleted_ && world_.getDeletedCount() > 0)) {
         return;
@@ -273,7 +273,7 @@ struct HnswlibAdapter {
     }
     try {
       // Upgrade to writer lock.
-      absl::WriterMutexLock lock(&resize_mutex_);
+      absl::WriterMutexLock lock(resize_mutex_);
       if (world_.getCurrentElementCount() == world_.getMaxElements() &&
           (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
         auto max_elements = world_.getMaxElements();
@@ -301,7 +301,7 @@ struct HnswlibAdapter {
   // caller should fall back to rebuilding the index from the keyspace.
   bool RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-    absl::WriterMutexLock resize_lock(&resize_mutex_);
+    absl::WriterMutexLock resize_lock(resize_mutex_);
 
     if (nodes.empty()) {
       return true;
@@ -420,7 +420,7 @@ struct HnswlibAdapter {
   // Returns false if the node doesn't exist in the index.
   bool UpdateVectorData(GlobalDocId id, const void* data) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-    absl::ReaderMutexLock resize_lock(&resize_mutex_);
+    absl::ReaderMutexLock resize_lock(resize_mutex_);
 
     // Find the internal id for this label
     size_t internal_id;

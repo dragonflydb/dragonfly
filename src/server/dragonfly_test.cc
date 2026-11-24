@@ -838,13 +838,13 @@ class FailedCmdSink : public absl::LogSink {
 
   void Send(const absl::LogEntry& entry) override {
     if (absl::StrContains(entry.text_message(), "failed with reason")) {
-      absl::MutexLock lk(&mu_);
+      absl::MutexLock lk(mu_);
       lines_.emplace_back(entry.text_message());
     }
   }
 
   vector<string> Lines() {
-    absl::MutexLock lk(&mu_);
+    absl::MutexLock lk(mu_);
     return lines_;
   }
 

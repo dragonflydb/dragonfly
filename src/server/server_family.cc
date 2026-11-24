@@ -451,7 +451,7 @@ void ClientList(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
         return;
 
       string info = dcon->GetClientInfo(thread_index);
-      absl::base_internal::SpinLockHolder l(&mu);
+      absl::base_internal::SpinLockHolder l(mu);
       client_info.push_back(std::move(info));
     };
 
@@ -2297,6 +2297,7 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
 
     RdbLoader loader{&service_, load_context, filt_snapshot_id};
     loader.SetShardCount(load_opts->shard_count);
+    loader.set_source_size_provider([file = res.value()] { return file->Size(); });
     if (existing_keys == LoadExistingKeys::kOverride) {
       loader.SetOverrideExistingKeys(true);
     }

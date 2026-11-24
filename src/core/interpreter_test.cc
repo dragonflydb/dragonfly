@@ -1266,6 +1266,19 @@ TEST_F(InterpreterTest, ResetRetiresOnlyBorrowed) {
   EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt, before);
 }
 
+TEST_F(InterpreterTest, ErrorHandlerNotReplaceable) {
+  EXPECT_FALSE(Execute("__redis__err__handler = function() return {} end return 1"));
+  EXPECT_FALSE(Execute("error('boom')"));
+  EXPECT_THAT(error_, testing::HasSubstr("boom"));
+}
+
+TEST_F(InterpreterTest, ClearedRedisFunc) {
+  intptr_.SetRedisFunc([](auto ca) { ca.translator->OnStatus("OK"); });
+  intptr_.ResetStack();
+  EXPECT_FALSE(Execute("return redis.call('get', 'x')"));
+  EXPECT_THAT(error_, testing::HasSubstr("redis function not defined"));
+}
+
 TEST_F(InterpreterTest, UsedBytesDropsWithInterpreter) {
   const uint64_t before = InterpreterManager::tl_stats().used_bytes;
   InterpreterManager im(2);
@@ -1367,7 +1380,6 @@ static void BM_LuaXReadReply(benchmark::State& state) {
   script += ")";
 
   Interpreter intptr;
-  intptr.SetRedisFunc([&](Interpreter::CallArgs ca) { emit_reply(ca.translator); });
   auto sha_buf = Interpreter::FuncSha1(script);
   string_view sha{sha_buf.data(), sha_buf.size()};
   string error;
@@ -1376,6 +1388,7 @@ static void BM_LuaXReadReply(benchmark::State& state) {
   CountingSerializer reply_size, ser;
   emit_reply(&reply_size);
   for (auto _ : state) {
+    intptr.SetRedisFunc([&](Interpreter::CallArgs ca) { emit_reply(ca.translator); });
     CHECK_EQ(Interpreter::RUN_OK, intptr.RunFunction(sha, &error)) << error;
     intptr.SerializeResult(&ser);
     intptr.ResetStack();  // RunFunction leaves the error handler on the stack

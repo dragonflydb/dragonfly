@@ -60,6 +60,42 @@ TEST_F(SortedMapTest, Add) {
   sdsfree(ele);
 }
 
+TEST_F(SortedMapTest, AddUnchangedScore) {
+  ASSERT_TRUE(sm_.InsertNew(3, "a"));
+
+  // An unchanged score is neither added nor updated.
+  auto expect_unchanged = [&](double score, int in_flags) {
+    SCOPED_TRACE(in_flags);
+    int out_flags = -1;
+    double new_score = 0;
+    EXPECT_EQ(1, sm_.AddElem(score, "a", in_flags, &out_flags, &new_score));
+    EXPECT_EQ(0, out_flags);
+    EXPECT_EQ(3, new_score);
+  };
+
+  expect_unchanged(3, ZADD_IN_NONE);
+  expect_unchanged(3, ZADD_IN_XX);
+  expect_unchanged(0, ZADD_IN_INCR);
+}
+
+TEST_F(SortedMapTest, LexRangesWithSentinelBounds) {
+  // Members sort both below and above the sentinels' internal representation.
+  for (string_view member : {"a", "z"}) {
+    for (sds sentinel : {cminstring, cmaxstring}) {
+      SCOPED_TRACE(StrCat(member, " ", sentinel == cminstring ? "-" : "+"));
+      SortedMap map;
+      ASSERT_TRUE(map.InsertNew(1, member));
+      zlexrangespec range{.min = sentinel, .max = sentinel, .minex = 0, .maxex = 0};
+
+      EXPECT_EQ(0, map.LexCount(range));
+      EXPECT_THAT(map.GetLexRange(range, 0, 1, false), testing::IsEmpty());
+      EXPECT_THAT(map.GetLexRange(range, 0, 1, true), testing::IsEmpty());
+      EXPECT_EQ(0, map.DeleteRangeByLex(range));
+      EXPECT_EQ(1, map.GetScore(member));
+    }
+  }
+}
+
 TEST_F(SortedMapTest, Scan) {
   for (unsigned i = 0; i < 972; ++i) {
     sm_.InsertNew(i, StrCat(i));
