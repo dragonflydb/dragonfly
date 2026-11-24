@@ -76,6 +76,18 @@ struct ReplicaRoleInfo {
   uint64_t lsn_lag;
 };
 
+// A full sync loads data past the journal; the AOF needs a new base covering it (aof_state).
+enum class AofRebase : uint8_t {
+  // The base and log cover the data in memory.
+  kNone,
+
+  // A full sync runs, or a node restarted in the middle of one: no checkpoint yet.
+  kSyncing,
+
+  // Stable sync started or the node was promoted: the checkpoint fiber takes the new base.
+  kCheckpoint,
+};
+
 // Contains the state of the last save operation.
 // This object is immutable.
 struct SaveInfoData {
@@ -110,6 +122,11 @@ struct SaveInfoData {
 
   // The base's summary file name, empty without a base.
   std::string aof_base_file;
+
+  AofRebase aof_rebase = AofRebase::kNone;
+
+  // Bumped by every full sync, so a checkpoint that predates the latest one cannot end rebasing.
+  uint64_t aof_rebase_epoch = 0;
 };
 
 // A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
@@ -231,6 +248,14 @@ class ServerFamily {
   // Forces all replicas of this node to perform a full sync by breaking the replication connection
   // with a cancellation error (DfylCmd::CancelReplicas) and resetting the journal
   void ForceReplicasToFullSync();
+
+  // A replica's full sync starts: the loaded data bypasses the journal, so stop appending to the
+  // AOF and mark its manifest rebasing. No-op without --aof.
+  GenericError PauseAofAndEnterRebasing();
+
+  // The replica entered stable sync or was promoted: the checkpoint fiber takes the checkpoint
+  // whose base covers the loaded data. Returns without waiting. No-op unless rebasing.
+  void StartAofRebaseCheckpoint();
 
   absl::Span<facade::Listener* const> GetListeners() const {
     return listeners_;
@@ -373,7 +398,10 @@ class ServerFamily {
   bool save_on_shutdown_{true};
 
   util::fb2::Done schedule_done_;
-  util::fb2::Done aof_checkpoint_done_;
+
+  // Wakes the checkpoint fiber before its next check; what to do comes from SaveInfoData.
+  util::fb2::Done aof_checkpoint_wake_;
+  std::atomic_bool aof_checkpoint_stop_{false};
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 

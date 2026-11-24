@@ -938,14 +938,62 @@ data without the journal must trigger a **re-base**, a checkpoint whose cut also
 `AofStreamer` if needed.
 - `CONFIG SET appendonly yes` (first enable at runtime).
 - Replica full sync (`RdbLoader` bypasses the journal): stop appending and mark the manifest
-  invalid when it starts, re-base when stable sync starts. Stable sync already journals applied
+  `rebasing` when it starts, re-base when stable sync starts. Stable sync already journals applied
   entries on the replica.
 - `DFLY LOAD` and `DEBUG RELOAD`.
 
 Incoming slot migrations need nothing: the target applies them through the journal executor.
 
+#### Crash before the re-base commits
+
+A replica can crash between the start of its full sync and the commit of the base that follows
+it. Its manifest is then `rebasing`. A restart loads nothing: the node starts empty, keeps every
+AOF file and keeps appending paused, so `aof_state` stays `rebasing`. Only `REPLICAOF` (a full
+sync, then the re-base) or `REPLICAOF NO ONE` (the promotion takes the re-base checkpoint) ends
+that state. Until then, writes the node accepts are not logged and do not survive a restart.
+
+#### Future recovery design (proposal)
+
+Not implemented. The old files hold the replica's data from before the sync: a past state of the
+same datastore, which may be newer than the last backup. A restart could load that old dataset,
+log the writes it serves and resume the AOF, and a later full sync would replace the data as
+usual.
+
+The difficulty is telling the old log apart from what the re-base already wrote. The re-base's
+rotation opens the next segment of each shard, and the manifest's chain is every segment from the
+cut onward. Without a fence, replay would continue from the old log into the new master's writes
+and apply them on top of the old dataset. Records dropped while appending was paused usually leave
+an LSN gap that stops replay, but nothing guarantees one: with no writes during the sync, the LSNs
+line up.
+
+Valkey keeps the old manifest during a full sync and writes new data to files it does not name.
+Its manifest lists every file by name, so the next base and its log become part of the
+dataset only when the manifest naming them is written. Two ways to give the manifest the same
+property:
+
+- **List the segments, as Valkey does.** The manifest names each shard's segments instead of
+  only the first one. A rotation adds the new segment before it receives records, which means
+  listing a spare when it is prepared, not in the cut, which must not block. During a full sync,
+  new segments stay unlisted until the base that covers them commits, and startup deletes any
+  segment the manifest does not list. The manifest is then the whole truth, with no rebasing state
+  on disk, at the cost of a format change, a manifest write per prepared spare, and serializing
+  those writes with checkpoint commits.
+- **Record where the old log ends.** When the full sync starts, the manifest is marked
+  `rebasing` and records each shard's last segment of the old log. The chain stays implicit
+  everywhere else. A restart in `rebasing` replays the old log only up to that segment, deletes
+  the segments after it, marks the manifest `active` and resumes appending. Further full syncs
+  before a commit keep the recorded end, since only the data before the first one is complete.
+  It is a single extra field written at the sync start, with a manifest write that already
+  happens.
+
+Recording where the old log ends is preferred, because it fits our rotation model. A rotation
+happens inside a checkpoint's cut, which must not block, so the manifest cannot follow every
+rotation the way Valkey's follows every new file. The boundary needs to be written only once, at
+the sync start, where appending has already stopped and a blocking manifest write is allowed.
+
 **Open edge cases.**
-- What a crash between "manifest invalid" and the re-base means for the replica at startup.
+- Reporting how recent a restarted node's old dataset is, so the control plane can choose between
+  it and the last backup when no other copy remains.
 - Non-default namespaces (journal records carry no namespace).
 
 ### Multi-shard tail atomicity

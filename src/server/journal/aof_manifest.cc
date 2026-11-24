@@ -44,7 +44,15 @@ namespace {
 constexpr string_view kMagic = "dfaof-manifest";
 
 string_view FormatState(AofManifest::State state) {
-  return state == AofManifest::State::kActive ? "active" : "bootstrapping";
+  switch (state) {
+    case AofManifest::State::kBootstrapping:
+      return "bootstrapping";
+    case AofManifest::State::kActive:
+      return "active";
+    case AofManifest::State::kRebasing:
+      return "rebasing";
+  }
+  return "";
 }
 
 // The value of a "<key> <value>" line, or nullopt if the line has another key.
@@ -64,6 +72,8 @@ bool ParseState(string_view val, AofManifest::State* state) {
     *state = AofManifest::State::kActive;
   else if (val == "bootstrapping")
     *state = AofManifest::State::kBootstrapping;
+  else if (val == "rebasing")
+    *state = AofManifest::State::kRebasing;
   else
     return false;
   return true;
