@@ -290,6 +290,8 @@ bool RedisTranslator::HasError() {
   return has_error_;
 }
 
+constexpr const char kErrHandlerKey[] = "__dfly_err_handler";
+
 void RunSafe(lua_State* lua, string_view buf, const char* name) {
   CHECK_EQ(0, luaL_loadbuffer(lua, buf.data(), buf.size(), name));
   int err = lua_pcall(lua, 0, 0, 0);
@@ -420,7 +422,7 @@ void InitLua(lua_State* lua) {
   {
     constexpr char errh_func[] =
         "local dbg = debug\n"
-        "function __redis__err__handler(err)\n"
+        "return function(err)\n"
         "  local i = dbg.getinfo(2,'nSl')\n"
         "  if i and i.what == 'C' then\n"
         "    i = dbg.getinfo(3,'nSl')\n"
@@ -431,7 +433,10 @@ void InitLua(lua_State* lua) {
         "    return err\n"
         "  end\n"
         "end\n";
-    RunSafe(lua, errh_func, "@err_handler_def");
+    // Keep the handler in the registry so scripts can not replace it.
+    CHECK_EQ(0, luaL_loadbuffer(lua, errh_func, sizeof(errh_func) - 1, "@err_handler_def"));
+    CHECK_EQ(0, lua_pcall(lua, 0, 1, 0));
+    lua_setfield(lua, LUA_REGISTRYINDEX, kErrHandlerKey);
   }
 
   {
@@ -869,7 +874,7 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
 
   DCHECK_EQ(40u, sha.size());
 
-  lua_getglobal(lua_, "__redis__err__handler");
+  lua_getfield(lua_, LUA_REGISTRYINDEX, kErrHandlerKey);
   char fname[43];
   fname[0] = 'f';
   fname[1] = '_';
@@ -903,7 +908,8 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
   }
 
   if (err) {
-    *error = lua_tostring(lua_, -1);
+    const char* msg = lua_isstring(lua_, -1) ? lua_tostring(lua_, -1) : nullptr;
+    *error = msg ? msg : "unknown script error";
   }
 
   return err == 0 ? RUN_OK : RUN_ERR;
@@ -1324,6 +1330,7 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
 
 void Interpreter::ResetStack() {
   lua_settop(lua_, 0);
+  redis_func_ = nullptr;
 }
 
 int64_t Interpreter::RunGC() {
