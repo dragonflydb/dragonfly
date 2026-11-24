@@ -195,6 +195,14 @@ TEST_F(SetFamilyTest, SMove) {
   Run({"sadd", "x", "a", "b", "c"});
   Run({"sadd", "y", "c"});
   EXPECT_THAT(Run({"smove", "x", "y", "c"}), IntArg(1));
+
+  Run({"set", "string", "value"});
+  EXPECT_THAT(Run({"smove", "missing", "string", "member"}), IntArg(0));
+  EXPECT_THAT(Run({"smove", "x", "string", "absent-member"}), ErrArg("WRONGTYPE"));
+  EXPECT_THAT(Run({"pexpire", "x", "1"}), IntArg(1));
+  AdvanceTime(2);
+  EXPECT_THAT(Run({"smove", "x", "string", "a"}), IntArg(0));
+  EXPECT_THAT(Run({"get", "string"}), "value");
 }
 
 TEST_F(SetFamilyTest, SPop) {
@@ -352,6 +360,20 @@ TEST_F(SetFamilyTest, SRandMember) {
   // Test wrong arguments: Redis returns a syntax error for extra args (t_set.c srandmemberCommand).
   resp = Run({"SRandMember", "x", "5", "3"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(SetFamilyTest, SRandMemberResp3) {
+  Run({"HELLO", "3"});
+  Run({"SADD", "set", "member"});
+  EXPECT_THAT(Run({"SRANDMEMBER", "set"}), "member");
+  EXPECT_THAT(Run({"SRANDMEMBER", "set", "1"}),
+              AllOf(facade::IsResp3ArrayKind(), RespElementsAre("member")));
+  EXPECT_THAT(Run({"SRANDMEMBER", "set", "-3"}),
+              AllOf(facade::IsResp3ArrayKind(), RespElementsAre("member", "member", "member")));
+  EXPECT_THAT(Run({"SRANDMEMBER", "set", "0"}), AllOf(facade::IsResp3ArrayKind(), ArrLen(0)));
+  EXPECT_THAT(Run({"SRANDMEMBER", "missing", "-3"}), AllOf(facade::IsResp3ArrayKind(), ArrLen(0)));
+  EXPECT_THAT(Run({"SPOP", "set", "1"}),
+              AllOf(facade::IsResp3SetKind(), RespElementsAre("member")));
 }
 
 TEST_F(SetFamilyTest, SMIsMember) {
@@ -811,7 +833,7 @@ TEST_F(SetFamilyTest, SMoveDeletesEmptySourceSet) {
 
   // Single member so the SMOVE lookup touches its bucket and empties the set.
   Run({"saddex", "src", "1", "a"});
-  Run({"sadd", "dst", "x"});
+  Run({"set", "dst", "x"});
   AdvanceTime(2000);
 
   auto resp = Run({"smove", "src", "dst", "a"});

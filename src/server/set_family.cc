@@ -699,7 +699,9 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
       const PrimeValue& pv = res.value()->second;
       SetType st{pv.RObjPtr(), pv.Encoding()};
       found_[0] = IsInSet(t->GetDbContext(), st, member_);
-      DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), k, pv);
+      if (DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), k, pv)) {
+        found_[0] = OpStatus::KEY_NOTFOUND;
+      }
     } else {
       found_[index] = res.status();
     }
@@ -735,7 +737,11 @@ OpResult<unsigned> Mover::Commit(Transaction* t) {
   OpResult<unsigned> res;
   bool noop = false;
 
-  if (found_[0].status() == OpStatus::WRONG_TYPE || found_[1].status() == OpStatus::WRONG_TYPE) {
+  if (found_[0].status() == OpStatus::KEY_NOTFOUND) {
+    res = 0;
+    noop = true;
+  } else if (found_[0].status() == OpStatus::WRONG_TYPE ||
+             found_[1].status() == OpStatus::WRONG_TYPE) {
     res = OpStatus::WRONG_TYPE;
     noop = true;
   } else if (!found_[0].value_or(false)) {
@@ -1387,7 +1393,7 @@ void CmdSRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
       RedisReplyBuilder::ReplyScope scope(rb);
-      rb->StartCollection(vals.size(), CollectionType::SET);
+      rb->StartArray(vals.size());
       for (size_t i = 0; i < vals.size(); ++i) {
         rb->SendBulkString(vals[i]);
       }
