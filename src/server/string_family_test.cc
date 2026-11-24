@@ -11,6 +11,7 @@
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
@@ -515,10 +516,59 @@ TEST_F(StringFamilyTest, IncrByFloat) {
   Run({"SET", "nonum", "11 "});
   resp = Run({"INCRBYFLOAT", "nonum", "1.0"});
   EXPECT_THAT(resp, ErrArg("not a valid float"));
+  EXPECT_THAT(Run({"INCRBYFLOAT", "spaced", " 1"}), ErrArg("not a valid float"));
 
   Run({"SET", "num", "2.566"});
   resp = Run({"INCRBYFLOAT", "num", "1.0"});
   EXPECT_EQ(resp, "3.566");
+
+  // Where long double is wider than double, decimal steps stay exact and the text is fixed point.
+  if (numeric_limits<long double>::digits > numeric_limits<double>::digits) {
+    for (int i = 0; i < 3; ++i)
+      resp = Run({"INCRBYFLOAT", "dec", "0.1"});
+    EXPECT_EQ(resp, "0.3");
+    EXPECT_EQ(Run({"GET", "dec"}), "0.3");
+    EXPECT_EQ(Run({"INCRBYFLOAT", "big", "1e21"}), "1000000000000000000000");
+    EXPECT_EQ(Run({"INCRBYFLOAT", "small", "1e-7"}), "0.0000001");
+  }
+  // Large values print every digit, as printf does.
+  if (numeric_limits<long double>::max_exponent10 > 4000) {
+    for (const char* v : {"1e40", "0x1p240", "1e400", "-1e4000", "1.18973149535723176502e+4932"}) {
+      char expected[5000];
+      snprintf(expected, sizeof(expected), "%.0Lf", strtold(v, nullptr));
+      EXPECT_EQ(Run({"INCRBYFLOAT", absl::StrCat("huge", v), v}), expected) << v;
+    }
+
+    // Subnormal values print as zero.
+    EXPECT_EQ(Run({"INCRBYFLOAT", "tiny", "1e-4950"}), "0");
+  }
+  EXPECT_EQ(Run({"INCRBYFLOAT", "hex", "0x10"}), "16");
+  EXPECT_EQ(Run({"EVAL", "return type(redis.call('INCRBYFLOAT', KEYS[1], '1'))", "1", "lua"}),
+            "string");
+
+  // An infinite increment creates nothing.
+  EXPECT_THAT(Run({"INCRBYFLOAT", "newinf", "inf"}),
+              ErrArg("increment would produce NaN or Infinity"));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "newinf"}));
+  EXPECT_THAT(Run({"INCRBYFLOAT", "newinf", "nan"}), ErrArg("not a valid float"));
+
+  // The reply is the stored text in RESP3 too.
+  Run({"HELLO", "3"});
+  EXPECT_EQ(Run({"INCRBYFLOAT", "num", "1"}), "4.566");
+}
+
+// The value is replicated, not the increment: replicas may compute with another long double.
+TEST_F(StringFamilyTest, IncrByFloatJournalsValue) {
+  Run({"SET", "jf", "1", "EX", "100"});
+  const ShardId sid = Shard("jf", shard_set->size());
+  JournalRecorder recorder;
+  const uint32_t id = StartJournalWithConsumer(&recorder, sid);
+  EXPECT_EQ(Run({"INCRBYFLOAT", "jf", "0.25"}), "1.25");
+  auto entries = pp_->at(sid)->Await([&] {
+    journal::UnregisterConsumer(id);
+    return recorder.entries;
+  });
+  EXPECT_THAT(entries, ElementsAre(Pair("SET", AllOf(HasSubstr("1.25"), HasSubstr("PXAT")))));
 }
 
 TEST_F(StringFamilyTest, RestoreHighTTL) {

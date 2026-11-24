@@ -255,6 +255,15 @@ TEST_F(StreamFamilyTest, XReadGroup) {
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", "0"});
   EXPECT_THAT(resp.GetVec()[0].GetVec()[1], ArrLen(4));
 
+  // A pending entry deleted from the stream comes back with null fields.
+  Run({"xgroup", "create", "mystream", "group2", "0"});
+  Run({"xreadgroup", "group", "group2", "carol", "count", "2", "streams", "mystream", ">"});
+  Run({"xdel", "mystream", "1-0"});
+  resp = Run({"xreadgroup", "group", "group2", "carol", "streams", "mystream", "0"});
+  EXPECT_THAT(resp.GetVec()[0].GetVec()[1],
+              RespElementsAre(RespElementsAre("1-0", ArgType(RespExpr::NIL_ARRAY)),
+                              RespElementsAre("1-1", RespElementsAre("k2", "v2"))));
+
   // now ">" gives nil
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
@@ -1543,9 +1552,9 @@ TEST_F(StreamFamilyTest, XPending) {
 
   // XPending should print 4 entries
   auto resp = Run({"xpending", "foo", "group"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(
-                        IntArg(3), "1-0", "1-2",
-                        RespArray(ElementsAre(RespArray(ElementsAre("alice", IntArg(3))))))));
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(IntArg(3), "1-0", "1-2",
+                                    RespArray(ElementsAre(RespArray(ElementsAre("alice", "3")))))));
 
   resp = Run({"xpending", "foo", "group", "-", "+", "10"});
   EXPECT_THAT(resp,

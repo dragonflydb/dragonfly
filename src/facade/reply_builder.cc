@@ -524,32 +524,6 @@ void RedisReplyBuilder::SendBulkStrArr(const facade::ArgRange& strs, CollectionT
     SendBulkString(str);
 }
 
-void RedisReplyBuilder::SendScoredArray(ScoredArray arr, bool with_scores) {
-  ReplyScope scope(this);
-  StartArray((with_scores && !IsResp3()) ? arr.size() * 2 : arr.size());
-  for (const auto& [str, score] : arr) {
-    if (with_scores && IsResp3())
-      StartArray(2);
-    SendBulkString(str);
-    if (with_scores)
-      SendDouble(score);
-  }
-}
-
-void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr) {
-  ReplyScope scope(this);
-
-  StartArray(2);
-
-  SendBulkString(arr_label);
-  StartArray(arr.size());
-  for (const auto& [str, score] : arr) {
-    StartArray(2);
-    SendBulkString(str);
-    SendDouble(score);
-  }
-}
-
 template <typename I> void RedisReplyBuilder::SendLongArr(absl::Span<const I> longs) {
   static_assert(std::is_integral_v<I>, "Must use integral type");
   ReplyScope scope(this);

@@ -5,15 +5,21 @@
 #include "server/common.h"
 
 #include <absl/random/random.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_format.h>
 #include <fast_float/fast_float.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cmath>
+#include <limits>
 #include <system_error>
 
 extern "C" {
 #include "redis/rdb.h"
+#include "redis/util.h"
 }
 
 #include "base/flags.h"
@@ -146,6 +152,41 @@ bool ParseDouble(string_view src, double* value) {
       return false;
   }
   return true;
+}
+
+bool ParseLongDouble(string_view src, long double* value) {
+  if (src.empty() || src.size() >= MAX_LONG_DOUBLE_CHARS || absl::ascii_isspace(src[0]))
+    return false;
+
+  // strtold needs a terminated string.
+  const string str{src};
+  char* end = nullptr;
+  errno = 0;
+  const long double res = strtold(str.c_str(), &end);
+  if (end != str.c_str() + str.size() || isnan(res) ||
+      (errno == ERANGE && (isinf(res) || res == 0)))
+    return false;
+
+  *value = res;
+  return true;
+}
+
+string FormatLongDouble(long double value) {
+  // Where long double is no wider than double, 17 decimals would show only binary noise.
+  if constexpr (numeric_limits<long double>::digits <= numeric_limits<double>::digits) {
+    char buf[64];
+    return facade::RedisReplyBuilder::FormatDouble(static_cast<double>(value), buf, sizeof(buf));
+  } else {
+    // printf needs up to ~35 KB of fiber stack for the widest values, StrFormat a few KB.
+    string res = absl::StrFormat("%.17Lf", value);
+
+    // The fraction loses its trailing zeros, and the point if nothing is left.
+    while (res.back() == '0')
+      res.pop_back();
+    if (res.back() == '.')
+      res.pop_back();
+    return res == "-0" ? "0" : res;
+  }
 }
 
 OpResult<ScanOpts> ScanOpts::TryFrom(const facade::ParsedArgs& args, bool allow_novalues) {

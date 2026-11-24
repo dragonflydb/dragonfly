@@ -2494,10 +2494,17 @@ TEST_F(GenericFamilyTest, SortGet) {
   resp = Run({"sort", "mylist", "BY", "weight_*", "GET", "#", "GET", "obj_*"});
   ASSERT_THAT(resp, RespElementsAre("3", "third", "2", "second", "1", "first"));
 
-  // Test 6: GET with missing keys (should return empty strings, sorted: 1,2,3)
+  // Test 6: GET of a missing or non-string key returns null, STORE keeps an empty string
   Run({"del", "obj_2"});
   resp = Run({"sort", "mylist", "GET", "obj_*"});
-  ASSERT_THAT(resp, RespElementsAre("first", "", "third"));
+  ASSERT_THAT(resp, RespElementsAre("first", ArgType(RespExpr::NIL), "third"));
+  resp = Run({"sort", "mylist", "BY", "nosort", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("third", ArgType(RespExpr::NIL), "first"));
+  ASSERT_THAT(Run({"sort", "mylist", "GET", "obj_*", "STORE", "result"}), IntArg(3));
+  ASSERT_THAT(Run({"lrange", "result", "0", "-1"}), RespElementsAre("first", "", "third"));
+  Run({"hset", "obj_2", "f", "v"});
+  resp = Run({"sort", "mylist", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("first", ArgType(RespExpr::NIL), "third"));
 
   // Restore obj_2 for further tests
   Run({"set", "obj_2", "second"});

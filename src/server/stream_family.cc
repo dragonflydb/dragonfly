@@ -2755,6 +2755,10 @@ struct StreamReplies {
   void SendRecord(const Record& record) const {
     rb->StartArray(2);
     rb->SendBulkString(StreamIdRepr(record.id));
+
+    // Every stream entry has fields, so none means a pending entry deleted from the stream.
+    if (record.kv_arr.empty())
+      return rb->SendNullArray();
     rb->StartArray(record.kv_arr.size() * 2);
     for (const auto& k_v : record.kv_arr) {
       rb->SendBulkString(k_v.first);
@@ -4015,7 +4019,7 @@ void CmdXPending(CmdArgParser parser, CommandContext* cmd_cntx) {
       for (auto& [consumer_name, count] : res.consumer_list) {
         rb->StartArray(2);
         rb->SendBulkString(consumer_name);
-        rb->SendLong(count);
+        rb->SendBulkString(absl::StrCat(count));
       }
     } else {
       rb->SendNull();       // min id

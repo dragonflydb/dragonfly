@@ -17,6 +17,9 @@ extern "C" {
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
+#include "server/dflycmd.h"
+#include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -313,14 +316,71 @@ TEST_F(HSetFamilyTest, HincrbyFloat) {
   for (size_t i = 0; i < 500; ++i) {
     EXPECT_EQ(Run({"hget", "k", absl::StrCat("v", i)}), "1.5");
   }
+
+  // Where long double is wider than double, decimal steps stay exact.
+  if (numeric_limits<long double>::digits > numeric_limits<double>::digits) {
+    for (int i = 0; i < 3; ++i)
+      Run({"hincrbyfloat", "k", "dec", "0.1"});
+    EXPECT_EQ(Run({"hget", "k", "dec"}), "0.3");
+  }
+
+  // The reply is the stored text in scripts and in RESP3 too.
+  EXPECT_EQ(Run({"eval", "return type(redis.call('HINCRBYFLOAT', KEYS[1], 'f', '1'))", "1", "lua"}),
+            "string");
+  Run({"hello", "3"});
+  EXPECT_EQ(Run({"hincrbyfloat", "k", "a", "1.5"}), "4.5");
+}
+
+// The value is replicated with its field TTL in one record, not as the increment.
+TEST_F(HSetFamilyTest, HIncrByFloatJournalsValue) {
+  Run({"hsetex", "key", "5", "fl", "1.1"});
+  Run({"hset", "key", "plain", "1"});
+  const auto deadline = Run({"hpexpiretime", "key", "FIELDS", "1", "fl"}).GetVec()[0].GetInt();
+  const ShardId sid = Shard("key", shard_set->size());
+  JournalRecorder recorder;
+  const uint32_t id = StartJournalWithConsumer(&recorder, sid);
+  EXPECT_EQ(Run({"hincrbyfloat", "key", "fl", "1.1"}), "2.2");
+  EXPECT_EQ(Run({"hincrbyfloat", "key", "plain", "1"}), "2");
+
+  // A replica before VER7 can't parse that HSETEX, so it gets the legacy form instead.
+  DflyCmd* dfly_cmd = service_->server_family().GetDflyCmd();
+  ConnectionState replica;
+  pp_->at(0)->Await([&] {
+    replica.replication_info.repl_session_id = dfly_cmd->CreateSyncSession(&replica).first;
+    dfly_cmd->SetDflyClientVersion(&replica, DflyVersion::VER6);
+  });
+  EXPECT_EQ(Run({"hincrbyfloat", "key", "fl", "1.1"}), "3.3");
+  pp_->at(0)->Await([&] { dfly_cmd->OnClose(replica.replication_info.repl_session_id); });
+
+  auto entries = pp_->at(sid)->Await([&] {
+    journal::UnregisterConsumer(id);
+    return recorder.entries;
+  });
+  ASSERT_THAT(entries, ElementsAre(Pair("HSETEX", AllOf(HasSubstr(absl::StrCat(*deadline)),
+                                                        HasSubstr("FIELDS"), HasSubstr("2.2"))),
+                                   Pair("HSET", HasSubstr("plain")), Pair("HSETEX", _)));
+  io::BytesSource source{entries.back().second};
+  JournalReader reader{&source, 0};
+  journal::ParsedEntry entry;
+  ASSERT_FALSE(reader.ReadEntry(&entry));
+
+  // The seconds left of the stored deadline, which old replicas add to their current second.
+  const auto ttl_sec = *deadline / 1000 - TEST_current_time_ms / 1000;
+  EXPECT_THAT(entry.ToString(), HasSubstr(absl::StrCat("cmd='HSETEX key ", ttl_sec, " fl 3.3'")));
 }
 
 TEST_F(HSetFamilyTest, HincrbyFloatCornerCases) {
   Run({"hset", "k", "mhv", "-1.8E+308", "phv", "1.8E+308", "nd", "-+-inf", "+inf", "+inf", "nan",
        "nan", "-inf", "-inf"});
-  // we don't support long doubles, so in all next cases we should return errors
-  EXPECT_THAT(Run({"hincrbyfloat", "k", "mhv", "-1"}), ErrArg("ERR hash value is not a float"));
-  EXPECT_THAT(Run({"hincrbyfloat", "k", "phv", "1"}), ErrArg("ERR hash value is not a float"));
+
+  // Values past the double range work where long double holds them.
+  if (numeric_limits<long double>::max_exponent10 > 308) {
+    EXPECT_THAT(Run({"hincrbyfloat", "k", "mhv", "-1"}), ArgType(RespExpr::STRING));
+    EXPECT_THAT(Run({"hincrbyfloat", "k", "phv", "1"}), ArgType(RespExpr::STRING));
+  } else {
+    EXPECT_THAT(Run({"hincrbyfloat", "k", "mhv", "-1"}), ErrArg("ERR hash value is not a float"));
+    EXPECT_THAT(Run({"hincrbyfloat", "k", "phv", "1"}), ErrArg("ERR hash value is not a float"));
+  }
   EXPECT_THAT(Run({"hincrbyfloat", "k", "nd", "1"}), ErrArg("ERR hash value is not a float"));
   EXPECT_THAT(Run({"hincrbyfloat", "k", "+inf", "1"}),
               ErrArg("increment would produce NaN or Infinity"));
@@ -692,22 +752,25 @@ TEST_F(HSetFamilyTest, HSetExRedisFormat) {
   EXPECT_THAT(
       Run({"HSETEX", "k", "PX", absl::StrCat(kMaxExpireDeadlineMs + 1), "FIELDS", "1", "f", "v"}),
       ErrArg("invalid expire time"));
-  // Non-positive inputs normalize to an expired deadline, which HSETEX rejects for every unit.
+  // A zero expiry deletes the field for every unit; a negative one is rejected.
   for (string_view type : {"EX", "PX", "EXAT", "PXAT"}) {
-    for (string_view value : {"0", "-1"}) {
-      EXPECT_THAT(Run({"HSETEX", "k", type, value, "FIELDS", "1", "f", "v"}),
-                  ErrArg("invalid expire time"));
-    }
+    Run({"HSET", "k", "f", "v"});
+    EXPECT_THAT(Run({"HSETEX", "k", type, "0", "FIELDS", "1", "f", "v2"}), IntArg(1));
+    EXPECT_THAT(Run({"HEXISTS", "k", "f"}), IntArg(0));
+    EXPECT_THAT(Run({"HSETEX", "k", type, "-1", "FIELDS", "1", "f", "v"}),
+                ErrArg("invalid expire time"));
   }
   // A non-integer expiry value still reports the integer error (matching Redis).
   EXPECT_THAT(Run({"HSETEX", "k", "EX", "abc", "FIELDS", "1", "f", "v"}),
               ErrArg("value is not an integer or out of range"));
-  // A past EXAT is in the past -> rejected.
-  EXPECT_THAT(Run({"HSETEX", "k", "EXAT", "1", "FIELDS", "1", "f", "v"}),
-              ErrArg("invalid expire time"));
+  // A past deadline, as a lagging replica replays it, deletes the fields and creates no key.
+  Run({"HSET", "k", "f", "v"});
   EXPECT_THAT(
-      Run({"HSETEX", "k", "PXAT", absl::StrCat(TEST_current_time_ms), "FIELDS", "1", "f", "v"}),
-      ErrArg("invalid expire time"));
+      Run({"HSETEX", "k", "PXAT", absl::StrCat(TEST_current_time_ms), "FIELDS", "1", "f", "v2"}),
+      IntArg(1));
+  EXPECT_THAT(Run({"HEXISTS", "k", "f"}), IntArg(0));
+  EXPECT_THAT(Run({"HSETEX", "nokey", "EXAT", "1", "FIELDS", "1", "f", "v"}), IntArg(1));
+  EXPECT_THAT(Run({"EXISTS", "nokey"}), IntArg(0));
 
   // Error: numfields must match the number of field/value pairs.
   EXPECT_THAT(Run({"HSETEX", "k", "FIELDS", "2", "f", "v"}), ErrArg("must match"));
@@ -729,6 +792,22 @@ TEST_F(HSetFamilyTest, HSetExRedisFormat) {
   // FXX needs `only` to exist; it's expired, so the condition fails and the now-empty hash is gone.
   EXPECT_THAT(Run({"HSETEX", "exp", "FXX", "FIELDS", "1", "only", "v2"}), IntArg(0));
   EXPECT_THAT(Run({"EXISTS", "exp"}), IntArg(0));
+}
+
+// Fields deleted by a passed deadline are deleted on replicas too.
+TEST_F(HSetFamilyTest, HSetExPastDeadlineJournalsDelete) {
+  Run({"hset", "key", "a", "1", "b", "2"});
+  const ShardId sid = Shard("key", shard_set->size());
+  JournalRecorder recorder;
+  const uint32_t id = StartJournalWithConsumer(&recorder, sid);
+  EXPECT_THAT(Run({"hsetex", "key", "PXAT", "1", "FIELDS", "1", "a", "x"}), IntArg(1));
+  EXPECT_THAT(Run({"hsetex", "key", "EX", "0", "FIELDS", "1", "b", "y"}), IntArg(1));
+  auto entries = pp_->at(sid)->Await([&] {
+    journal::UnregisterConsumer(id);
+    return recorder.entries;
+  });
+  EXPECT_THAT(entries, ElementsAre(Pair("HDEL", HasSubstr("a")), Pair("DEL", HasSubstr("key"))));
+  EXPECT_THAT(Run({"EXISTS", "key"}), IntArg(0));
 }
 
 TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {
@@ -1263,7 +1342,8 @@ TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
 // Before the fix, the key was left in the DB with an empty listpack, causing HRANDFIELD
 // to crash with CHECK(lplen > 0 && lplen % 2 == 0).
 TEST_F(HSetFamilyTest, HIncrByFloatNaNDoesNotCreateKey) {
-  EXPECT_THAT(Run({"HINCRBYFLOAT", "key", "field", "nan"}),
+  EXPECT_THAT(Run({"HINCRBYFLOAT", "key", "field", "nan"}), ErrArg("not a valid float"));
+  EXPECT_THAT(Run({"HINCRBYFLOAT", "key", "field", "inf"}),
               ErrArg("increment would produce NaN or Infinity"));
   EXPECT_EQ(0, CheckedInt({"EXISTS", "key"}));
   EXPECT_THAT(Run({"HRANDFIELD", "key"}), ArgType(RespExpr::NIL));
