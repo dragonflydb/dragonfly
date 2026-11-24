@@ -6,6 +6,7 @@
 #include <functional>
 #include <source_location>
 #include <system_error>
+#include <tuple>
 
 extern "C" {
 #include "redis/rdb.h"
@@ -442,6 +443,7 @@ class RdbLoader : protected RdbLoaderBase {
     bool is_sticky = false;
     bool has_mc_flags = false;
     uint32_t mc_flags = 0;
+    uint32_t stream_id = 0;
 
     LoadConfig load_config;
 
@@ -556,10 +558,8 @@ class RdbLoader : protected RdbLoaderBase {
   // A free pool of allocated unused items.
   base::MPSCIntrusiveQueue<Item> item_queue_;
 
-  // Map of currently chunked big values, keyed by (db index, key) to avoid
-  // collisions when the same key name exists in different databases, and we
-  // receive chunked data from >1 db with the same key name
-  using ChunkedKey = std::pair<DbIndex, std::string>;
+  // Key chunked values by database, key, and tagged stream.
+  using ChunkedKey = std::tuple<DbIndex, std::string, uint32_t>;
   std::unordered_map<ChunkedKey, std::unique_ptr<PrimeValue>, absl::Hash<ChunkedKey>> now_chunked_;
   base::SpinLock now_chunked_mu_;  // guards now_chunked_
 
