@@ -19,6 +19,7 @@ extern "C" {
 #include "facade/facade_test.h"
 #include "server/dflycmd.h"
 #include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -341,7 +342,7 @@ TEST_F(HSetFamilyTest, HIncrByFloatJournalsValue) {
   EXPECT_EQ(Run({"hincrbyfloat", "key", "fl", "1.1"}), "2.2");
   EXPECT_EQ(Run({"hincrbyfloat", "key", "plain", "1"}), "2");
 
-  // A replica before VER7 can't parse that HSETEX, so it gets the increment, as before.
+  // A replica before VER7 can't parse that HSETEX, so it gets the legacy form instead.
   DflyCmd* dfly_cmd = service_->server_family().GetDflyCmd();
   ConnectionState replica;
   pp_->at(0)->Await([&] {
@@ -355,10 +356,17 @@ TEST_F(HSetFamilyTest, HIncrByFloatJournalsValue) {
     journal::UnregisterConsumer(id);
     return recorder.entries;
   });
-  EXPECT_THAT(entries, ElementsAre(Pair("HSETEX", AllOf(HasSubstr(absl::StrCat(*deadline)),
+  ASSERT_THAT(entries, ElementsAre(Pair("HSETEX", AllOf(HasSubstr(absl::StrCat(*deadline)),
                                                         HasSubstr("FIELDS"), HasSubstr("2.2"))),
-                                   Pair("HSET", HasSubstr("plain")),
-                                   Pair("HINCRBYFLOAT", HasSubstr("1.1"))));
+                                   Pair("HSET", HasSubstr("plain")), Pair("HSETEX", _)));
+  io::BytesSource source{entries.back().second};
+  JournalReader reader{&source, 0};
+  journal::ParsedEntry entry;
+  ASSERT_FALSE(reader.ReadEntry(&entry));
+
+  // The seconds left of the stored deadline, which old replicas add to their current second.
+  const auto ttl_sec = *deadline / 1000 - TEST_current_time_ms / 1000;
+  EXPECT_THAT(entry.ToString(), HasSubstr(absl::StrCat("cmd='HSETEX key ", ttl_sec, " fl 3.3'")));
 }
 
 TEST_F(HSetFamilyTest, HincrbyFloatCornerCases) {

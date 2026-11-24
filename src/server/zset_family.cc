@@ -1568,6 +1568,9 @@ OpResult<ScoredArray> OpRandMember(int count, const ZSetFamily::RangeParams& par
   PrimeValue& pv = const_cast<PrimeValue&>(it.value()->second);
 
   const std::size_t size = pv.Size();
+  if (size == 0)
+    return ScoredArray{};  // RESTORE can create a sorted set without members
+
   const std::size_t picks_count =
       count >= 0 ? std::min(static_cast<std::size_t>(count), size) : std::abs(count);
 

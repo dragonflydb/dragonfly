@@ -298,6 +298,7 @@ TEST_F(ZSetFamilyTest, ZRandMember) {
   EXPECT_EQ(Run({"restore", "empty::lp", "0", ToSV(empty_lp)}), "OK");
   EXPECT_THAT(Run({"ZRandMember", "empty::lp"}), ArgType(RespExpr::NIL));
   EXPECT_THAT(Run({"ZRandMember", "empty::lp", "3"}), ArrLen(0));
+  EXPECT_THAT(Run({"ZRandMember", "empty::lp", "-2"}), ArrLen(0));
 
   // Test if key does not exist
   ASSERT_THAT(Run({"ZRandMember", "y"}), ArgType(RespExpr::NIL));
