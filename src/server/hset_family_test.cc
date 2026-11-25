@@ -332,6 +332,8 @@ TEST_F(HSetFamilyTest, HincrbyFloat) {
 }
 
 // The value is replicated with its field TTL in one record, not as the increment.
+// Not on macOS: arm64 long double is no wider than double, so 2.2 + 1.1 is not "3.3" there.
+#ifndef __APPLE__
 TEST_F(HSetFamilyTest, HIncrByFloatJournalsValue) {
   Run({"hsetex", "key", "5", "fl", "1.1"});
   Run({"hset", "key", "plain", "1"});
@@ -368,6 +370,7 @@ TEST_F(HSetFamilyTest, HIncrByFloatJournalsValue) {
   const auto ttl_sec = *deadline / 1000 - TEST_current_time_ms / 1000;
   EXPECT_THAT(entry.ToString(), HasSubstr(absl::StrCat("cmd='HSETEX key ", ttl_sec, " fl 3.3'")));
 }
+#endif
 
 TEST_F(HSetFamilyTest, HincrbyFloatCornerCases) {
   Run({"hset", "k", "mhv", "-1.8E+308", "phv", "1.8E+308", "nd", "-+-inf", "+inf", "+inf", "nan",
