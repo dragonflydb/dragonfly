@@ -712,6 +712,62 @@ TEST_F(CompactObjectTest, AsciiKeyLengthCollision) {
   }
 }
 
+// SetString packs long ascii strings into a new LargeString, whose allocation it must reuse or free
+// when one turns out to be binary past its first chars. Overwriting every value with every other
+// goes through all transitions, including the reuse of a SMALL_TAG allocation, and checks that
+// nothing leaks.
+TEST_F(CompactObjectTest, EncodeStringOverwrites) {
+  vector<string> values;
+
+  // Packed, these lengths are kept inline (17, 18), in a SmallString (up to 291) or a LargeString.
+  // mimalloc rounds the 263 bytes that 300 chars pack into up to 320, which also fit them raw.
+  for (size_t len : {17, 18, 19, 100, 255, 256, 291, 292, 300, 1000}) {
+    string ascii(len, ' ');
+    for (size_t i = 0; i < len; i++)
+      ascii[i] = 'a' + i % 26;
+    values.push_back(ascii);
+
+    // Not ascii at the start, in the middle and at the very end.
+    for (size_t pos : {size_t{0}, len / 2, len - 1}) {
+      values.push_back(ascii);
+      values.back()[pos] = char(200);
+    }
+  }
+
+  auto* mr = static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  const size_t mr_used = mr->used();
+  const size_t small_used = SmallString::UsedThreadLocal();
+  const size_t small_bytes = CompactObj::GetStatsThreadLocal().small_string_bytes;
+
+  CompactKey key;
+  for (size_t i = 0; i < values.size(); i++) {
+    for (size_t j = 0; j < values.size(); j++) {
+      SCOPED_TRACE(absl::StrCat(i, " -> ", j));
+      const string& val = values[j];
+      key.SetString(values[i]);
+      key.SetString(val);
+      ASSERT_EQ(key.ToString(), val);
+      ASSERT_TRUE(key == val);
+
+      // ascii is stored packed, the rest verbatim, and only a SmallString counts as small bytes.
+      const bool ascii = val.find(char(200)) == string::npos;
+      const size_t stored = ascii ? detail::binpacked_len(val.size()) : val.size();
+      if (stored > 16) {
+        auto raw = key.GetRawString();
+        ASSERT_EQ(raw[0].size() + raw[1].size(), stored);
+      }
+      const bool is_small = stored > 16 && stored <= SmallString::kMaxSize;
+      ASSERT_EQ(CompactObj::GetStatsThreadLocal().small_string_bytes - small_bytes,
+                is_small ? key.MallocUsed() : 0);
+    }
+  }
+
+  key.Reset();
+  EXPECT_EQ(mr->used(), mr_used);
+  EXPECT_EQ(SmallString::UsedThreadLocal(), small_used);
+  EXPECT_EQ(CompactObj::GetStatsThreadLocal().small_string_bytes, small_bytes);
+}
+
 TEST_F(CompactObjectTest, AsciiPackByte) {
   // Test ascii_pack_byte and ascii_unpack_byte for correctness.
   for (size_t len : {8, 16, 24, 31, 32, 33, 64, 100}) {
@@ -1186,7 +1242,15 @@ TEST_F(CompactObjectTest, ExternalRepresentation) {
 TEST_F(CompactObjectTest, AsanTriggerReadOverflow) {
   cobj_.SetString(string(32, 'a'));
   auto dest = make_unique<char[]>(32);
-  cobj_.GetString(dest.get());
+  cobj_.GetString(absl::MakeSpan(dest.get(), 32));
+}
+
+TEST_F(CompactObjectTest, GetStringChecksDestSize) {
+  cobj_.SetString(string(32, 'a'));
+
+  // One byte more than the span, so that release builds, which skip the check, stay in bounds.
+  char dest[32];
+  EXPECT_DEBUG_DEATH(cobj_.GetString(absl::MakeSpan(dest, 31)), "dest.size");
 }
 
 TEST_F(CompactObjectTest, lpGetInteger) {
@@ -1241,8 +1305,8 @@ TEST_F(CompactObjectTest, GetByteAtOffset) {
   }
 
   //  ASCII string with SMALL_TAG
-  {
-    string s(64, 'x');
+  for (size_t len : {64, 291}) {  // 291 is the longest one
+    string s(len, 'x');
     for (size_t i = 0; i < s.size(); ++i)
       s[i] = 'a' + (i % 26);
     cobj_.SetString(s);

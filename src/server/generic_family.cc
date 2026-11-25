@@ -738,7 +738,7 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
 bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, ScanResult* res) {
   size_t len = key.Size();
   char* buffer = res->AppendBuffer(len);
-  key.GetString(buffer);
+  key.GetString(absl::MakeSpan(buffer, len));
   if (opts.matcher && !opts.matcher->Matches(string_view{buffer, len})) {
     res->UndoAppend(buffer);
     return false;

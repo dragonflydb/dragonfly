@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/base/internal/endian.h>
+#include <absl/types/span.h>
 
 #include <memory>
 #include <optional>
@@ -347,6 +348,7 @@ class CompactObj {
 
   void GetString(std::string* res) const;
 
+  // `str` must not point into the storage of this object.
   void SetString(std::string_view str);
   void ReserveString(size_t size);
   void AppendString(std::string_view str);
@@ -397,7 +399,7 @@ class CompactObj {
   CuckooFilter* GetCuckooFilter() const;
 
   // dest must have at least Size() bytes available
-  void GetString(char* dest) const;
+  void GetString(absl::Span<char> dest) const;
 
   bool IsExternal() const {
     return taglen_ == EXTERNAL_TAG;
@@ -519,8 +521,8 @@ class CompactObj {
   static CompactObjType TypeForTag(uint8_t tag);
 
   // Returns a string_view corresponding to the serialized encoded blob.
-  // If opt_dest is provided, it may be used to decode directly into the destination buffer.
-  std::string_view GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const;
+  // The blob may be copied into dest to decode it in place, so dest must fit the decoded string.
+  std::string_view GetEncodedBlob(StrEncoding str_encoding, absl::Span<char> dest) const;
 
  protected:
   void EncodeString(std::string_view str);

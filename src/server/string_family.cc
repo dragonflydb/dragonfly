@@ -694,6 +694,7 @@ void CollectKeys(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags
 
     // Borrow, copy to buffer or trigger tiered read that will eventually write to buffer.
     const PrimeValue& value = it->second;
+    size_t size = value.Size();
     if (items[i].borrowed) {
       resp.borrowed = std::move(items[i].borrowed);
       if (!resp.borrowed->IsEncoded())
@@ -715,11 +716,10 @@ void CollectKeys(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags
       };
       ReadTiered(t->GetDbIndex(), it.key(), value, std::move(cb), shard->tiered_storage());
     } else {
-      value.GetString(next);
+      value.GetString(absl::MakeSpan(next, size));
     }
 
     if (!resp.borrowed) {
-      size_t size = value.Size();
       resp.value = string_view(next, size);
       next += size;
     }
