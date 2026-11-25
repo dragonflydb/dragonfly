@@ -1934,9 +1934,8 @@ void ServerFamily::LoadFromSnapshot() {
       auto future = Load(load_path, LoadExistingKeys::kFail);
       load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
           [future, scope = std::move(*scope)]() mutable {
-            // Wait for load to finish in a dedicated fiber; the scope ends with it. A shutdown
-            // stops the load, which is no failure.
-            if (future.Get() && ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN)
+            // Wait for load to finish in a dedicated fiber; the scope ends with it.
+            if (future.Get())
               ErrorAndExit("Failed to load snapshot");
           });
     }
