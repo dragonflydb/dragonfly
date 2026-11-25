@@ -2741,6 +2741,11 @@ auto RdbLoader::LoadImpl(io::Source* src) -> Error {
   bool allow_df_extensions = !is_valkey && rdb_version_ == 9;
 
   while (!stop_early_.load(memory_order_relaxed)) {
+    // A shutdown stops the load as stop() does, instead of waiting for the whole snapshot.
+    if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN) {
+      stop_early_ = true;
+      break;
+    }
     if (pause_) {
       ThisFiber::SleepFor(100ms);
       continue;

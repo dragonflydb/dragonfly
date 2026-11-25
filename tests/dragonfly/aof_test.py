@@ -619,12 +619,14 @@ async def test_serves_loading_during_replay(df_factory: DflyInstanceFactory, tmp
     df.stop()
 
     # The port opens before the AOF is restored: clients get -LOADING, and no write lands before
-    # the replay ends.
+    # the replay ends, not even through DEBUG POPULATE, which is allowed while LOADING otherwise.
     df.start()
     client = df.client()
     with pytest.raises(redis.exceptions.BusyLoadingError):
+        await client.execute_command("DEBUG POPULATE 10 populated")
+    with pytest.raises(redis.exceptions.BusyLoadingError):
         await client.set("during_replay", 1)
-    assert (await client.info("persistence"))["loading"] == 1
 
     await wait_available_async(client)
     assert await SeederV2.capture(client) == before
+    assert await client.exists("populated:0", "during_replay") == 0

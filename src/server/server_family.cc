@@ -1290,6 +1290,9 @@ optional<string> BootstrapAof(string_view dir, const string& adopt_path, const A
       return nullopt;
   }
 
+  // A shutdown that came after the load: no streamers; the next start redoes the bootstrap.
+  if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
+    return nullopt;
   if (!StartStreamers(dir, vector<AofResume>(shard_set->size())))
     ErrorAndExit("failed to open AOF segments");
 
@@ -1338,16 +1341,23 @@ bool ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
   AllowExpiryOnAllShards(false);
 
   // TODO(#8410): RdbLoader still drops keys whose TTL passed (ShouldDiscardKey), so a key the log
-  // later PERSISTs is lost. The base must load as it was, as Redis does for AOF preambles.
+  // later PERSISTs is lost. The base must load as it was, as Valkey does for AOF preambles.
   if (!manifest.base_path.empty() && !LoadAofBase(dir, manifest.base_path, load))
     return false;
 
+  // A shutdown that came after the base loaded: nothing to replay or append.
+  if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
+    return false;
   vector<AofResume> resume;
   if (error_code ec = ReplayAof(dir, manifest, service, &resume); ec) {
     if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
       return false;
     ErrorAndExit(absl::StrCat("AOF replay failed: ", ec.message()));
   }
+
+  // A replay that ended without noticing a shutdown, e.g. an empty log.
+  if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
+    return false;
   if (!StartStreamers(dir, resume))
     ErrorAndExit("failed to open AOF segments");
 
@@ -1924,8 +1934,9 @@ void ServerFamily::LoadFromSnapshot() {
       auto future = Load(load_path, LoadExistingKeys::kFail);
       load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
           [future, scope = std::move(*scope)]() mutable {
-            // Wait for load to finish in a dedicated fiber; the scope ends with it.
-            if (future.Get())
+            // Wait for load to finish in a dedicated fiber; the scope ends with it. A shutdown
+            // stops the load, which is no failure.
+            if (future.Get() && ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN)
               ErrorAndExit("Failed to load snapshot");
           });
     }
@@ -2156,7 +2167,10 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& path,
 
     if (aggregated_result->first_error) {
       load_context->PerformPostLoad(&service_, true);
-      LOG(ERROR) << "Rdb load failed: " << (*aggregated_result->first_error).message();
+
+      // A load stopped by shutdown is no failure.
+      std::error_code ec = *aggregated_result->first_error;
+      LOG_IF(ERROR, ec != errc::operation_canceled) << "Rdb load failed: " << ec.message();
     } else {
       load_context->PerformPostLoad(&service_);
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
