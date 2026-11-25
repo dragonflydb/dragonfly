@@ -12,11 +12,6 @@
 
 namespace facade {
 
-namespace {
-// Above this declared bulk length the buffer grows as data arrives instead of upfront.
-constexpr size_t kBulkEagerLimit = 1u << 20;
-}  // namespace
-
 using namespace std;
 
 auto RespSrvParser::Parse(Buffer str, uint32_t* consumed, cmn::BackedArguments* args) -> Result {
@@ -272,7 +267,9 @@ auto RespSrvParser::ParseArg(Buffer str, cmn::BackedArguments* args) -> ResultCo
 
   bulk_len_ = len;
   state_ = BULK_STR_S;
-  bulk_append_ = size_t(len) > kBulkEagerLimit;
+
+  // Preallocate only a bulk that has fully arrived: a declared length costs the client nothing.
+  bulk_append_ = size_t(len) > str.size() - res.second;
   args->PushArg(bulk_append_ ? size_t(0) : size_t(len));
 
   return {OK, res.second};

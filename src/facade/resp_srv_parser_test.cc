@@ -218,6 +218,12 @@ TEST_F(RespSrvParserTest, HugeBulkNoEagerAlloc) {
   // Declaring a huge bulk length must not allocate the full buffer upfront.
   ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse("*1\r\n$200000000\r\n"));
   EXPECT_LT(args_.HeapMemory() + parser_.UsedMemory(), 64u * 1024);
+
+  // Nor must a smaller one whose data has not arrived.
+  parser_ = RespSrvParser{};
+  args_ = cmn::BackedArguments{};
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse("*2\r\n$1048576\r\n"));
+  EXPECT_LT(args_.HeapMemory() + parser_.UsedMemory(), 64u * 1024);
 }
 
 TEST_F(RespSrvParserTest, BulkOverEagerLimitAssembled) {
