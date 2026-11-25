@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <algorithm>
 #include <functional>
 #include <source_location>
 #include <system_error>
@@ -296,6 +297,18 @@ class RdbLoaderBase {
       return SIZE_MAX;
     size_t from_source = bytes_read_ < source_limit_ ? source_limit_ - bytes_read_ : 0;
     return (mem_buf_ ? mem_buf_->InputLen() : 0) + from_source;
+  }
+
+  // Outside a tagged chunk a collection is read to its end from the remaining input, which bounds
+  // its element count. A tagged chunk holds only a part of it and the following chunks can
+  // compress below a byte per element, so there only the up-front reservation is capped.
+  bool ExceedsCollectionInput(uint64_t count, size_t min_element_bytes = 1) const {
+    const size_t limit = current_chunk_state_ ? SIZE_MAX : RemainingBytes();
+    return count > limit / min_element_bytes;
+  }
+
+  size_t ReserveHint(uint64_t count) const {
+    return std::min<uint64_t>(count, RemainingBytes());
   }
 
   // Wrapper to consume n bytes from mem buf, and also decrement remaining_payload_bytes if a chunk
