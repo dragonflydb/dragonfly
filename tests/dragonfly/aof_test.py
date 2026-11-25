@@ -5,11 +5,18 @@ import re
 import async_timeout
 import pytest
 import redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, DflyStartException
 from .seeder import Seeder as SeederV2
-from .utility import check_all_replicas_finished, wait_for_replicas_state
+from .utility import check_all_replicas_finished, wait_available_async, wait_for_replicas_state
+
+
+async def start_and_wait_available_async(df):
+    df.start()
+    await wait_available_async(df.client())
 
 
 # --aof needs io_uring, so startup fails under --force_epoll.
@@ -17,7 +24,7 @@ from .utility import check_all_replicas_finished, wait_for_replicas_state
 @dfly_args({"proactor_threads": 4})
 async def test_replay_restores_data(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path))
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
 
     # The seeder sets no TTLs, so the data cannot change between the captures.
@@ -30,7 +37,7 @@ async def test_replay_restores_data(df_factory: DflyInstanceFactory, tmp_path):
 
     # A graceful stop seals, writes and syncs every shard's AOF.
     df.stop()
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await client.dbsize() == keys
     assert await SeederV2.capture(client) == before
@@ -49,7 +56,7 @@ async def test_replay_across_restarts(df_factory: DflyInstanceFactory, tmp_path)
 
     # Every restart replays the whole chain, then resumes each shard's log in a new segment.
     for run in range(3):
-        df.start()
+        await start_and_wait_available_async(df)
         client = df.client()
         assert await client.dbsize() == len(expected)
         for key, value in expected.items():
@@ -61,7 +68,7 @@ async def test_replay_across_restarts(df_factory: DflyInstanceFactory, tmp_path)
         await client.connection_pool.disconnect()
         df.stop()
 
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await client.dbsize() == len(expected)
     for key, value in expected.items():
@@ -77,7 +84,7 @@ async def test_replay_across_restarts(df_factory: DflyInstanceFactory, tmp_path)
 @dfly_args({"proactor_threads": 4})
 async def test_replay_global_commands(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path))
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
 
     # FLUSHALL is a global command: every shard's chain meets at it during replay.
@@ -87,7 +94,7 @@ async def test_replay_global_commands(df_factory: DflyInstanceFactory, tmp_path)
     await client.connection_pool.disconnect()
     df.stop()
 
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await client.dbsize() == 100
     assert await client.get("new0") == "0"
@@ -100,7 +107,7 @@ async def test_replay_global_commands(df_factory: DflyInstanceFactory, tmp_path)
     await client.connection_pool.disconnect()
     df.stop()
 
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await client.dbsize() == 1
     assert await client.get("last") == "1"
@@ -128,7 +135,7 @@ def write_manifest(aof_dir, body: str):
 @dfly_args({"proactor_threads": 2})
 async def test_bootstrap_adopts_dump(df_factory: DflyInstanceFactory, tmp_path):
     plain = df_factory.create(dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
-    plain.start()
+    await start_and_wait_available_async(plain)
     client = plain.client()
     await client.mset({f"key:{i}": i for i in range(100)})
     await client.set("counter", 10)
@@ -136,7 +143,7 @@ async def test_bootstrap_adopts_dump(df_factory: DflyInstanceFactory, tmp_path):
     plain.stop()
 
     df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await client.dbsize() == 101
     assert re.search(r"base dfs user dump-.*-summary\.dfs\n", read_manifest(tmp_path))
@@ -145,7 +152,7 @@ async def test_bootstrap_adopts_dump(df_factory: DflyInstanceFactory, tmp_path):
     df.stop()
 
     # The log replays on top of the adopted dump, once.
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await client.dbsize() == 103
     assert await client.get("counter") == "11"
@@ -155,7 +162,7 @@ async def test_bootstrap_adopts_dump(df_factory: DflyInstanceFactory, tmp_path):
 @pytest.mark.exclude_epoll
 async def test_aof_files_without_manifest_refuse_start(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path))
-    df.start()
+    await start_and_wait_available_async(df)
     df.stop()
 
     (tmp_path / "appendonly.manifest").unlink()
@@ -166,7 +173,7 @@ async def test_aof_files_without_manifest_refuse_start(df_factory: DflyInstanceF
 @pytest.mark.exclude_epoll
 async def test_interrupted_bootstrap_is_redone(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path))
-    df.start()
+    await start_and_wait_available_async(df)
     await df.client().set("logged", 1)
     df.stop()
 
@@ -177,7 +184,7 @@ async def test_interrupted_bootstrap_is_redone(df_factory: DflyInstanceFactory, 
     write_manifest(tmp_path, body.replace("state active", "state bootstrapping"))
 
     # The redo drops the old log, and there is no dump.
-    df.start()
+    await start_and_wait_available_async(df)
     assert await df.client().dbsize() == 0
     assert "state active" in read_manifest(tmp_path)
 
@@ -188,7 +195,7 @@ async def test_replay_starts_at_cut(df_factory: DflyInstanceFactory, tmp_path):
     # One shard, so k<n> is lsn n. Each start resumes in a new segment: k1..k5 in 0, k6..k10 in 1.
     df = df_factory.create(aof=True, dir=str(tmp_path))
     for first in (1, 6):
-        df.start()
+        await start_and_wait_available_async(df)
         client = df.client()
         for i in range(first, first + 5):
             await client.set(f"k{i}", i)
@@ -200,13 +207,19 @@ async def test_replay_starts_at_cut(df_factory: DflyInstanceFactory, tmp_path):
     body = text[: text.rindex("crc32c ")]
     assert "cut 0 0 1\n" in body
 
-    # A cut that is not where its segment starts is rejected.
+    # A cut that is not where its segment starts is rejected. Replay runs in the background, so the
+    # server exits before or after it starts listening.
     write_manifest(tmp_path, body.replace("cut 0 0 1\n", "cut 0 1 7\n"))
-    with pytest.raises(DflyStartException):
+    try:
         df.start()
+    except DflyStartException:
+        pass
+    else:
+        proc, df.proc = df.proc, None
+        assert proc.wait(timeout=60) != 0
 
     write_manifest(tmp_path, body.replace("cut 0 0 1\n", "cut 0 1 6\n"))
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await client.dbsize() == 5
     assert await client.mget([f"k{i}" for i in range(1, 11)]) == [None] * 5 + [
@@ -221,13 +234,13 @@ async def test_replay_starts_at_cut(df_factory: DflyInstanceFactory, tmp_path):
 @dfly_args({"proactor_threads": 2})
 async def test_deleted_base_refuses_start(df_factory: DflyInstanceFactory, tmp_path):
     plain = df_factory.create(dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
-    plain.start()
+    await start_and_wait_available_async(plain)
     await plain.client().set("key", 1)
     await plain.client().execute_command("SAVE")
     plain.stop()
 
     df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
-    df.start()
+    await start_and_wait_available_async(df)
     df.stop()
 
     for summary in tmp_path.glob("dump-*-summary.dfs"):
@@ -251,7 +264,7 @@ async def wait_log_written(client):
 @dfly_args({"proactor_threads": 2})
 async def test_save_is_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     await client.mset({f"key:{i}": i for i in range(100)})
     await client.set("counter", 10)
@@ -266,7 +279,7 @@ async def test_save_is_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
 
     await client.incr("counter")
     df.stop()
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await client.dbsize() == 101
     # The log replays on top of the save, once.
@@ -276,7 +289,7 @@ async def test_save_is_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
 @pytest.mark.exclude_epoll
 async def test_save_must_keep_the_base(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     with pytest.raises(redis.exceptions.ResponseError, match="timestamp"):
         await client.execute_command("SAVE DF fixed")
@@ -298,7 +311,7 @@ async def test_save_must_keep_the_base(df_factory: DflyInstanceFactory, tmp_path
     else:
         pytest.fail("no two saves landed in the same second")
     df.stop()
-    df.start()
+    await start_and_wait_available_async(df)
     assert await df.client().get("key") == "1"
 
 
@@ -322,7 +335,7 @@ async def test_search_metadata_survives_checkpoint_and_replay(
     df_factory: DflyInstanceFactory, tmp_path
 ):
     df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     await client.execute_command("FT.CREATE idx ON HASH SCHEMA f TEXT")
 
@@ -335,7 +348,7 @@ async def test_search_metadata_survives_checkpoint_and_replay(
     await client.execute_command("FT.SYNUPDATE idx g2 bike cycle")
     df.stop()
 
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     for alias in ("before", "after"):
         await client.execute_command(f"FT.INFO {alias}")
@@ -347,7 +360,7 @@ async def test_search_metadata_survives_checkpoint_and_replay(
 @dfly_args({"proactor_threads": 2})
 async def test_crash_during_and_after_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
 
     # Enough data that the kill lands while BGSAVE still runs.
@@ -360,7 +373,7 @@ async def test_crash_during_and_after_checkpoint(df_factory: DflyInstanceFactory
     # Killed while the save runs: the old manifest and the whole log still hold the data.
     await client.execute_command("BGSAVE")
     df.stop(kill=True)
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await SeederV2.capture(client) == before
 
@@ -371,7 +384,7 @@ async def test_crash_during_and_after_checkpoint(df_factory: DflyInstanceFactory
     before = await SeederV2.capture(client)
     await wait_log_written(client)
     df.stop(kill=True)
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await SeederV2.capture(client) == before
     # The log replays on top of the save, once.
@@ -382,7 +395,7 @@ async def test_crash_during_and_after_checkpoint(df_factory: DflyInstanceFactory
 @dfly_args({"proactor_threads": 4})
 async def test_checkpoint_then_log_restores_data(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
 
     seeder = SeederV2(key_target=100_000)
@@ -397,7 +410,7 @@ async def test_checkpoint_then_log_restores_data(df_factory: DflyInstanceFactory
     assert before != at_cut
     df.stop()
 
-    df.start()
+    await start_and_wait_available_async(df)
     assert await SeederV2.capture(df.client()) == before
 
 
@@ -419,7 +432,7 @@ async def test_kill_loses_only_unwritten_tail(df_factory: DflyInstanceFactory, t
         aof_dir = tmp_path / f"attempt{attempt}"
         aof_dir.mkdir()
         df = df_factory.create(aof=True, hz=1, dir=str(aof_dir))
-        df.start()
+        await start_and_wait_available_async(df)
         client = df.client()
 
         for i in range(0, bulk, 1000):
@@ -435,7 +448,7 @@ async def test_kill_loses_only_unwritten_tail(df_factory: DflyInstanceFactory, t
         await pipe.execute()
         df.stop(kill=True)
 
-        df.start()
+        await start_and_wait_available_async(df)
         client = df.client()
         vals = await client.mget(keys)
         df.stop()
@@ -469,7 +482,7 @@ async def wait_for_aof_active(client, timeout=10):
 @dfly_args({"proactor_threads": 2, "aof_rewrite_min_size": 100_000})
 async def test_auto_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path))
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
 
     # The log outgrows --aof_rewrite_min_size, so a checkpoint runs without any save.
@@ -489,7 +502,7 @@ async def test_auto_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
     await client.set("last", 1)
     before = await SeederV2.capture(client)
     df.stop()
-    df.start()
+    await start_and_wait_available_async(df)
     assert await SeederV2.capture(df.client()) == before
 
 
@@ -497,7 +510,7 @@ async def test_auto_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
 @dfly_args({"proactor_threads": 2, "aof_rewrite_min_size": 10_000, "aof_rewrite_percentage": 10})
 async def test_auto_checkpoint_percentage(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path))
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
 
     # Random values, so the base does not compress down to nothing.
@@ -522,7 +535,7 @@ async def test_auto_checkpoint_percentage(df_factory: DflyInstanceFactory, tmp_p
 @dfly_args({"proactor_threads": 2, "aof_rewrite_min_size": 100_000, "aof_rewrite_percentage": 0})
 async def test_auto_checkpoint_disabled(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(aof=True, dir=str(tmp_path))
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
 
     await client.mset({f"a:{i}": "x" * 100 for i in range(2000)})
@@ -537,6 +550,7 @@ async def test_replica_full_sync_rebases(df_factory: DflyInstanceFactory, tmp_pa
     master = df_factory.create(proactor_threads=2)
     replica = df_factory.create(proactor_threads=2, aof=True, dir=str(tmp_path))
     df_factory.start_all([master, replica])
+    await wait_available_async([master.client(), replica.client()])
     c_master, c_replica = master.client(), replica.client()
     seeder = SeederV2(key_target=20_000)
     await seeder.run(c_master, target_deviation=0.1)
@@ -557,14 +571,14 @@ async def test_replica_full_sync_rebases(df_factory: DflyInstanceFactory, tmp_pa
     await c_replica.set("after_promotion", 1)
     before = await SeederV2.capture(c_replica)
     replica.stop()
-    replica.start()
+    await start_and_wait_available_async(replica)
     assert await SeederV2.capture(replica.client()) == before
 
 
 @pytest.mark.exclude_epoll
 async def test_restart_while_rebasing_starts_empty(df_factory: DflyInstanceFactory, tmp_path):
     df = df_factory.create(proactor_threads=2, aof=True, dir=str(tmp_path))
-    df.start()
+    await start_and_wait_available_async(df)
     await df.client().set("old", 1)
     df.stop()
 
@@ -576,7 +590,7 @@ async def test_restart_while_rebasing_starts_empty(df_factory: DflyInstanceFacto
     assert old_files
 
     # The old log holds the data the sync was replacing: nothing is loaded, nothing is deleted.
-    df.start()
+    await start_and_wait_available_async(df)
     client = df.client()
     assert await client.dbsize() == 0
     assert (await client.info("persistence"))["aof_state"] == "rebasing"
@@ -584,10 +598,39 @@ async def test_restart_while_rebasing_starts_empty(df_factory: DflyInstanceFacto
 
     # A full sync gives the node its base; only then do the old files go.
     master = df_factory.create(proactor_threads=2)
-    master.start()
+    await start_and_wait_available_async(master)
     await master.client().set("new", 1)
     await client.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_for_aof_active(client)
     assert "base dfs owned appendonly-base-1-summary.dfs\n" in read_manifest(tmp_path)
     assert not any((tmp_path / name).exists() for name in old_files)
     assert await client.get("new") == "1"
+
+
+# Release builds replay too fast to observe -LOADING.
+@pytest.mark.debug_only
+@pytest.mark.exclude_epoll
+@dfly_args({"proactor_threads": 4})
+async def test_serves_loading_during_replay(df_factory: DflyInstanceFactory, tmp_path):
+    df = df_factory.create(aof=True, dir=str(tmp_path))
+    await start_and_wait_available_async(df)
+    client = df.client()
+    await SeederV2(key_target=300_000).run(client, target_deviation=0.1)
+    before = await SeederV2.capture(client)
+    await client.connection_pool.disconnect()
+    df.stop()
+
+    # The port opens before the AOF is restored: clients get -LOADING, and no write lands before
+    # the replay ends, not even through DEBUG POPULATE, which is allowed while LOADING otherwise.
+    df.start()
+
+    # Newer redis-py clients retry -LOADING by default, which would hide it until the replay ends.
+    client = df.client(retry=Retry(NoBackoff(), 0))
+    with pytest.raises(redis.exceptions.BusyLoadingError):
+        await client.execute_command("DEBUG POPULATE 10 populated")
+    with pytest.raises(redis.exceptions.BusyLoadingError):
+        await client.set("during_replay", 1)
+
+    await wait_available_async(client)
+    assert await SeederV2.capture(client) == before
+    assert await client.exists("populated:0", "during_replay") == 0

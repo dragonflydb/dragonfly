@@ -68,6 +68,7 @@ extern "C" {
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
+ABSL_DECLARE_FLAG(bool, aof);
 ABSL_FLAG(bool, deserialize_hnsw_index, false, "Deserialize HNSW vector index graph structure");
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
 ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
@@ -2735,7 +2736,14 @@ auto RdbLoader::LoadImpl(io::Source* src) -> Error {
   // Dragonfly snapshots predating df-ver use version 9, before Redis reused our type IDs.
   bool allow_df_extensions = !is_valkey && rdb_version_ == 9;
 
+  // With --aof, a shutdown stops the load as stop() does: the next start restores the AOF again.
+  // Without it, shutdown waits, since its save writes the loaded dataset.
+  const bool stop_on_shutdown = absl::GetFlag(FLAGS_aof);
   while (!stop_early_.load(memory_order_relaxed)) {
+    if (stop_on_shutdown && ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN) {
+      stop_early_ = true;
+      break;
+    }
     if (pause_) {
       ThisFiber::SleepFor(100ms);
       continue;

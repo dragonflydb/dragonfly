@@ -3012,7 +3012,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPTTL}.HFUNC(Pttl)
       << CI{"FIELDTTL", CO::READONLY | CO::FAST, 3, 1, 1, acl::kFieldTtl}.HFUNC(FieldTtl)
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
-      << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
+      << CI{"TYPE", CO::READONLY | CO::FAST, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
       << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, -2, 1, -1, acl::kUnlink}
              .SetAsyncHandler(CmdDel)

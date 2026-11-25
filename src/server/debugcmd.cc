@@ -50,6 +50,7 @@ using namespace std;
 ABSL_DECLARE_FLAG(string, dir);
 ABSL_DECLARE_FLAG(string, dbfilename);
 ABSL_DECLARE_FLAG(bool, df_snapshot_format);
+ABSL_DECLARE_FLAG(bool, aof);
 
 ABSL_FLAG(bool, background_debug_jobs, false, "Use background fibers for debug jobs");
 
@@ -909,6 +910,10 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgParser par
 }
 
 void DebugCmd::Populate(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Its writes bypass the LOADING check; before the AOF streamers run they would not be logged.
+  if (absl::GetFlag(FLAGS_aof) && ServerState::tlocal()->gstate() == GlobalState::LOADING)
+    return cmd_cntx->SendError(kLoadingErr);
+
   optional<PopulateOptions> options = ParsePopulateArgs(parser, cmd_cntx);
   if (!options.has_value()) {
     return;

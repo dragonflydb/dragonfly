@@ -96,6 +96,7 @@ ABSL_FLAG(uint32_t, lua_max_stall_ms, 0,
           "busy without yielding for longer than this many milliseconds. 0 disables the check.");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
+ABSL_DECLARE_FLAG(bool, aof);
 ABSL_FLAG(size_t, listpack_max_field_len, 64,
           "Maximum length of a hash field or value to be stored in listpack encoding");
 ABSL_FLAG(size_t, listpack_max_bytes, 1024,
@@ -2007,6 +2008,11 @@ void Service::Multi(CmdArgParser, CommandContext* cmd_cntx) {
 }
 
 void Service::Watch(CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Its transaction takes a txid, which can race with the AOF replay moving the txid sequence past
+  // the replayed ones and get a duplicate.
+  if (GetFlag(FLAGS_aof) && ServerState::tlocal()->gstate() == GlobalState::LOADING)
+    return cmd_cntx->SendError(kLoadingErr);
+
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
 
