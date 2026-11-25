@@ -1332,12 +1332,15 @@ bool ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
                const AofLoadFn& load) {
   if (error_code ec = CollectAofGarbage(dir, manifest); ec)
     ErrorAndExit(absl::StrCat("failed to remove stale AOF files: ", ec.message()));
+  // No expiry or eviction from the base load until the streamers run: a key may pass its deadline
+  // before a later record, such as PERSIST, changes it, and commands allowed while LOADING (SCAN)
+  // would expire it. Resumed once the streamers run, so every expiry is logged.
+  AllowExpiryOnAllShards(false);
+
+  // TODO(#8410): RdbLoader still drops keys whose TTL passed (ShouldDiscardKey), so a key the log
+  // later PERSISTs is lost. The base must load as it was, as Redis does for AOF preambles.
   if (!manifest.base_path.empty() && !LoadAofBase(dir, manifest.base_path, load))
     return false;
-
-  // No expiry or eviction during replay: a key may pass its deadline before a later record, such as
-  // PERSIST, changes it. Resumed once the streamers run, so every expiry is logged.
-  AllowExpiryOnAllShards(false);
 
   vector<AofResume> resume;
   if (error_code ec = ReplayAof(dir, manifest, service, &resume); ec) {
