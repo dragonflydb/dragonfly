@@ -364,6 +364,50 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
   }
 }
 
+// A collection saved in several tagged chunks has its header in one compressed blob and its
+// elements in the following ones, so its element count can exceed the bytes left in the file.
+TEST_F(RdbTest, ReloadSplitCollectionCompressed) {
+  absl::FlagSaver fs;
+
+  struct Round {
+    CompressionMode mode;
+    string_view chunk_size, add_cmd, len_cmd;
+    unsigned count;
+  };
+
+  const Round kRounds[] = {
+      // The file fits into the loader's read-ahead buffer, so once the header is read only the
+      // rest of its blob is left to count.
+      {CompressionMode::MULTI_ENTRY_LZ4, "512", "sadd", "scard", 1000},
+      {CompressionMode::MULTI_ENTRY_LZ4, "512", "hset", "hlen", 1000},
+
+      // Sorted members with equal scores take less than a byte each in the file.
+      {CompressionMode::MULTI_ENTRY_ZSTD, "8192", "zadd", "zcard", 100000},
+  };
+
+  for (const Round& round : kRounds) {
+    SCOPED_TRACE(round.add_cmd);
+    SetFlag(&FLAGS_compression_mode, round.mode);
+    ASSERT_EQ(Run({"config", "set", "serialization_max_chunk_size", round.chunk_size}), "OK");
+
+    for (unsigned i = 0; i < round.count;) {
+      vector<string> args{string(round.add_cmd), "key"};
+      for (unsigned j = 0; j < 1000; ++j, ++i) {
+        if (round.add_cmd == "zadd")
+          args.push_back("0");
+        args.push_back(absl::StrFormat("m%06u", i));
+        if (round.add_cmd == "hset")
+          args.push_back("v");
+      }
+      ASSERT_THAT(Run(absl::Span<string>{args}), IntArg(1000));
+    }
+
+    ASSERT_EQ(Run({"debug", "reload"}), "OK");
+    EXPECT_EQ(round.count, CheckedInt({round.len_cmd, "key"}));
+    ASSERT_EQ(Run({"flushall"}), "OK");
+  }
+}
+
 TEST_F(RdbTest, RdbLoaderOnReadCompressedDataShouldNotEnterEnsureReadFlow) {
   SetFlag(&FLAGS_compression_mode, CompressionMode::MULTI_ENTRY_ZSTD);
   for (int i = 0; i < 1000; ++i) {
