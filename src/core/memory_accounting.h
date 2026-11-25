@@ -105,11 +105,16 @@ class AtomicMemoryScope {
   ssize_t baseline_;
 };
 
+// Attributes the callback's allocator delta to category.
+template <typename Func> decltype(auto) WithAtomicScope(int category, Func&& func) {
+  AtomicMemoryScope scope(category);
+  return std::forward<Func>(func)();
+}
+
 // Each invocation opens a fresh atomic scope for the bound category.
 constexpr auto BindAtomicScope(int category) {
   return [category]<typename Func>(Func&& func) -> decltype(auto) {
-    AtomicMemoryScope scope(category);
-    return std::forward<Func>(func)();
+    return WithAtomicScope(category, std::forward<Func>(func));
   };
 }
 

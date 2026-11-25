@@ -271,7 +271,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     DCHECK(!value.empty());
     tiering::BareDecoder decoder;
     decoder.slice = value;
-    BindAtomicScope(pv->ObjType())([&] { decoder.Upload(pv); });
+    WithAtomicScope(pv->ObjType(), [&] { decoder.Upload(pv); });
     AccountTieredUpload(*pv, value.size(), key, db_slice_.GetDBTable(dbid));
   }
 
@@ -295,8 +295,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
       } else {
-        BindAtomicScope(pv->ObjType())(
-            [&] { pv->SetExternal(segment.offset, segment.length, blobs.rep); });
+        WithAtomicScope(pv->ObjType(),
+                        [&] { pv->SetExternal(segment.offset, segment.length, blobs.rep); });
       }
     } else {
       LOG(DFATAL) << "Should not reach here";
@@ -372,7 +372,7 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
 
       // We remove it from both cool storage and the offline storage; the value becomes a
       // regular in-memory one, so it returns to the RAM ledger.
-      pv = ts_->DeleteCool(item.record);
+      pv = ts_->TakeCoolValue(item.record);
       DbTable* table = db_slice_.GetDBTable(dbid);
       AccountObjectMemory(item_key, pv.ObjType(), pv.MallocUsed(), table);
       AccountSlotTieredBytes(item_key, -int64_t(segment.length), table);
@@ -436,7 +436,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
       if (metrics.modified || pv->WasTouched() || options.force_upload) {
         ++stats_.total_uploads;
-        BindAtomicScope(pv->ObjType())([&] { decoder->Upload(pv); });
+        WithAtomicScope(pv->ObjType(), [&] { decoder->Upload(pv); });
         AccountTieredUpload(*pv, segment.length, key->second, db_slice_.GetDBTable(key->first));
         return true;
       }
@@ -608,7 +608,7 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
   tiering::DiskSegment segment = fragment_ref.GetExternalSlice();
   if (auto* cool = fragment_ref.GetCoolRecord(); cool) {
     // With experimental hash support a cool record may hold a hash, not only a string.
-    BindAtomicScope(cool->value.ObjType())([&] { DeleteCool(cool); });
+    WithAtomicScope(cool->value.ObjType(), [&] { TakeCoolValue(cool); });
   }
   fragment_ref.ClearOffloaded();
   op_manager_->DeleteOffloaded(dbid, segment);
@@ -1006,7 +1006,8 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
     pv.Freeze(segment.offset, segment.length);
 
-    BindAtomicScope(record->value.ObjType())([&] { record->value.Reset(); });
+    // Charge the payload free to its object type and the record free to internal memory.
+    WithAtomicScope(record->value.ObjType(), [&] { record->value.Reset(); });
     UntrackedScope([&] { CompactObj::DeleteMR<TieredCoolRecord>(record); });
   } while (gained < goal);
 
@@ -1094,7 +1095,7 @@ PrimeValue TieredStorage::Warmup(DbIndex dbid, std::string_view key, PrimeValue:
 
   // We remove it from both cool storage and the offline storage. The value returns to RAM,
   // so it returns to the RAM ledger as well.
-  PrimeValue hot = DeleteCool(item.record);
+  PrimeValue hot = TakeCoolValue(item.record);
   DbTable* table = op_manager_->db_slice_.GetDBTable(dbid);
   AccountObjectMemory(key, hot.ObjType(), hot.MallocUsed(), table);
   AccountSlotTieredBytes(key, -int64_t(segment.length), table);
@@ -1137,7 +1138,7 @@ util::fb2::Future<bool> TieredStorage::MaterializeForIndexing(DbIndex dbid, stri
   return fut;
 }
 
-PrimeValue TieredStorage::DeleteCool(TieredCoolRecord* record) {
+PrimeValue TieredStorage::TakeCoolValue(TieredCoolRecord* record) {
   auto it = CoolQueue::s_iterator_to(*record);
   cool_queue_.erase(it);
 

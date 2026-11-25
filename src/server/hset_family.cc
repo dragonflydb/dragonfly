@@ -783,14 +783,15 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
         return;
       }
 
-      uint32_t created = 0;
       auto mutate_cb = [&] {
+        uint32_t created = 0;
         auto& lw = *res.value()->GetMutable();
         for (size_t i = 0; i < values.size(); i += 2) {
           created += lw.Insert(values[i], values[i + 1], skip_existing);
         }
+        return created;
       };
-      HashScope(mutate_cb);
+      const auto created = HashScope(mutate_cb);
       fut.Resolve(SetReply(op_sp, created));
     };
 
