@@ -794,6 +794,11 @@ void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   string last_save_file = sf_.GetLastSaveInfo().file_name;
 
+  // Before FlushAll: no other load may run, and no write lands between the flush and the load.
+  auto scope = sf_.service().EnterExclusiveLoading();
+  if (!scope)
+    return cmd_cntx->SendError(kLoadingErr);
+
   // Validate before FlushAll so an unloadable snapshot does not destroy the dataset.
   if (GenericError load_check = sf_.CheckSnapshotLoadable(last_save_file); load_check) {
     LOG(WARNING) << "Cannot reload snapshot '" << last_save_file << "': " << load_check.Format();
@@ -802,13 +807,12 @@ void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   sf_.FlushAll(cntx_->ns);
 
-  if (auto fut_ec = sf_.Load(last_save_file, ServerFamily::LoadExistingKeys::kFail); fut_ec) {
-    GenericError ec = fut_ec->Get();
-    if (ec) {
-      string msg = ec.Format();
-      LOG(WARNING) << "Could not load file " << msg;
-      return cmd_cntx->SendError(msg);
-    }
+  GenericError ec = sf_.Load(last_save_file, ServerFamily::LoadExistingKeys::kFail).Get();
+  scope.reset();
+  if (ec) {
+    string msg = ec.Format();
+    LOG(WARNING) << "Could not load file " << msg;
+    return cmd_cntx->SendError(msg);
   }
 
   rb->SendOk();

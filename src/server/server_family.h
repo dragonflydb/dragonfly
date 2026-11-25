@@ -228,10 +228,11 @@ class ServerFamily {
   GenericError CheckSnapshotLoadable(const std::string& path);
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
-  // future with error_code.
+  // future with error_code. Returns at once while fibers load; whoever waits on the future holds
+  // the server LOADING (e.g. a Service::LoadingScope) until it resolves.
   enum class LoadExistingKeys : uint8_t { kFail, kOverride };
-  std::optional<util::fb2::Future<GenericError>> Load(const std::string& file_name,
-                                                      LoadExistingKeys existing_keys);
+  util::fb2::Future<GenericError> Load(const std::string& file_name,
+                                       LoadExistingKeys existing_keys);
 
   bool TEST_IsSaving() const;
 

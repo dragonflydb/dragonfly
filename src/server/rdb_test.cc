@@ -2248,9 +2248,10 @@ TEST_F(RdbTest, LoadRejectsHugeDeclaredLength) {
   io::WriteStringToFileOrDie(WrapInRdb(body), rdb_file);
   auto cleanup = absl::MakeCleanup([&] { unlink(rdb_file.c_str()); });
 
-  auto fut = service_->server_family().Load(rdb_file, ServerFamily::LoadExistingKeys::kFail);
-  ASSERT_TRUE(fut.has_value());
-  auto err = static_cast<std::error_code>(fut->Get());
+  auto scope = service_->EnterExclusiveLoading();
+  ASSERT_TRUE(scope);
+  auto err = static_cast<std::error_code>(
+      service_->server_family().Load(rdb_file, ServerFamily::LoadExistingKeys::kFail).Get());
 
   EXPECT_EQ(err, RdbError(rdb::errc::rdb_file_corrupted));
 }

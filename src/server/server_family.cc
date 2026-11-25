@@ -1801,8 +1801,10 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   if (GetFlag(FLAGS_aof)) {
     AofBase base =
         StartAof(flag_dir, snapshot_storage_.get(), &service_, [this](const string& path) {
-          auto future = Load(path, LoadExistingKeys::kFail);
-          return future ? future->Get() : GenericError("the server is not active");
+          auto scope = service_.EnterExclusiveLoading();
+          if (!scope)
+            return GenericError("the server is not active");
+          return Load(path, LoadExistingKeys::kFail).Get();
         });
     thread_safe_save_info_.Update([&base](SaveInfoData* data) {
       data->aof_base_file = base.file;
@@ -1846,12 +1848,16 @@ void ServerFamily::LoadFromSnapshot() {
   if (load_path_result) {
     const std::string& load_path = *load_path_result;
     if (!load_path.empty()) {
+      auto scope = service_.EnterExclusiveLoading();
+      if (!scope)
+        ErrorAndExit("Failed to load snapshot: the server is not active");
       auto future = Load(load_path, LoadExistingKeys::kFail);
-      load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([future]() mutable {
-        // Wait for load to finish in a dedicated fiber.
-        if (!future.has_value() || future->Get())
-          ErrorAndExit("Failed to load snapshot");
-      });
+      load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+          [future, scope = std::move(*scope)]() mutable {
+            // Wait for load to finish in a dedicated fiber; the scope ends with it.
+            if (future.Get())
+              ErrorAndExit("Failed to load snapshot");
+          });
     }
   } else {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
@@ -1987,8 +1993,8 @@ GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occurred) with a future.
-std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& path,
-                                                            LoadExistingKeys existing_keys) {
+fb2::Future<GenericError> ServerFamily::Load(const std::string& path,
+                                             LoadExistingKeys existing_keys) {
   DCHECK(!path.empty());
   DCHECK_GT(shard_count(), 0u);
 
@@ -2018,16 +2024,6 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
     return immediate(expand_result.error());
   }
-
-  auto prev_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (prev_state != GlobalState::ACTIVE) {
-    LOG(WARNING) << prev_state << " in progress, ignored";
-    return {};
-  }
-
-  // Reset state on error
-  absl::Cleanup reset_state{
-      [this]() { service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE); }};
 
   auto& pool = service_.proactor_pool();
 
@@ -2099,12 +2095,9 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       ForceReplicasToFullSync();
     }
 
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     future.Resolve(*(aggregated_result->first_error));
   };
   pool.GetNextProactor()->Dispatch(std::move(load_join_func));
-
-  std::move(reset_state).Cancel();  // load_join_func resets state after loading
   return future;
 }
 
