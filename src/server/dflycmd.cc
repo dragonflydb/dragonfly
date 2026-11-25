@@ -688,6 +688,9 @@ void DflyCmd::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
+  if (!ServerState::IsMaster())
+    return cmd_cntx->SendError("Replica cannot load data");
+
   // Before FlushAll: no other load may run, and no write lands between the flush and the load.
   auto scope = sf_->service().EnterExclusiveLoading();
   if (!scope)

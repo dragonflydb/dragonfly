@@ -25,7 +25,8 @@ namespace {
 // Replays one shard's chain from its cut through the applier, then repairs it. Runs on the shard's
 // thread.
 error_code ReplayChain(string_view dir, ShardId sid, AofManifest::Cut cut, Service* service,
-                       shared_ptr<MultiShardExecution> mse, AofResume* resume, TxId* max_txid) {
+                       shared_ptr<MultiShardExecution> mse, const atomic_bool* cancel,
+                       AofResume* resume, TxId* max_txid) {
   AofChainReader chain(string(dir), sid, shard_set->size());
   RETURN_ON_ERR(chain.Open(cut.seq));
 
@@ -38,6 +39,9 @@ error_code ReplayChain(string_view dir, ShardId sid, AofManifest::Cut cut, Servi
   // Records read, compared with the block headers below.
   uint64_t records = 0;
   while (tx_reader.NextTxData(&reader, &cntx, &tx)) {
+    if (cancel && cancel->load(memory_order_relaxed))
+      return make_error_code(errc::operation_canceled);
+
     // Before the PING skip: a PING has an LSN too.
     ++records;
     if (tx.opcode == journal::Op::PING)
@@ -85,7 +89,7 @@ error_code ReplayChain(string_view dir, ShardId sid, AofManifest::Cut cut, Servi
 }  // namespace
 
 error_code ReplayAof(string_view dir, const AofManifest& manifest, Service* service,
-                     vector<AofResume>* resume) {
+                     const atomic_bool* cancel, vector<AofResume>* resume) {
   uint32_t shard_count = shard_set->size();
 
   // TODO: replay into a different shard count.
@@ -98,8 +102,8 @@ error_code ReplayAof(string_view dir, const AofManifest& manifest, Service* serv
 
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    errors[sid] =
-        ReplayChain(dir, sid, manifest.cuts[sid], service, mse, &(*resume)[sid], &max_txids[sid]);
+    errors[sid] = ReplayChain(dir, sid, manifest.cuts[sid], service, mse, cancel, &(*resume)[sid],
+                              &max_txids[sid]);
 
     // A chain that ended, cleanly or torn, never reaches another barrier: stop counting it, so
     // longer chains can run a global command it lacks.
@@ -115,7 +119,8 @@ error_code ReplayAof(string_view dir, const AofManifest& manifest, Service* serv
     if (!errors[sid]) {
       mse->RemoveFlow();
     } else {
-      if (ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN)
+      if (errors[sid] != errc::operation_canceled &&
+          ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN)
         LOG(ERROR) << "AOF replay failed on shard " << sid << ": " << errors[sid].message();
 
       // The load fails; release the shards waiting at a barrier.
@@ -123,6 +128,9 @@ error_code ReplayAof(string_view dir, const AofManifest& manifest, Service* serv
     }
   });
 
+  // Chains waiting at a barrier fail once a cancelled one releases them.
+  if (cancel && cancel->load(memory_order_relaxed))
+    return make_error_code(errc::operation_canceled);
   for (const error_code& ec : errors) {
     if (ec)
       return ec;

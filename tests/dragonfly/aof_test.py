@@ -634,3 +634,44 @@ async def test_serves_loading_during_replay(df_factory: DflyInstanceFactory, tmp
     await wait_available_async(client)
     assert await SeederV2.capture(client) == before
     assert await client.exists("populated:0", "during_replay") == 0
+
+
+# Release builds replay too fast to send REPLICAOF during the restore.
+@pytest.mark.debug_only
+@pytest.mark.exclude_epoll
+@dfly_args({"proactor_threads": 4, "aof_rewrite_percentage": 0})
+async def test_replicaof_cancels_aof_restore(df_factory: DflyInstanceFactory, tmp_path):
+    # No automatic checkpoint, so the data stays in the log and its replay takes a while.
+    node = df_factory.create(aof=True, dir=str(tmp_path))
+    node.start()
+    client = node.client()
+    await wait_available_async(client)
+    await SeederV2(key_target=300_000).run(client, target_deviation=0.1)
+    await client.connection_pool.disconnect()
+    node.stop()
+    old_segments = [p.name for p in tmp_path.glob("appendonly-*-*.aof")]
+
+    master = df_factory.create(proactor_threads=4)
+    master.start()
+    c_master = master.client()
+    await c_master.mset({f"m:{i}": i for i in range(1000)})
+
+    # The restarted node replays its AOF; REPLICAOF stops that and full syncs instead.
+    node.start()
+    client = node.client()
+    assert (await client.info("persistence"))["loading"] == 1
+
+    assert await client.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+    await wait_for_replicas_state(client)
+    await check_all_replicas_finished([client], c_master)
+    assert await SeederV2.capture(client) == await SeederV2.capture(c_master)
+
+    # The checkpoint after the full sync replaces the old log; aof_state turns active after its GC.
+    async with async_timeout.timeout(10):
+        while (await client.info("persistence"))["aof_state"] != "active":
+            await asyncio.sleep(0.1)
+    assert not any((tmp_path / name).exists() for name in old_segments)
+
+    await client.connection_pool.disconnect()
+    node.stop()
+    assert node.is_in_logs("AOF restore cancelled by REPLICAOF")
