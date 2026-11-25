@@ -1647,13 +1647,11 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> Result<OpaqueObj> {
     RDB_TRY_SET(LoadLen(NULL), len);
     if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
       return Fail(errc::empty_key);
-    // Reject a member count beyond the remaining input before it is reserved.
-    if (len > RemainingBytes())
+    const size_t increment = rdbtype == RDB_TYPE_SET_WITH_EXPIRY ? 2 : 1;
+    if (ExceedsCollectionInput(len, increment))
       return Fail(errc::rdb_file_corrupted) << "set size " << len;
-    if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
-      len *= 2;
-    }
-    pending_read_.reserve = len;
+    len *= increment;
+    pending_read_.reserve = ReserveHint(len);
   }
 
   // Limit each read to kMaxBlobLen elements.
@@ -1737,14 +1735,12 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
     if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
       return Unexpected(errc::empty_key);
 
-    // Reject a field count beyond the remaining input before it is reserved. Every element takes
-    // at least one byte, which also keeps the multiplication from overflowing.
     const size_t increment = rdbtype == RDB_TYPE_HASH ? 2 : 3;
-    if (len > RemainingBytes() / increment)
+    if (ExceedsCollectionInput(len, increment))
       return Unexpected(errc::rdb_file_corrupted);
 
     len *= increment;
-    pending_read_.reserve = len;
+    pending_read_.reserve = ReserveHint(len);
   }
 
   // Limit each read to kMaxBlobLen elements.
@@ -1890,10 +1886,9 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
     zsetlen = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
-    // Reject a member count beyond the remaining input before it is reserved.
-    if (zsetlen > RemainingBytes())
+    if (ExceedsCollectionInput(zsetlen))
       return Unexpected(errc::rdb_file_corrupted);
-    pending_read_.reserve = zsetlen;
+    pending_read_.reserve = ReserveHint(zsetlen);
   }
 
   if (zsetlen == 0)
