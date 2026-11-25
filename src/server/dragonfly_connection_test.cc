@@ -58,9 +58,12 @@ class RawRespClient {
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
-    address.sin_port = htons(port);
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+
+    // Bind first: a port picked by connect() can repeat for a client of another listener.
+    const bool bound = ::bind(fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
+    address.sin_port = htons(port);
+    if (!bound || connect(fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
       close(fd_);
       fd_ = -1;
     }
@@ -683,13 +686,16 @@ TEST_F(ClientKillTest, Filters) {
               ErrArg("Killed 0 client(s), but unable to kill 1 admin client(s)."));
   const std::vector<std::string> admin_info =
       absl::StrSplit(Run({"CLIENT", "LIST", "ID", admin_id}).GetString(), absl::ByAnyChar(" ="));
-  EXPECT_THAT(Run({"CLIENT", "KILL", "ADDR", admin_info.at(3)}), ErrArg("unable to kill 1 admin"));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "ADDR", admin_info.at(3)}),
+              ErrArg("Killed 0 client(s), but unable to kill 1 admin client(s)."));
   EXPECT_THAT(Run({"CLIENT", "KILL", "LADDR", absl::StrCat("127.0.0.1:", admin_port_)}),
-              ErrArg("unable to kill 1 admin"));
+              ErrArg("Killed 0 client(s), but unable to kill 1 admin client(s)."));
   RawRespClient admin_replica{admin_port_};
   ASSERT_TRUE(Call(admin_replica, "REPLCONF CAPA dragonfly"));
-  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "replica"}), ErrArg("unable to kill 1 admin client"));
-  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "slave"}), ErrArg("unable to kill 1 admin client"));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "replica"}),
+              ErrArg("Killed 0 client(s), but unable to kill 1 admin client(s)."));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "slave"}),
+              ErrArg("Killed 0 client(s), but unable to kill 1 admin client(s)."));
   EXPECT_EQ(Call(admin, "CLIENT KILL TYPE replica"), ":1\r\n");
   EXPECT_THAT(Run({"CLIENT", "KILL", "USER", "u1"}), IntArg(2));
   EXPECT_TRUE(u1.ReadEof() && u1_other.ReadEof());
