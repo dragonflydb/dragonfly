@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <optional>
+#include <utility>
+
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
@@ -77,6 +80,24 @@ class Service : public facade::ServiceInterface {
 
   bool RequestLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
   void RemoveLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
+
+  // Holds the server LOADING for one load; destroying it switches back to ACTIVE.
+  class LoadingScope {
+   public:
+    explicit LoadingScope(Service* service) : service_(service) {
+    }
+    LoadingScope(LoadingScope&& other) noexcept : service_(std::exchange(other.service_, nullptr)) {
+    }
+    LoadingScope& operator=(LoadingScope&&) = delete;
+    ~LoadingScope();
+
+   private:
+    Service* service_;
+  };
+
+  // ACTIVE -> LOADING for a load that must not overlap another one. nullopt if the server is not
+  // ACTIVE, e.g. another load runs or it shuts down.
+  std::optional<LoadingScope> EnterExclusiveLoading() ABSL_LOCKS_EXCLUDED(mu_);
 
   // Return true if state is LOADING and loading_state_counter_ == 0, that is,
   // if no multiple operations require LOADING_STATE at the same time.

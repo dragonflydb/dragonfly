@@ -688,17 +688,21 @@ void DflyCmd::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
+  // Before FlushAll: no other load may run, and no write lands between the flush and the load.
+  auto scope = sf_->service().EnterExclusiveLoading();
+  if (!scope)
+    return cmd_cntx->SendError(kLoadingErr);
+
   if (existing_keys == ServerFamily::LoadExistingKeys::kFail) {
     sf_->FlushAll(cmd_cntx->server_conn_cntx()->ns);
   }
 
-  if (auto fut_ec = sf_->Load(filename, existing_keys); fut_ec) {
-    GenericError ec = fut_ec->Get();
-    if (ec) {
-      string msg = ec.Format();
-      LOG(WARNING) << "Could not load file " << msg;
-      return cmd_cntx->SendError(msg);
-    }
+  GenericError ec = sf_->Load(filename, existing_keys).Get();
+  scope.reset();
+  if (ec) {
+    string msg = ec.Format();
+    LOG(WARNING) << "Could not load file " << msg;
+    return cmd_cntx->SendError(msg);
   }
 
   cmd_cntx->SendOk();

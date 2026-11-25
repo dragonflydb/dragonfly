@@ -2988,6 +2988,17 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   return prev;
 }
 
+Service::LoadingScope::~LoadingScope() {
+  if (service_)
+    service_->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+}
+
+optional<Service::LoadingScope> Service::EnterExclusiveLoading() {
+  if (SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) != GlobalState::ACTIVE)
+    return nullopt;
+  return LoadingScope{this};
+}
+
 bool Service::RequestLoadingState() {
   GlobalState prev = SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (prev == GlobalState::ACTIVE || prev == GlobalState::LOADING) {
