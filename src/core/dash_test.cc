@@ -1268,6 +1268,36 @@ TEST_F(DashTest, BumpPolicy) {
   EXPECT_EQ(key, segment_.Key(kFirstStashId, 2));
 }
 
+TEST_F(DashTest, BumpUpSkipsDeletedPredecessor) {
+  FillSegment(0);
+  ASSERT_TRUE(segment_.GetBucket(1).IsFull());
+
+  const Segment::Key_t deleted_key = segment_.Key(1, 1);
+  const Segment::Key_t bumped_key = segment_.Key(1, 2);
+  segment_.Delete(Segment::Iterator{1, 1}, dt_.DoHash(deleted_key));
+  ASSERT_FALSE(segment_.IsBusy(1, 1));
+
+  struct RecordingBumpPolicy {
+    Segment::Key_t forbidden;
+    mutable vector<Segment::Key_t> seen;
+
+    bool CanBump(Segment::Key_t key) const {
+      seen.push_back(key);
+      EXPECT_NE(key, forbidden);
+      return true;
+    }
+  };
+
+  RecordingBumpPolicy policy{deleted_key, {}};
+  auto it = segment_.BumpUp(1, 2, dt_.DoHash(bumped_key), policy, [](auto&&...) {});
+  EXPECT_EQ(it.index, 1u);
+  EXPECT_EQ(it.slot, 2u);
+  EXPECT_FALSE(segment_.IsBusy(1, 1));
+  EXPECT_EQ(segment_.Key(1, 2), bumped_key);
+  EXPECT_EQ(policy.seen.size(), 1u);
+  EXPECT_EQ(policy.seen[0], bumped_key);
+}
+
 TEST_F(DashTest, Insert2) {
   uint64_t k = 1191;
   ASSERT_EQ(2019837007031366716, UInt64Policy::HashFn(k));
@@ -1628,6 +1658,117 @@ TEST_F(DashTest, Eviction) {
   auto [it, res] = dt_.Insert(num, 0, ev);
   EXPECT_TRUE(res);
   EXPECT_EQ(bucket_cnt, dt_.bucket_count());
+}
+
+TEST_F(DashTest, BucketIteratorSurvivesDirectoryGrowth) {
+  ASSERT_EQ(1u, dt_.depth());
+  ASSERT_EQ(2u, dt_.unique_segments());
+
+  // Populate keys exclusively into segment 1 until at least one bucket is full,
+  // keeping global depth at 1 so segment 1 stays at seg_id == 1.
+  uint64_t next_key = 1;
+  uint8_t target_bid = 0;
+  bool found_full = false;
+  while (!found_full) {
+    uint64_t key = next_key++;
+    uint64_t h = dt_.DoHash(key);
+    if ((h >> 63) != 1)
+      continue;
+    dt_.Insert(key, key * 10);
+    ASSERT_EQ(1u, dt_.depth());
+    auto* seg1 = dt_.GetSegment(1);
+    for (uint8_t bid = 0; bid < Dash64::Segment_t::kBucketNum; ++bid) {
+      if (seg1->GetBucket(bid).IsFull()) {
+        target_bid = bid;
+        found_full = true;
+        break;
+      }
+    }
+  }
+
+  const auto* pinned_seg = dt_.GetSegment(1);
+  Dash64::bucket_iterator bit = dt_.BucketIt(1, target_bid);
+  ASSERT_FALSE(bit.is_done());
+  const uintptr_t expected_bucket_addr = bit.bucket_address();
+  const uint64_t expected_first_key = bit->first;
+
+  // Insert keys into segment 0 (MSB == 0) until segment 0 splits and grows the directory.
+  // Segment 0's new right child will occupy directory index 1 (the stale seg_id_ in `bit`),
+  // while `pinned_seg` moves to directory index 2 (and alias 3).
+  while (dt_.depth() == 1u) {
+    uint64_t key = next_key++;
+    uint64_t h = dt_.DoHash(key);
+    if ((h >> 63) != 0)
+      continue;
+    dt_.Insert(key, key * 10);
+  }
+  ASSERT_GE(dt_.depth(), 2u);
+  ASSERT_NE(dt_.GetSegment(1), pinned_seg);
+
+  const unsigned live_seg_id = bit.segment_id();
+  EXPECT_NE(live_seg_id, 1u);
+  EXPECT_EQ(dt_.GetSegment(live_seg_id), pinned_seg);
+  EXPECT_EQ(bit.bucket_address(), expected_bucket_addr);
+  EXPECT_EQ(bit->first, expected_first_key);
+
+  auto cursor = bit.bucket_cursor();
+  EXPECT_EQ(cursor.segment_id(dt_.depth()), live_seg_id);
+  EXPECT_EQ(cursor.bucket_id(), target_bid);
+  EXPECT_EQ(bit, dt_.BucketIt(live_seg_id, target_bid));
+  EXPECT_NE(bit, dt_.BucketIt(1, target_bid));
+
+  Dash64::BucketSet bset(bit);
+  unsigned bset_count = 0;
+  for (auto b : bset.buckets()) {
+    ++bset_count;
+    EXPECT_EQ(b.bucket_address(), expected_bucket_addr);
+    EXPECT_EQ(b, bit);
+  }
+  EXPECT_EQ(bset_count, 1u);
+
+  Dash64::iterator multi_it(bit);
+  EXPECT_EQ(multi_it.segment_id(), live_seg_id);
+  EXPECT_EQ(multi_it.bucket_address(), expected_bucket_addr);
+  EXPECT_EQ(multi_it->first, expected_first_key);
+
+  Dash64::const_iterator const_multi_it(bit);
+  EXPECT_EQ(const_multi_it.segment_id(), live_seg_id);
+  EXPECT_EQ(const_multi_it.bucket_address(), expected_bucket_addr);
+  EXPECT_EQ(const_multi_it->first, expected_first_key);
+
+  // Snapshot the unrelated segment currently residing at stale index 1 and the pinned bucket.
+  set<uint64_t> stale_seg_keys;
+  for (auto sbit = dt_.BucketIt(1, target_bid); !sbit.is_done(); ++sbit) {
+    stale_seg_keys.insert(sbit->first);
+  }
+  set<uint64_t> pinned_keys;
+  for (auto pbit = bit; !pbit.is_done(); ++pbit) {
+    pinned_keys.insert(pbit->first);
+  }
+  ASSERT_EQ(pinned_keys.size(), Dash64::kSlotNum);
+  const uint64_t evicted_key = pinned_seg->Key(target_bid, Dash64::kSlotNum - 1);
+
+  // ShiftRight must shift and evict from the pinned segment, leaving stale index 1 untouched.
+  const size_t size_before = dt_.size();
+  EXPECT_TRUE(dt_.ShiftRight(bit));
+  EXPECT_EQ(dt_.size(), size_before - 1);
+  EXPECT_EQ(dt_.Find(evicted_key), dt_.end());
+
+  set<uint64_t> pinned_keys_after;
+  for (auto pbit = dt_.BucketIt(live_seg_id, target_bid); !pbit.is_done(); ++pbit) {
+    pinned_keys_after.insert(pbit->first);
+  }
+  EXPECT_EQ(pinned_keys_after.size(), Dash64::kSlotNum - 1);
+  EXPECT_EQ(pinned_keys_after.count(evicted_key), 0u);
+  for (uint64_t k : pinned_keys_after) {
+    EXPECT_EQ(pinned_keys.count(k), 1u);
+  }
+
+  set<uint64_t> stale_seg_keys_after;
+  for (auto sbit = dt_.BucketIt(1, target_bid); !sbit.is_done(); ++sbit) {
+    stale_seg_keys_after.insert(sbit->first);
+  }
+  EXPECT_EQ(stale_seg_keys_after, stale_seg_keys);
 }
 
 struct VersionPolicy : public BasicDashPolicy {

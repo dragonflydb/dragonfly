@@ -574,10 +574,11 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   // Pins the same segment as other if both are single bucket iterators
   template <bool TIsConst, bool TIsSingle>
   void PinSegment(const Iterator<TIsConst, TIsSingle>& other) {
-    if constexpr (IsSingleBucket && TIsSingle)
+    if constexpr (IsSingleBucket && TIsSingle) {
       pinned_seg_ = SegmentPin{other.pinned_seg_.get()};
-    else
+    } else if constexpr (IsSingleBucket) {
       PinSegment();
+    }
   }
 
   Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid, uint8_t sid)
@@ -605,7 +606,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   requires TIsConst Iterator(const Iterator<!TIsConst, TIsSingleB>& other)
   noexcept
       : owner_(other.owner_),
-        seg_id_(other.seg_id_),
+        seg_id_(other.segment_id()),
         bucket_id_(other.bucket_id_),
         slot_id_(other.slot_id_),
         done_(other.done_) {
@@ -616,7 +617,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   template <bool TIsSingle>
   Iterator(const Iterator<IsConst, TIsSingle>& other) noexcept
       : owner_(other.owner_),
-        seg_id_(other.seg_id_),
+        seg_id_(other.segment_id()),
         bucket_id_(other.bucket_id_),
         slot_id_(IsSingleBucket ? 0 : other.slot_id_),
         done_(other.done_) {
@@ -683,7 +684,12 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   template <bool B = Policy::kUseVersion>
   requires B uint64_t GetVersion()
   const {
-    assert(owner_ && seg_id_ < owner_->segment_.size());
+    assert(owner_);
+    if constexpr (IsSingleBucket) {
+      assert(pinned_seg_.get() != nullptr);
+    } else {
+      assert(seg_id_ < owner_->segment_.size());
+    }
     return GetSegment()->GetVersion(bucket_id_);
   }
 
@@ -695,9 +701,15 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   friend bool operator==(const Iterator& lhs, const Iterator& rhs) {
     if (lhs.done_ && rhs.done_)
       return true;
-    return lhs.owner_ == rhs.owner_ && lhs.seg_id_ == rhs.seg_id_ &&
-           lhs.bucket_id_ == rhs.bucket_id_ && lhs.slot_id_ == rhs.slot_id_ &&
-           lhs.done_ == rhs.done_;
+    if constexpr (IsSingleBucket) {
+      return lhs.owner_ == rhs.owner_ && lhs.pinned_seg_.get() == rhs.pinned_seg_.get() &&
+             lhs.bucket_id_ == rhs.bucket_id_ && lhs.slot_id_ == rhs.slot_id_ &&
+             lhs.done_ == rhs.done_;
+    } else {
+      return lhs.owner_ == rhs.owner_ && lhs.seg_id_ == rhs.seg_id_ &&
+             lhs.bucket_id_ == rhs.bucket_id_ && lhs.slot_id_ == rhs.slot_id_ &&
+             lhs.done_ == rhs.done_;
+    }
   }
 
   friend bool operator!=(const Iterator& lhs, const Iterator& rhs) {
@@ -708,7 +720,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   // Serves as a hint really to the placement of the original item, i.e. the item
   // could have moved.
   detail::DashCursor bucket_cursor() const {
-    return detail::DashCursor(owner_->global_depth_, seg_id_, bucket_id_);
+    return detail::DashCursor(owner_->global_depth_, segment_id(), bucket_id_);
   }
 
   detail::PhysicalBid bucket_id() const {
@@ -719,7 +731,12 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   // Stable for the lifetime of a serialization (mutations that could trigger
   // segment splits are blocked while a snapshot version is registered).
   uintptr_t bucket_address() const {
-    assert(owner_ && seg_id_ < owner_->segment_.size());
+    assert(owner_);
+    if constexpr (IsSingleBucket) {
+      assert(pinned_seg_.get() != nullptr);
+    } else {
+      assert(seg_id_ < owner_->segment_.size());
+    }
     return reinterpret_cast<uintptr_t>(&GetSegment()->GetBucket(bucket_id_));
   }
 
@@ -727,7 +744,12 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return slot_id_;
   }
 
-  unsigned segment_id() const {
+  unsigned segment_id() const noexcept {
+    if constexpr (IsSingleBucket) {
+      if (pinned_seg_.get() != nullptr) {
+        return pinned_seg_.get()->segment_id();
+      }
+    }
     return seg_id_;
   }
 
@@ -799,9 +821,9 @@ template <bool IsConst, bool IsSingleBucket>
 void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::Seek2Occupied() {
   if (done_)
     return;
-  assert(seg_id_ < owner_->segment_.size());
 
   if constexpr (IsSingleBucket) {
+    assert(pinned_seg_.get() != nullptr);
     const auto& b = GetSegment()->GetBucket(bucket_id_);
     uint32_t mask = b.GetBusy() >> slot_id_;
     if (mask) {
@@ -810,6 +832,7 @@ void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::Seek2Oc
       return;
     }
   } else {
+    assert(seg_id_ < owner_->segment_.size());
     while (seg_id_ < owner_->segment_.size()) {
       auto seg_it = owner_->segment_[seg_id_]->FindValidStartingFrom(bucket_id_, slot_id_);
       if (seg_it.found()) {
@@ -921,6 +944,7 @@ void DashTable<_Key, _Value, Policy>::Clear() {
       size_t next_src = NextSeg(src);  // must do before because NextSeg is dependent on seg.
       if (dest < new_size) {
         seg->set_local_depth(initial_depth_);
+        seg->set_segment_id(dest);
         bucket_count_ += seg->num_buckets();
         segment_[dest++] = seg;
       } else {
@@ -939,7 +963,7 @@ void DashTable<_Key, _Value, Policy>::Clear() {
 
 template <typename _Key, typename _Value, typename Policy>
 bool DashTable<_Key, _Value, Policy>::ShiftRight(bucket_iterator it) {
-  auto* seg = segment_[it.seg_id_];
+  auto* seg = it.GetSegment();
 
   typename Segment_t::Hash_t hash_val = 0;
   auto& bucket = seg->GetBucket(it.bucket_id_);
