@@ -5,6 +5,8 @@ import re
 import async_timeout
 import pytest
 import redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, DflyStartException
@@ -621,7 +623,9 @@ async def test_serves_loading_during_replay(df_factory: DflyInstanceFactory, tmp
     # The port opens before the AOF is restored: clients get -LOADING, and no write lands before
     # the replay ends, not even through DEBUG POPULATE, which is allowed while LOADING otherwise.
     df.start()
-    client = df.client()
+
+    # Newer redis-py clients retry -LOADING by default, which would hide it until the replay ends.
+    client = df.client(retry=Retry(NoBackoff(), 0))
     with pytest.raises(redis.exceptions.BusyLoadingError):
         await client.execute_command("DEBUG POPULATE 10 populated")
     with pytest.raises(redis.exceptions.BusyLoadingError):
