@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string_view>
 #include <system_error>
@@ -27,15 +28,17 @@ struct AofResume {
 
 // Replays every shard's AOF chain from its cut in the manifest, in parallel, global commands
 // meeting at the barrier, and fills resume with where each shard's log continues. Runs while the
-// server is LOADING, after the manifest's base was loaded.
+// server is LOADING, after the manifest's base was loaded. Setting cancel stops it before the next
+// record; it then returns operation_canceled.
 std::error_code ReplayAof(std::string_view dir, const AofManifest& manifest, Service* service,
-                          std::vector<AofResume>* resume);
+                          const std::atomic_bool* cancel, std::vector<AofResume>* resume);
 
 #else
 
 // The chain reader needs io_uring files, so --aof is rejected before replay.
 inline std::error_code ReplayAof(std::string_view dir, const AofManifest& manifest,
-                                 Service* service, std::vector<AofResume>* resume) {
+                                 Service* service, const std::atomic_bool* cancel,
+                                 std::vector<AofResume>* resume) {
   return std::make_error_code(std::errc::not_supported);
 }
 
