@@ -1490,6 +1490,28 @@ TEST_F(SearchFamilyTest, DeeplyNestedQueryNoStackOverflow) {
   // LIMITED keeps the reply shallow while still profiling the deep tree.
   Run({"FT.PROFILE", "i1", "SEARCH", "LIMITED", "QUERY", deep});
 
+  // FILTER and APPLY expressions are walked iteratively too, also when parsing fails.
+  string sum = "1", power = "1", ors = "0", calls;
+  for (int i = 1; i < 5000; ++i) {
+    sum += "+1";
+    power += "^1";
+  }
+  for (int i = 0; i < 3000; ++i)
+    ors += "||0";
+  ors += "||1";
+  for (int i = 0; i < 2000; ++i)
+    calls += "abs(";
+  calls += "1" + string(2000, ')');
+  const string negs = string(10000, '-') + "1", nots = string(10000, '!') + "1";
+
+  EXPECT_THAT(Run({"FT.AGGREGATE", "i1", "*", "FILTER", "(" + nots + ")+"}),
+              ErrArg("FILTER expression error"));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "i1", "*", "APPLY", sum, "AS", "x", "APPLY", power, "AS", "y",
+                   "APPLY", negs, "AS", "z", "APPLY", calls, "AS", "w"}),
+              IsUnordArrayWithSize(IsMap("x", "5000", "y", "1", "z", "1", "w", "1")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@t", "FILTER", nots, "FILTER", ors}),
+              IsUnordArrayWithSize(IsMap("t", "hello")));
+
   EXPECT_EQ(Run({"PING"}), "PONG");
 }
 

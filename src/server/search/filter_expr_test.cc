@@ -204,6 +204,8 @@ TEST(FilterExprTest, LogicalAnd) {
   EXPECT_TRUE(EvalBool("@a == 'x' && @b < 1.0", doc));
   EXPECT_FALSE(EvalBool("@a == 'x' && @b > 1.0", doc));
   EXPECT_FALSE(EvalBool("@a == 'y' && @b < 1.0", doc));
+  EXPECT_EQ(Eval("1 && @a", doc), Value(1.0));
+  EXPECT_EQ(Eval("@c && 1", doc), Value(0.0));
 }
 
 TEST(FilterExprTest, LogicalOr) {
@@ -211,6 +213,8 @@ TEST(FilterExprTest, LogicalOr) {
   EXPECT_TRUE(EvalBool("@a == 'x' || @b > 5.0", doc));
   EXPECT_TRUE(EvalBool("@a == 'z' || @b > 1.0", doc));
   EXPECT_FALSE(EvalBool("@a == 'z' || @b > 5.0", doc));
+  EXPECT_EQ(Eval("0 || @b", doc), Value(1.0));
+  EXPECT_EQ(Eval("@a || 0", doc), Value(1.0));
 }
 
 TEST(FilterExprTest, LogicalNot) {
