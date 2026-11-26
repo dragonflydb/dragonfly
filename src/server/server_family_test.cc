@@ -352,6 +352,14 @@ TEST_F(ServerFamilyTest, ClientPause) {
   EXPECT_LT((absl::Now() - get_start), absl::Milliseconds(50));
   Run({"set", "key", "value2"});
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
+
+  // EVAL is not journaled, but EXEC of a queued writable script must still be held.
+  Run("writer", {"multi"});
+  Run("writer", {"eval", "return redis.call('set', KEYS[1], 'v')", "1", "key"});
+  start = absl::Now();
+  Run({"CLIENT", "PAUSE", "50", "WRITE"});
+  Run("writer", {"exec"});
+  EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
 }
 
 TEST_F(ServerFamilyTest, ClientListAccepted) {

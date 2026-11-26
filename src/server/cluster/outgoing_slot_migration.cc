@@ -138,6 +138,10 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     streamer_.SendFinalize(attempt);
   }
 
+  void AbortFinalize() {
+    streamer_.AbortFinalize();
+  }
+
   dfly::GenericError GetError() const {
     return exec_st_.GetError();
   }
@@ -425,14 +429,14 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     ResetReplyParser();
   }
 
-  // Migration finalization has to be done via client pause because commands need to
+  // Migration finalization has to be done via client pause because writes need to
   // be blocked on coordinator level to avoid intializing transactions with stale cluster slot info
   // TODO implement blocking on migrated slots only
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt =
       dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
-                  nullptr, ClientPause::ALL, is_pause_in_progress);
+                  nullptr, ClientPause::WRITE, is_pause_in_progress);
 
   if (!pause_fb_opt) {
     auto err = absl::StrCat("Migration finalization time out ", cf_->MyID(), " : ",
@@ -452,6 +456,13 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
 
   LOG(INFO) << "FINALIZE flows for " << cf_->MyID() << " : " << migration_info_.node_info.id;
   OnAllShards([attempt](auto& migration) { migration->Finalize(attempt); });
+
+  // Unless the target acknowledged this attempt, resume streaming before writes are unpaused.
+  bool acked = false;
+  absl::Cleanup abort_finalize([this, &acked] {
+    if (!acked)
+      OnAllShards([](auto& migration) { migration->AbortFinalize(); });
+  });
 
   auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID(), " ", attempt);
   VLOG(1) << "send " << cmd;
@@ -498,6 +509,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     }
 
     if (*ack_attempt == attempt) {
+      acked = true;
       break;
     } else {
       LOG(WARNING) << "Incorrect attempt payload " << cf_->MyID() << " : "
