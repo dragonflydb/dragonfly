@@ -1212,13 +1212,20 @@ void Connection::HandleRequests() {
       cc_->authenticated = true;
       auto ec = http_conn.ParseFromBuffer(io_buf_.InputBuffer());
       io_buf_.ConsumeInput(io_buf_.InputLen());
-      if (!ec) {
+
+      // ParseFromBuffer() runs the requests it parsed, and CLIENT KILL or a shutdown may close
+      // the socket meanwhile. HandleRequests() CHECK-fails on a closed socket.
+      if (!ec && socket_->IsOpen()) {
         http_conn.HandleRequests();
       }
 
       // Release the ownership of the socket from http_conn so it would stay with
       // this connection.
       http_conn.ReleaseSocket();
+
+      // Commands sent over the HTTP API can register the context with server state (e.g. WATCH).
+      // Unregister it like ConnectionFlow() does, so nothing points to it once it is destroyed.
+      service_->OnConnectionClose(cc_.get());
     } else {  // non-http
       ioloop_v2_ = (protocol_ == Protocol::MEMCACHE && GetFlag(FLAGS_enable_memcache_io_loop_v2)) ||
                    (protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_resp_io_loop_v2));

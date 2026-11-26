@@ -4,6 +4,9 @@
 
 #include "server/http_api.h"
 
+#include <absl/strings/ascii.h>
+#include <absl/strings/match.h>
+
 #include "base/logging.h"
 #include "common/borrowed_string.h"
 #include "core/flatbuffers.h"
@@ -118,7 +121,7 @@ struct CaptureVisitor {
   }
 
   void operator()(const payload::SimpleString& ss) {
-    absl::StrAppend(&str, "\"", ss, "\"");
+    absl::StrAppend(&str, JsonEscape(ss));
   }
 
   void operator()(const payload::BulkString& bs) {
@@ -150,7 +153,13 @@ struct CaptureVisitor {
   }
 
   void operator()(const payload::Error& err) {
-    str = absl::StrCat(R"({"error": ")", err->first, "\"");
+    string error = absl::StrCat(R"({"error": )", JsonEscape(err->first));
+
+    // A top-level error replaces the result. A nested one (e.g. in an EXEC reply) is an element.
+    if (depth == 0)
+      str = std::move(error);
+    else
+      absl::StrAppend(&str, error, "}");
   }
 
   void operator()(facade::OpStatus status) {
@@ -167,6 +176,7 @@ struct CaptureVisitor {
       return;
     }
     absl::StrAppend(&str, "[");
+    ++depth;
     bool append_delimiter = false;
     for (auto& pl : cp->arr) {
       if (append_delimiter) {
@@ -175,10 +185,22 @@ struct CaptureVisitor {
       append_delimiter = true;
       visit(*this, std::move(pl));
     }
+    --depth;
     absl::StrAppend(&str, "]");
   }
   string str;
+  unsigned depth = 0;  // nesting level of the collection being visited
 };
+
+// An HTTP connection gets one reply per request. It can't receive messages pushed to it later
+// (MONITOR, (P|S)SUBSCRIBE, CLIENT TRACKING), and its hangup isn't noticed while a command blocks.
+// DFLY commands set up replication connections or move a connection to another thread.
+bool IsSupportedOverHttp(const CommandId& cid, const facade::ParsedArgs& args) {
+  string_view name = cid.name();
+  if (cid.IsBlocking() || cid.IsSubscribeFamily() || name == "MONITOR" || name == "DFLY")
+    return false;
+  return name != "CLIENT" || args.size() < 2 || !absl::EqualsIgnoreCase(args[1], "TRACKING");
+}
 
 }  // namespace
 
@@ -223,8 +245,18 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
   for (size_t i = 0; i < vec.size(); ++i) {
     cmd_cntx.PushArg(vec[i].AsString().c_str());
   }
-  service->DispatchCommand(facade::ParsedArgs{cmd_cntx}, &cmd_cntx,
-                           facade::AsyncPreference::ONLY_SYNC, nullptr);
+
+  facade::ParsedArgs cmd_args{cmd_cntx};
+  const CommandId* cid = service->FindCmd(absl::AsciiStrToUpper(cmd_args.Front()));
+  if (cid && !IsSupportedOverHttp(*cid, cmd_args)) {
+    // Fail a pending MULTI, as other errors while queuing do.
+    auto& exec_info = cmd_cntx.server_conn_cntx()->conn_state.exec_info;
+    if (exec_info.IsCollecting())
+      exec_info.error = true;
+    cmd_cntx.SendError("This command is not supported over the HTTP API");
+  } else {
+    service->DispatchCommand(cmd_args, &cmd_cntx, facade::AsyncPreference::ONLY_SYNC, nullptr);
+  }
   facade::CapturingReplyBuilder::Payload payload = reply_builder.Take();
 
   auto response = http::MakeStringResponse();
