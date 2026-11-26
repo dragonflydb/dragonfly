@@ -826,6 +826,12 @@ ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
                                             "'"));
     }
 
+    if (l_index == r_index) {
+      return CreateSyntaxError(
+          absl::StrCat("bad arguments for LOAD_FROM: fields must be from different indexes. Got '",
+                       left, "' and '", right, "'"));
+    }
+
     if (l_index == join_params.index_alias) {
       join_params.conditions.emplace_back(l_field, r_index, r_field);
     } else if (r_index == join_params.index_alias) {
