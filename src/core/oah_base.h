@@ -144,7 +144,7 @@ inline Decoded Read(const char* src) {
 // Key codec shared by OAHEntry/OAHPair. A stored key is a control/size header followed by content
 // bytes (ascii-packed or raw). Hashing and comparison run on the content bytes; only retrieval
 // (Decode) reconstructs the logical key. The header and content need not be contiguous (the map
-// keeps the value pointer between them), so read/compare/decode take the two pointers separately.
+// keeps the value size between them), so read/compare/decode take the two pointers separately.
 namespace key {
 
 inline constexpr uint8_t kEncodedBit = size::kEncodingBit;  // control bit 7 marks an encoded key
