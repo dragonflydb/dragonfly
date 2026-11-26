@@ -73,7 +73,7 @@ class RESPArray {
   }
 
   bool Empty() const {
-    return Size() == 0;
+    return Size() == 0 || Size() == SIZE_MAX;
   }
 
   RESPObj operator[](size_t index) const {
