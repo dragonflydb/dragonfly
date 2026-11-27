@@ -102,6 +102,20 @@ class OAHMap : public OAHTable<OAHPair> {
   void RandomPairsUnique(unsigned count, std::vector<std::string>& keys,
                          std::vector<std::string>& vals, bool with_value);
 
+  // Appends `count` live pairs sampled uniformly with repetitions, copying them in one pass over
+  // the table; mirrors StringMap::RandomPairs. Appends nothing if no live pairs remain.
+  void RandomPairs(unsigned count, std::vector<std::string>& keys, std::vector<std::string>& vals,
+                   bool with_value);
+
+  // Like Scan, but reports each field together with its value as cb(field, value). Both views are
+  // valid for the duration of the callback.
+  template <typename PairCb> uint32_t ScanPairs(uint32_t cursor, const PairCb& cb) {
+    return ScanEntries(cursor, [&cb](OAHPair pair) {
+      const oah::key::Decoded key = DecodeKey(pair);
+      cb(key.view(), pair.Value());
+    });
+  }
+
  private:
   enum class AddMode { kReplace, kKeepTtl, kSkip };
 

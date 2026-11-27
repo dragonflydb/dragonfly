@@ -13,6 +13,7 @@
 #include <cassert>
 #include <functional>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -234,6 +235,12 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   using ItemCb = std::function<void(std::string_view)>;
 
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) {
+    return ScanEntries(cursor, cb);
+  }
+
+  // Like Scan, but reports each live entry as cb(Entry), so derived containers can report more
+  // than the key.
+  template <typename EntryCb> uint32_t ScanEntries(uint32_t cursor, const EntryCb& cb) {
     if (entries_.empty())
       return 0;
 
@@ -624,9 +631,14 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     return matched & ~is_empty;
   }
 
-  // Scans one stable-SCAN home bucket window and reports live affiliated entries. Templated on
-  // Expire: no-TTL sets skip the per-entry lazy expiration and the post-expiry empty re-check.
-  template <bool Expire> bool ScanHomeBucket(uint32_t bucket_id, const ItemCb& cb) {
+  // Scans one stable-SCAN home bucket window and reports live affiliated entries: the decoded key
+  // for Scan's ItemCb, the entry itself for other callbacks. Templated on Expire: no-TTL sets skip
+  // the per-entry lazy expiration and the post-expiry empty re-check.
+  template <bool Expire, typename EntryCb>
+  bool ScanHomeBucket(uint32_t bucket_id, const EntryCb& cb) {
+    // Decode here, not in a helper: Decoded's buffer in this frame stops GCC from inlining both
+    // specializations into ScanEntries, which slowed Scan by up to ~6%.
+    constexpr bool kKeyCb = std::is_same_v<EntryCb, ItemCb>;
     const uint32_t part = std::min(capacity_log_, kShiftLog);
     assert(part > 0u);
     // ScanWindowMask drops empty lanes, so `cand` holds only affiliated non-empty single entries.
@@ -652,8 +664,12 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
         if (e.Empty())
           continue;
       }
-      const oah::key::Decoded key = DecodeKey(e);
-      cb(key.view());
+      if constexpr (kKeyCb) {
+        const oah::key::Decoded key = DecodeKey(e);
+        cb(key.view());
+      } else {
+        cb(e);
+      }
       reported = true;
     }
 
@@ -674,8 +690,12 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
             if (el.Empty())
               continue;
           }
-          const oah::key::Decoded key = DecodeKey(el);
-          cb(key.view());
+          if constexpr (kKeyCb) {
+            const oah::key::Decoded key = DecodeKey(el);
+            cb(key.view());
+          } else {
+            cb(el);
+          }
           reported = true;
         }
       }
