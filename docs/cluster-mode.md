@@ -472,14 +472,16 @@ walks the following sequence:
    are appended to the same socket so the target sees a single, ordered stream per
    shard.
 5. **Finalization.** Starting at `attempt = 1`, the source pauses non-admin client
-   traffic node-wide, marks the end of each flow's journal with an `LSN(attempt)`
+   writes node-wide, marks the end of each flow's journal with an `LSN(attempt)`
    opcode, then sends `DFLYMIGRATE ACK <source_id> <attempt>` and waits up to
    `--migration_finalization_timeout_ms` (default 30000) for the reply. The target's
    reply on success is the integer attempt number echoed back (RESP `:<attempt>`);
    the source only treats the attempt as succeeded when the echoed value equals the
    attempt it sent. If any flow has not yet quiesced at exactly that `LSN`, the
    target echoes a stale attempt and the source increments its counter, re-pauses,
-   and retries.
+   and retries. Entries journaled after the marker (reads still delete hashes and sets
+   whose last member expired) are dropped until the attempt fails; the target expires
+   those members itself.
 6. **C_FINISHED.** On a successful ACK, the source drops the migrated slots from its
    local ownership immediately. From that moment its routing logic redirects clients
    for those slots to the target (the migration entry in the local config provides
@@ -529,6 +531,9 @@ to a migrated slot landing in this gap would be accepted by the source, journale
 its replicas, and then erased by the source's slot-flush on the closing config. The
 cluster manager hides this by not promoting any client-facing endpoint change until
 both sides report `FINISHED`.
+
+The source does not pause reads during finalization, so until it drops the slots, a
+read of a migrating slot may miss a write the target has already accepted.
 
 The closing `DFLYCLUSTER CONFIG` is still required after a successful ACK. Its job
 is to (a) inform replicas and any third-party nodes of the new ownership, and (b)

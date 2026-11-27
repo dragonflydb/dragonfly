@@ -16,6 +16,8 @@ class Proxy:
         # Accepted sockets that no handler has taken over yet.
         self._accepted = set()
         self._handler_tasks = set()
+        # Optional coroutine function awaited with every chunk before it is forwarded.
+        self.on_data = None
 
     async def handle(self, sock):
         self._accepted.discard(sock)
@@ -40,6 +42,8 @@ class Proxy:
                 data = await reader.read(1024)
                 if not data:
                     break
+                if self.on_data:
+                    await self.on_data(data)
                 writer.write(data)
                 await writer.drain()
             writer.close()

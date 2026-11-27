@@ -277,7 +277,7 @@ void SlotMigrationStreamer::SendFinalize(long attempt) {
           << ", iter_skips: " << migration_stats_.iter_skips;
 
   // Drain all pending journal data before sending the finalize marker.
-  // At this point client pause is active, so no new entries can arrive.
+  // At this point client writes are paused.
   writer_.WaitForInflightToComplete(true);
 
   journal::Entry entry(journal::Op::LSN, attempt);
@@ -286,6 +286,11 @@ void SlotMigrationStreamer::SendFinalize(long attempt) {
   JournalWriter writer{&sink};
   writer.Write(entry);
   writer_.Write(std::move(sink).str());
+
+  // The target may own the slots once it reads the LSN, so nothing may follow it on success.
+  // Writes and key expiry are paused, but reads still delete hashes/sets whose last member expired.
+  // Drop those deletions: the target expires the members itself.
+  drop_entries_ = true;
 
   // DFLYMIGRATE ACK command has a timeout so we want to send it only when LSN is ready to be sent
   ThrottleIfNeeded();
@@ -327,7 +332,8 @@ void SlotMigrationStreamer::ConsumeJournalChange(const journal::JournalChangeIte
   }
 
   DCHECK_GT(item.journal_item.lsn, last_lsn_writen_);
-  writer_.Write(item.journal_item.data);
+  if (!drop_entries_)
+    writer_.Write(item.journal_item.data);
   last_lsn_writen_ = item.journal_item.lsn;
 }
 

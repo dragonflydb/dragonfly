@@ -788,13 +788,17 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
   }
 }
 
+// Whether CLIENT PAUSE WRITE holds the command. PUBLISH and writable EVAL/EVALSHA (not the *_RO
+// variants) count as writes, though they are not journaled.
+bool IsPauseWrite(const CommandId* cid) {
+  return cid->IsJournaled() || cid->IsPublish() || (cid->IsEvalGroup() && !cid->IsReadOnly());
+}
+
 // Blocks the command while CLIENT PAUSE holds it. Returns true if a pause was active.
 bool PauseConnection(const CommandId* cid, bool is_privileged, ConnectionContext* dfly_cntx) {
   auto& etl = *ServerState::tlocal();
   if (etl.IsPaused() && !is_privileged) {
-    bool is_write = cid->IsJournaled();
-    // PUBLISH and writable EVAL/EVALSHA (not the *_RO variants) count as writes here.
-    is_write |= cid->IsPublish() || (cid->IsEvalGroup() && !cid->IsReadOnly());
+    bool is_write = IsPauseWrite(cid);
     is_write |= cid->IsExec() && dfly_cntx->conn_state.exec_info.is_write;
 
     dfly_cntx->paused = true;
@@ -866,7 +870,7 @@ void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid,
   }
 
   exec_info.stored_cmd_bytes += exec_info.body.back().UsedMemory();
-  exec_info.is_write |= cid->IsJournaled();
+  exec_info.is_write |= IsPauseWrite(cid);
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
 }
 

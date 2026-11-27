@@ -573,7 +573,7 @@ async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
-async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: DflyInstanceFactory):
+async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory, proxy_factory):
     # blocking commands should be canceled during migration finalization
     instances = [df_factory.create(port=next(next_port)) for i in range(2)]
     df_factory.start_all(instances)
@@ -586,6 +586,9 @@ async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: Dfl
 
     await apply_config_via_client(nodes)
 
+    # Its field expires while the ACK is held.
+    await c_nodes[0].execute_command("HSETEX", "hash", 1, "f", "v")
+
     logging.debug("Start blpop task")
     blpop_task = asyncio.create_task(c_nodes[0].blpop("list", 0))
 
@@ -593,10 +596,32 @@ async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: Dfl
 
     assert not blpop_task.done()
 
-    nodes[0].migrations.append(
-        MigrationInfo("127.0.0.1", nodes[1].instance.port, [(0, 16383)], nodes[1].id)
-    )
+    # The source sends the ACK after it has paused writes and finalized the flows: hold it there.
+    ack_sent, release_ack = asyncio.Event(), asyncio.Event()
+
+    async def hold_ack(data):
+        if b"DFLYMIGRATE ACK" in data:
+            ack_sent.set()
+            await release_ack.wait()
+
+    proxy = await proxy_factory(nodes[1].instance.port)
+    proxy.on_data = hold_ack
+    nodes[0].migrations.append(MigrationInfo("127.0.0.1", proxy.port, [(0, 16383)], nodes[1].id))
     await apply_config_via_client(nodes)
+
+    # Reads are still served, while writes are held and get MOVED after the handover.
+    await asyncio.wait_for(ack_sent.wait(), 10)
+    assert await asyncio.wait_for(c_nodes[0].type("list"), 5) == "none"
+
+    # Reading the expired field deletes the hash, which must not fail the finalization.
+    await asyncio.sleep(2)
+    assert await c_nodes[0].hget("hash", "f") is None
+    set_task = asyncio.create_task(c_nodes[0].set("key", "value"))
+    await asyncio.sleep(0.5)
+    assert not set_task.done()
+    release_ack.set()
+    with pytest.raises(MovedError):
+        await set_task
 
     await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED")
 
