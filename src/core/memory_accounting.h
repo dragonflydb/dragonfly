@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <utility>
 
 #include "util/fibers/fibers.h"
 
@@ -103,6 +104,22 @@ class AtomicMemoryScope {
   int category_;
   ssize_t baseline_;
 };
+
+// Attributes the callback's allocator delta to category.
+template <typename Func> decltype(auto) WithAtomicScope(int category, Func&& func) {
+  AtomicMemoryScope scope(category);
+  return std::forward<Func>(func)();
+}
+
+// Each invocation opens a fresh atomic scope for the bound category.
+constexpr auto BindAtomicScope(int category) {
+  return [category]<typename Func>(Func&& func) -> decltype(auto) {
+    return WithAtomicScope(category, std::forward<Func>(func));
+  };
+}
+
+inline constexpr auto HashScope = BindAtomicScope(OBJ_HASH);
+inline constexpr auto ListScope = BindAtomicScope(OBJ_LIST);
 
 // Attributes allocator delta during the owning fiber's running intervals for this scope's lifetime
 // Memory tracking is turned off for the durations when fiber is suspended.

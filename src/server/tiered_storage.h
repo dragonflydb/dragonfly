@@ -177,7 +177,7 @@ class TieredStorage : public TieredStorageBase {
   // tiered_repack_scan_budget_us. Disabled by default.
   void RunRepackScan(DbIndex dbid);
 
-  PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
+  PrimeValue TakeCoolValue(tiering::TieredCoolRecord* record);
   tiering::TieredCoolRecord* PopCool();
 
   detail::DashCursor offloading_cursor_;  // where RunOffloading left off

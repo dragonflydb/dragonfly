@@ -451,8 +451,10 @@ void PinnedMap::Drain(MemoryResource* mr) {
       ++it;
       continue;
     }
-    if (pin->orphaned)
-      mr->deallocate(const_cast<void*>(pin->ptr), 0, kAlignSize);
+    if (pin->orphaned) {
+      BindAtomicScope(OBJ_STRING)(
+          [&] { mr->deallocate(const_cast<void*>(pin->ptr), 0, kAlignSize); });
+    }
     auto next = std::next(it);
     pin_map_.erase(it);
     it = next;

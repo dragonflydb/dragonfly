@@ -2,11 +2,14 @@
 // See LICENSE for licensing terms.
 //
 #include <absl/cleanup/cleanup.h>
+#include <absl/flags/reflection.h>
 
 #include <random>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/memory_accounting.h"
 #include "facade/facade_test.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -14,6 +17,8 @@
 #include "server/journal/journal.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
+
+ABSL_DECLARE_FLAG(bool, enable_scope_based_mem_track);
 
 using namespace testing;
 using namespace std;
@@ -29,6 +34,13 @@ namespace dfly {
 
 class StringFamilyTest : public BaseFamilyTest {
  protected:
+  void SetUp() override {
+    absl::SetFlag(&FLAGS_enable_scope_based_mem_track, true);
+    BaseFamilyTest::SetUp();
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
 };
 
 vector<int64_t> ToIntArr(const RespExpr& e) {
@@ -1193,6 +1205,7 @@ TEST_F(StringFamilyTest, PendingReadPinOrphanDrain) {
     cobj.SetString(val);
 
     // Two readers borrow the same value → shared pin, refcnt = 2.
+    const auto old_bytes = static_cast<ssize_t>(cobj.MallocUsed());
     auto b1 = cobj.TryBorrow();
     auto b2 = cobj.TryBorrow();
     ASSERT_TRUE(b1.has_value() && b2.has_value());
@@ -1204,15 +1217,19 @@ TEST_F(StringFamilyTest, PendingReadPinOrphanDrain) {
     cobj.SetString(new_val);
     EXPECT_TRUE(CompactObj::TEST_PinOrphaned(*b1));
 
-    // One unpin — refcnt 2 → 1, no drain yet.
+    // The first drain must leave the remaining reader's buffer intact.
+    const auto before_drain = GetTypeAttributedMemory()[OBJ_STRING];
     b1.reset();
     EXPECT_EQ(CompactObj::TEST_PinRefcnt(*b2), 1u);
+    CompactObj::DrainPendingReads();
+    EXPECT_EQ(GetTypeAttributedMemory()[OBJ_STRING], before_drain);
 
     // Second unpin — refcnt 1 → 0.
     b2.reset();
 
     // Drain reclaims the orphaned buffer and deletes the pin entry.
     CompactObj::DrainPendingReads();
+    EXPECT_EQ(GetTypeAttributedMemory()[OBJ_STRING], before_drain - old_bytes);
   });
 }
 
