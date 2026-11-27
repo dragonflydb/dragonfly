@@ -706,8 +706,13 @@ TEST_F(SingleThreadDflyEngineTest, MSetDoesNotEvictItsOwnKeys) {
   }
 
   size_t evicted = GetMetrics().db_stats[0].events.evicted_keys;
+  size_t hard_evicted = GetMetrics().events.hard_evictions;
   Run(args);
   EXPECT_GE(GetMetrics().db_stats[0].events.evicted_keys - evicted, PrimeTable::kSlotNum);
+
+  // Heartbeat eviction is off: every eviction here happened on insert.
+  EXPECT_EQ(GetMetrics().events.hard_evictions - hard_evicted,
+            GetMetrics().db_stats[0].events.evicted_keys - evicted);
   EXPECT_EQ(1, CheckedInt({"exists", "k0"}));
 }
 
