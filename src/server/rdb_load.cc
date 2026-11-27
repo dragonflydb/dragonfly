@@ -3010,7 +3010,7 @@ void RdbLoader::DiscardChunkedValuesOnFinish() {
   {
     std::unique_lock l{now_chunked_mu_};
     for (auto& [key, pv] : now_chunked_)
-      by_shard[Shard(key.second, shard_set->size())].push_back(std::move(pv));
+      by_shard[Shard(std::get<string>(key), shard_set->size())].push_back(std::move(pv));
     now_chunked_.clear();
   }
 
@@ -3478,7 +3478,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   DbIndex db_ind = db_cntx.db_index;
 
   LoadConfig config_copy = item->load_config;
-  ChunkedKey chunked_key{db_ind, item->key};
+  ChunkedKey chunked_key{db_ind, item->key, item->stream_id};
 
   bool failed_should_cleanup = false;
   absl::Cleanup maybe_remove_chunk_entry = [&] {
@@ -3759,6 +3759,7 @@ auto RdbLoader::ReadAndDispatchObject(int object_type, std::string& key,
   item->mc_flags = obj_settings.mc_flags;
   item->expire_ms = obj_settings.expiretime;
   item->db_index = db_index;
+  item->stream_id = current_chunk_state_ ? current_chunk_state_->stream_id : 0;
 
   std::move(cleanup).Cancel();
 

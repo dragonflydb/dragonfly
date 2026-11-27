@@ -3021,12 +3021,19 @@ TEST_F(RdbTest, InterleavedLoad) {
   }
   ASSERT_EQ(Shard(key, shard_set->size()), 1u);
 
-  std::string a1;
-  // hash chunk 1
-  a1.push_back(RDB_TYPE_HASH);
-  AppendString(&a1, key);
-  AppendLen(&a1, 2);
-  AddKV(&a1, "f1", "v1");
+  auto start_hash = [&](uint32_t id, std::string_view field, std::string_view value) {
+    std::string chunk;
+    chunk.push_back(RDB_TYPE_HASH);
+    AppendString(&chunk, key);
+    AppendLen(&chunk, 2);
+    AddKV(&chunk, field, value);
+    return MakeTaggedChunk(id, chunk);
+  };
+  auto finish_hash = [](uint32_t id, std::string_view field, std::string_view value) {
+    std::string chunk;
+    AddKV(&chunk, field, value);
+    return MakeTaggedChunk(id, chunk);
+  };
 
   // string
   std::string b;
@@ -3034,25 +3041,20 @@ TEST_F(RdbTest, InterleavedLoad) {
   AppendString(&b, "b");
   AppendString(&b, "plain");
 
-  // hash chunk 2
-  std::string a2;
-  AddKV(&a2, "f2", "v2");
-
-  std::string body;
-  // chunk for db 0
-  body += MakeTaggedChunk(1, a1);
-  // simple string b=plain
+  // Both streams target the same key in DB 0. Stream 1 finishes last and replaces stream 2.
+  std::string body = start_hash(1, "f1", "v1");
+  body += start_hash(2, "f3", "v3");
   body += b;
   body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
-  // switch to db 1
   AppendLen(&body, 1);
-  // back to chunk for db 0
-  body += MakeTaggedChunk(1, a2);
+  body += finish_hash(2, "f4", "v4");
+  body += finish_hash(1, "f2", "v2");
 
   auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
   ASSERT_FALSE(ec) << ec.message();
 
   EXPECT_EQ(Run({"SELECT", "0"}), "OK");
+  EXPECT_THAT(Run({"HLEN", key}), IntArg(2));
   EXPECT_EQ(Run({"HGET", key, "f1"}), "v1");
   EXPECT_EQ(Run({"HGET", key, "f2"}), "v2");
   EXPECT_EQ(Run({"GET", "b"}), "plain");
