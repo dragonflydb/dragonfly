@@ -713,7 +713,6 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
   vector<SlotId> round_slots(round_size);
   vector<SlotStats> round_stats;
 
-
   // Reply strings are literals, so they remain valid while waiting for the shards.
   SinkReplyBuilder::ReplyScope scope(rb);
   rb->StartArray(total_slots);
@@ -727,7 +726,6 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
         round_slots[i++] = next_slot;
       if (next_slot++ == range->end && ++range != ranges.end())
         next_slot = range->start;
-
     }
     remaining -= count;
 
