@@ -4,6 +4,9 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/reflection.h>
+#include <absl/types/span.h>
+
+#include <utility>
 
 #include "util/fibers/synchronization.h"
 
@@ -46,10 +49,24 @@ class ConfigRegistry {
     UNKNOWN,
     READONLY,
     INVALID,
+    DUPLICATE,
+  };
+
+  // Result of SetMultiple(): the overall result, plus, if not OK, the index into the
+  // input `params` span of the pair that caused the failure.
+  struct MultiSetResult {
+    SetResult result = SetResult::OK;
+    size_t failed_index = 0;
   };
 
   // Returns true if the value was updated.
   SetResult Set(std::string_view config_name, std::string_view value) ABSL_LOCKS_EXCLUDED(mu_);
+
+  // Atomically sets multiple config_name/value pairs: either all of them are applied, or,
+  // if any of them fails, none are (pairs already applied earlier in this call are rolled
+  // back to their prior values).
+  MultiSetResult SetMultiple(absl::Span<const std::pair<std::string_view, std::string_view>> params)
+      ABSL_LOCKS_EXCLUDED(mu_);
 
   std::optional<std::string> Get(std::string_view config_name) ABSL_LOCKS_EXCLUDED(mu_);
 
