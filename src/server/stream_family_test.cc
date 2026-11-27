@@ -2212,12 +2212,13 @@ TEST_F(StreamFamilyTest, ConsumerGroupLagWithTombstoneAfterLastId) {
   // Read 3 more messages (COUNT 3 will read 7-0, 8-0, 9-0)
   Run("XREADGROUP GROUP g1 c11 COUNT 3 STREAMS x >");
   Run("XDEL x 9-0");
-  // Now there is a tombstone in the stream after the consumer group last_id
-  // so the lag can't be calculated
+
+  // Deleting the last delivered entry leaves every later entry in place, so the lag stays exact:
+  // 10-0 is the one entry not delivered yet (#8830)
   resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "9-0", "entries-read", IntArg(9),
-                          "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
+                          "lag", IntArg(1), "pel-count", _, "pending", _, "consumers", _));
 
   // Read one more message to catch up
   Run("XREADGROUP GROUP g1 c12 COUNT 1 STREAMS x >");
@@ -2225,6 +2226,15 @@ TEST_F(StreamFamilyTest, ConsumerGroupLagWithTombstoneAfterLastId) {
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "10-0", "entries-read", IntArg(10),
                           "lag", IntArg(0), "pel-count", _, "pending", _, "consumers", _));
+
+  // A tombstone after the consumer group last_id means the lag can't be calculated
+  Run("XADD x 11-0 data k");
+  Run("XADD x 12-0 data l");
+  Run("XDEL x 12-0");
+  resp = Run("XINFO STREAM x FULL");
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
+              ElementsAre("name", "g1", "last-delivered-id", "10-0", "entries-read", IntArg(10),
+                          "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 }
 
 // Test consumer group lag with XTRIM
@@ -2418,6 +2428,17 @@ TEST_F(StreamFamilyTest, XGroupSetIdEntriesRead) {
       resp.GetVec()[0].GetVec(),
       ElementsAre("name", "mygroup", "consumers", IntArg(0), "pending", IntArg(0),
                   "last-delivered-id", "2000-0", "entries-read", kMatchNil, "lag", IntArg(0)));
+
+  // Without ENTRIESREAD the old counter is dropped, as in Redis, so catching up reports no lag
+  Run("XGROUP SETID mystream mygroup 0 ENTRIESREAD 0");
+  Run("XGROUP SETID mystream mygroup $");
+  Run("XADD mystream 3000-0 key val");
+  Run("XREADGROUP GROUP mygroup c1 COUNT 1 STREAMS mystream >");
+  resp = Run("XINFO GROUPS mystream");
+  EXPECT_THAT(
+      resp.GetVec()[0].GetVec(),
+      ElementsAre("name", "mygroup", "consumers", IntArg(1), "pending", IntArg(1),
+                  "last-delivered-id", "3000-0", "entries-read", IntArg(2), "lag", IntArg(0)));
 }
 
 TEST_F(StreamFamilyTest, XGroupSetIdRejectsBadEntriesRead) {

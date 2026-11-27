@@ -96,33 +96,15 @@ int StreamIDEqZero(streamID* id) {
   return !(id->ms || id->seq);
 }
 
-/* Returns non-zero if the range from 'start' to 'end' contains a tombstone. */
-int StreamRangeHasTombstones(stream* s, streamID* start, streamID* end) {
-  streamID start_id, end_id;
-
+/* Returns non-zero if an entry after 'id' was deleted. A tombstone at or before 'id' does not
+ * change how many entries were added after it, so the consumer group lag stays exact. Since
+ * max_deleted_entry_id is the largest deleted ID, comparing against it is enough. */
+int StreamHasTombstonesAfter(stream* s, streamID* id) {
   if (!s->length || StreamIDEqZero(&s->max_deleted_entry_id)) {
     return 0;
   }
 
-  if (start) {
-    start_id = *start;
-  } else {
-    start_id.ms = 0;
-    start_id.seq = 0;
-  }
-
-  if (end) {
-    end_id = *end;
-  } else {
-    end_id.ms = UINT64_MAX;
-    end_id.seq = UINT64_MAX;
-  }
-
-  if (streamCompareID(&start_id, &s->max_deleted_entry_id) <= 0 &&
-      streamCompareID(&s->max_deleted_entry_id, &end_id) <= 0) {
-    return 1;
-  }
-  return 0;
+  return streamCompareID(&s->max_deleted_entry_id, id) > 0;
 }
 
 int64_t StreamTrim(stream* s, streamAddTrimArgs* args);  // defined below
@@ -241,7 +223,7 @@ long long StreamCGLag(stream* s, streamCG* cg) {
     lag = 0;
     valid = 1;
   } else if (cg->entries_read != SCG_INVALID_ENTRIES_READ &&
-             !StreamRangeHasTombstones(s, &cg->last_id, NULL)) {
+             !StreamHasTombstonesAfter(s, &cg->last_id)) {
     lag = (long long)s->entries_added - cg->entries_read;
     valid = 1;
   } else {
@@ -1337,7 +1319,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
     if (opts.group && streamCompareID(&id, &opts.group->last_id) > 0) {
       if (opts.group->entries_read != SCG_INVALID_ENTRIES_READ &&
           streamCompareID(&opts.group->last_id, &s->first_id) >= 0 &&
-          !StreamRangeHasTombstones(s, &opts.group->last_id, NULL)) {
+          !StreamHasTombstonesAfter(s, &opts.group->last_id)) {
         /* A valid counter and no tombstones in the group's last-delivered-id and the stream's
          * last-generated-id, we can increment the read counter to keep tracking the group's
          * progress. */
@@ -2099,9 +2081,9 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
     }
   }
   cgr_res->cg->last_id = sid;
-  if (entries_read) {
-    cgr_res->cg->entries_read = *entries_read;
-  }
+
+  // Like Redis, forget the old counter when ENTRIESREAD is omitted; it describes the old cursor.
+  cgr_res->cg->entries_read = entries_read.value_or(SCG_INVALID_ENTRIES_READ);
 
   return OpStatus::OK;
 }
