@@ -4,11 +4,13 @@
 
 #include "server/journal/cmd_serializer.h"
 
+#include "core/oah_set.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
+#include "server/engine_shard_set.h"
 #include "server/journal/serializer.h"
 #include "server/rdb_save.h"
 #include "server/tiered_storage.h"
@@ -163,21 +165,76 @@ size_t CmdSerializer::SerializeSet(DbIndex db_index, string_view key, const Prim
   const uint32_t prev_time = pv.MemberTime();
   pv.SetMemberTime(0);
 
-  CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { SerializeCommand(db_index, "SADD", args); },
-      max_serialization_buffer_size_);
-
   size_t commands = 0;
-  container_utils::IterateSet(
-      pv,
-      [&](container_utils::ContainerEntry ce) {
-        commands += aggregator.AddArg(ce.ToString());
-        return true;
-      },
-      /*allow_yield=*/false);
+  if (pv.Encoding() == kEncodingStrMap2 && pv.HasMemberExpiration()) {
+    commands = SerializeSetWithExpiry(db_index, key, pv);
+  } else {
+    CommandAggregator aggregator(
+        key, [&](absl::Span<const string_view> args) { SerializeCommand(db_index, "SADD", args); },
+        max_serialization_buffer_size_);
+
+    container_utils::IterateSet(
+        pv,
+        [&](container_utils::ContainerEntry ce) {
+          commands += aggregator.AddArg(ce.ToString());
+          return true;
+        },
+        /*allow_yield=*/false);
+  }
 
   // Restore previous time so subsequent operations can trigger lazy expiry.
   pv.SetMemberTime(prev_time);
+
+  return commands;
+}
+
+size_t CmdSerializer::SerializeSetWithExpiry(DbIndex db_index, string_view key,
+                                             const PrimeValue& pv) {
+  const uint32_t now = MemberTimeSeconds(GetCurrentTimeMs());
+  size_t commands = 0;
+
+  // SADDEX takes a relative TTL. Consecutive members with the same deadline share a command.
+  string ttl;
+  auto saddex = [&](absl::Span<const string_view> args) {
+    absl::InlinedVector<string_view, 8> cmd_args{args[0], ttl};
+    cmd_args.insert(cmd_args.end(), args.begin() + 1, args.end());
+    SerializeCommand(db_index, "SADDEX", cmd_args);
+    ++commands;
+  };
+
+  {
+    CommandAggregator plain(
+        key,
+        [&](absl::Span<const string_view> args) {
+          SerializeCommand(db_index, "SADD", args);
+          ++commands;
+        },
+        max_serialization_buffer_size_);
+    optional<CommandAggregator> timed;
+    uint32_t deadline = 0;
+
+    VisitSet(pv.RObjPtr(), [&](auto* set) {
+      for (auto it = set->begin(); it != set->end(); ++it) {
+        auto member = Key(it);
+        string str{GetKeyView(member)};
+        if (!it.HasExpiry()) {
+          plain.AddArg(std::move(str));
+          continue;
+        }
+
+        // Expired on the source: the target must not see it.
+        if (it.ExpiryTime() <= now)
+          continue;
+        if (!timed || it.ExpiryTime() != deadline) {
+          timed.reset();
+          deadline = it.ExpiryTime();
+          ttl = absl::StrCat(deadline - now);
+          timed.emplace(key, saddex, max_serialization_buffer_size_);
+        }
+        timed->AddArg(std::move(str));
+      }
+    });
+  }
 
   return commands;
 }
@@ -204,22 +261,80 @@ size_t CmdSerializer::SerializeHash(DbIndex db_index, string_view key, const Pri
   const uint32_t prev_time = pv.MemberTime();
   pv.SetMemberTime(0);
 
-  CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { SerializeCommand(db_index, "HSET", args); },
-      max_serialization_buffer_size_);
-
   size_t commands = 0;
-  container_utils::IterateMap(
-      pv,
-      [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
-        aggregator.AddArg(k.ToString(), CommandAggregator::CommitMode::kNoCommit);
-        commands += aggregator.AddArg(v.ToString());
-        return true;
-      },
-      /*allow_yield=*/false);
+  if (pv.Encoding() == kEncodingStrMap2 && pv.HasMemberExpiration()) {
+    commands = SerializeHashWithExpiry(db_index, key, pv);
+  } else {
+    CommandAggregator aggregator(
+        key, [&](absl::Span<const string_view> args) { SerializeCommand(db_index, "HSET", args); },
+        max_serialization_buffer_size_);
+
+    container_utils::IterateMap(
+        pv,
+        [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
+          aggregator.AddArg(k.ToString(), CommandAggregator::CommitMode::kNoCommit);
+          commands += aggregator.AddArg(v.ToString());
+          return true;
+        },
+        /*allow_yield=*/false);
+  }
 
   // Restore previous time so subsequent operations can trigger lazy expiry.
   pv.SetMemberTime(prev_time);
+
+  return commands;
+}
+
+size_t CmdSerializer::SerializeHashWithExpiry(DbIndex db_index, string_view key,
+                                              const PrimeValue& pv) {
+  const uint32_t now = MemberTimeSeconds(GetCurrentTimeMs());
+  size_t commands = 0;
+
+  // HSETEX takes an absolute deadline. Consecutive fields with the same deadline share a command.
+  string exat;
+  auto hsetex = [&](absl::Span<const string_view> args) {
+    string num_fields = absl::StrCat((args.size() - 1) / 2);
+    absl::InlinedVector<string_view, 16> cmd_args{args[0], "EXAT", exat, "FIELDS", num_fields};
+    cmd_args.insert(cmd_args.end(), args.begin() + 1, args.end());
+    SerializeCommand(db_index, "HSETEX", cmd_args);
+    ++commands;
+  };
+
+  {
+    CommandAggregator plain(
+        key,
+        [&](absl::Span<const string_view> args) {
+          SerializeCommand(db_index, "HSET", args);
+          ++commands;
+        },
+        max_serialization_buffer_size_);
+    optional<CommandAggregator> timed;
+    uint32_t deadline = 0;
+
+    StringMap* string_map = static_cast<StringMap*>(pv.RObjPtr());
+    for (auto it = string_map->begin(); it != string_map->end(); ++it) {
+      const auto& [k, v] = *it;
+      string field{k, sdslen(k)};
+      string value{v, sdslen(v)};
+      if (!it.HasExpiry()) {
+        plain.AddArg(std::move(field), CommandAggregator::CommitMode::kNoCommit);
+        plain.AddArg(std::move(value));
+        continue;
+      }
+
+      // Expired on the source: the target must not see it.
+      if (it.ExpiryTime() <= now)
+        continue;
+      if (!timed || it.ExpiryTime() != deadline) {
+        timed.reset();
+        deadline = it.ExpiryTime();
+        exat = absl::StrCat(uint64_t{deadline} + kMemberExpiryBase);
+        timed.emplace(key, hsetex, max_serialization_buffer_size_);
+      }
+      timed->AddArg(std::move(field), CommandAggregator::CommitMode::kNoCommit);
+      timed->AddArg(std::move(value));
+    }
+  }
 
   return commands;
 }
