@@ -90,6 +90,9 @@ class ExternalAllocator {
 
   Stats GetStats() const;
 
+  // RAM used by the allocator metadata (segment descriptors).
+  size_t UsedMemory() const;
+
  private:
   class SegmentDescr;
   using Page = detail::Page;
