@@ -125,10 +125,6 @@ FlowInfo& SetupFlowConnection(CommandContext* cmd_cntx, DflyCmd::ReplicaInfo* re
 
 bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* replica,
                               EngineShard* shard, bool with_ping) {
-  // We don't want any writes to the journal after we send the `PING`,
-  // and expirations could ruin that.
-  namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
-
   if (with_ping) {
     // PING forces replica to send the most recent last_acked_lsn.
     // ACKS from the replica are send only every X commands or every 3 seconds (flag configurable)
@@ -580,10 +576,14 @@ void DflyCmd::TakeOver(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   VLOG(1) << "AwaitCurrentDispatches done";
 
+  // No journal writes after the PING below, and expirations could cause them.
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).PauseExpiry();
+  });
   absl::Cleanup cleanup([] {
     VLOG(2) << "Enabling expiration";
     shard_set->RunBriefInParallel([](EngineShard* shard) {
-      namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
+      namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).ResumeExpiry();
     });
   });
 

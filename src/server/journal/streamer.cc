@@ -287,11 +287,6 @@ void SlotMigrationStreamer::SendFinalize(long attempt) {
   writer.Write(entry);
   writer_.Write(std::move(sink).str());
 
-  // The target may own the slots once it reads the LSN, so nothing may follow it on success.
-  // Writes and key expiry are paused, but reads still delete hashes/sets whose last member expired.
-  // Drop those deletions: the target expires the members itself.
-  drop_entries_ = true;
-
   // DFLYMIGRATE ACK command has a timeout so we want to send it only when LSN is ready to be sent
   ThrottleIfNeeded();
 }
@@ -332,8 +327,7 @@ void SlotMigrationStreamer::ConsumeJournalChange(const journal::JournalChangeIte
   }
 
   DCHECK_GT(item.journal_item.lsn, last_lsn_writen_);
-  if (!drop_entries_)
-    writer_.Write(item.journal_item.data);
+  writer_.Write(item.journal_item.data);
   last_lsn_writen_ = item.journal_item.lsn;
 }
 

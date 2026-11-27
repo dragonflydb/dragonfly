@@ -80,11 +80,6 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
 
   void SendFinalize(long attempt);
 
-  // Resumes streaming after a failed attempt.
-  void AbortFinalize() {
-    drop_entries_ = false;
-  }
-
  private:
   void ConsumeJournalChange(const journal::JournalChangeItem& item) final;
   void ThrottleIfNeeded() final;
@@ -126,9 +121,6 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
   uint64_t replication_timeout_usec_ = 0;
   LSN last_lsn_writen_ = 0;
   uint32_t journal_cb_id_{0};
-
-  // Set by SendFinalize(), reset by AbortFinalize(): drop journal entries recorded after the LSN.
-  bool drop_entries_ = false;
 };
 
 }  // namespace dfly

@@ -479,9 +479,9 @@ walks the following sequence:
    the source only treats the attempt as succeeded when the echoed value equals the
    attempt it sent. If any flow has not yet quiesced at exactly that `LSN`, the
    target echoes a stale attempt and the source increments its counter, re-pauses,
-   and retries. Entries journaled after the marker (reads still delete hashes and sets
-   whose last member expired) are dropped until the attempt fails; the target expires
-   those members itself.
+   and retries. Expiry is paused with the writes, so nothing is journaled after the
+   marker: a read that empties a hash or set through member expiry deletes it without
+   journaling, since the target has the member TTLs and expires them itself.
 6. **C_FINISHED.** On a successful ACK, the source drops the migrated slots from its
    local ownership immediately. From that moment its routing logic redirects clients
    for those slots to the target (the migration entry in the local config provides
