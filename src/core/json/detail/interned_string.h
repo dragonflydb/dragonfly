@@ -6,7 +6,26 @@
 #include "core/detail/stateless_allocator.h"
 #include "core/json/detail/interned_blob.h"
 
+namespace dfly {
+
+struct InternedStringStats {
+  size_t pool_entries = 0;
+  size_t pool_bytes = 0;
+  size_t hits = 0;
+  size_t misses = 0;
+  size_t pool_table_bytes = 0;
+  size_t live_references = 0;
+
+  InternedStringStats& operator+=(const InternedStringStats& other);
+};
+
+InternedStringStats GetInternedStringStats();
+
+}  // namespace dfly
+
 namespace dfly::detail {
+
+inline thread_local InternedStringStats tl_interned_string_stats;
 
 // InternedString handles incrementing and decrementing reference counts of the blobs tied to its
 // own lifecycle. It deletes the blob from a shard local pool when refcount is 0.
@@ -41,7 +60,10 @@ class InternedString {
     other.entry_ = {};
   }
 
-  InternedString& operator=(InternedString other);
+  InternedString& operator=(InternedString other) {
+    swap(other);
+    return *this;
+  }
 
   ~InternedString() {
     Release();
@@ -104,12 +126,30 @@ class InternedString {
   static InternedBlobHandle Intern(std::string_view sv);
 
   // Increments the refcount if the entry is not null
-  void Acquire();
+  void Acquire() {  // NOLINT
+    if (!entry_)
+      return;
+
+    tl_interned_string_stats.live_references += 1;
+    entry_.IncrRefCount();
+  }
 
   // Decrements the refcount, removes entry from the pool if necessary, destroying the interned
   // blob. A side effect may be shrinking the pool if the load factor is suboptimal (see
   // kLoadFactorToShrinkPool in the implementation)
-  void Release();
+  void Release() {
+    if (!entry_)
+      return;
+
+    entry_.DecrRefCount();
+    tl_interned_string_stats.live_references -= 1;
+    if (ABSL_PREDICT_FALSE(entry_.RefCount() == 0))
+      ReleaseLast();
+  }
+
+  // Slow path of Release, called when the last reference is dropped: erases the entry from the
+  // pool and destroys the blob.
+  void ReleaseLast();
 
   // Wraps a null pointer by default
   InternedBlobHandle entry_;
@@ -131,20 +171,3 @@ template <std::contiguous_iterator It> InternedString::InternedString(It begin, 
 }
 
 }  // namespace dfly::detail
-
-namespace dfly {
-
-struct InternedStringStats {
-  size_t pool_entries = 0;
-  size_t pool_bytes = 0;
-  size_t hits = 0;
-  size_t misses = 0;
-  size_t pool_table_bytes = 0;
-  size_t live_references = 0;
-
-  InternedStringStats& operator+=(const InternedStringStats& other);
-};
-
-InternedStringStats GetInternedStringStats();
-
-}  // namespace dfly
