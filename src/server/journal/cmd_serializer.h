@@ -38,8 +38,10 @@ class CmdSerializer {
   void SerializeExpireIfNeeded(DbIndex db_index, std::string_view key, uint64_t expire_ms);
 
   size_t SerializeSet(DbIndex db_index, std::string_view key, const PrimeValue& pv);
+  size_t SerializeSetWithExpiry(DbIndex db_index, std::string_view key, const PrimeValue& pv);
   size_t SerializeZSet(DbIndex db_index, std::string_view key, const PrimeValue& pv);
   size_t SerializeHash(DbIndex db_index, std::string_view key, const PrimeValue& pv);
+  size_t SerializeHashWithExpiry(DbIndex db_index, std::string_view key, const PrimeValue& pv);
   size_t SerializeList(DbIndex db_index, std::string_view key, const PrimeValue& pv);
   size_t SerializeString(DbIndex db_index, std::string_view key, const PrimeValue& pv,
                          uint64_t expire_ms);
