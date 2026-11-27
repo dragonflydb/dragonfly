@@ -976,6 +976,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_v
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
   db.stats.events.evicted_keys += evp.evicted();
+  events_.hard_evictions += evp.evicted();
   events_.garbage_checked += evp.checked();
   if (slot) {
     db.slots_stats[*slot].key_count += 1;

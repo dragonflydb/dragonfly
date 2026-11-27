@@ -64,7 +64,7 @@ struct DbStats : public DbTableStats {
 };
 
 struct SliceEvents {
-  // evictions that were performed when we have a negative memory budget.
+  // evictions done by inserts when the table can not grow.
   size_t hard_evictions = 0;
   size_t garbage_checked = 0;
   size_t garbage_collected = 0;
