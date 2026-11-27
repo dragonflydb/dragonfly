@@ -13,6 +13,7 @@
 #include "facade/cmd_arg_parser.h"
 #include "facade/facade_types.h"
 #include "io/proc_reader.h"
+#include "server/aof_restore.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/metrics.h"
@@ -168,12 +169,6 @@ struct SaveCmdOptions {
 
 bool ReadProcStats(io::StatusData* sdata);
 uint64_t GetDelayMs(uint64_t cycles_ts);
-
-// The AOF restore at startup: a full sync's start sets cancel and waits until it is done.
-struct AofRestoreState {
-  std::atomic_bool cancel{false};
-  util::fb2::EmbeddedBlockingCounter done;
-};
 
 class ServerFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
@@ -410,7 +405,7 @@ class ServerFamily {
   util::fb2::Done aof_checkpoint_wake_;
   std::atomic_bool aof_checkpoint_stop_{false};
 
-  AofRestoreState aof_restore_;
+  AofRestore aof_restore_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 

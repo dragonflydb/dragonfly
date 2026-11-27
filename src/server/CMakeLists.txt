@@ -82,7 +82,7 @@ endif()
 
 # Optionally include tiered_storage which interfaces with tiering_module
 add_library(dragonfly_lib
-            engine_shard.cc engine_shard_set.cc
+            aof_restore.cc engine_shard.cc engine_shard_set.cc
             config_registry.cc conn_context.cc
             debugcmd.cc dflycmd.cc error.cc family_utils.cc metrics.cc string_stats.cc ${DF_SEARCH_SRCS}
             server_family.cc string_family.cc list_family.cc generic_family.cc
