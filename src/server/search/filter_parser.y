@@ -44,6 +44,7 @@
   #define yylex driver->scanner()->Lex
 
   using namespace dfly::aggregate;
+  using std::make_unique;
 
   static double ParseNumber(const std::string& s) {
     if (s == "inf")
@@ -52,11 +53,6 @@
     bool ok = absl::SimpleAtod(s, &v);
     DCHECK(ok) << "invalid number token: " << s;
     return v;
-  }
-
-  template <typename T>
-  static FilterExpr MakeNode(T val) {
-    return std::make_unique<FilterExprNode>(std::move(val));
   }
 }
 
@@ -120,33 +116,28 @@ final_expr:
 ;
 
 expr:
-    expr OP_OR  expr  { $$ = MakeNode(LogicExpr{LogicOp::OR,  std::move($1), std::move($3)}); }
-  | expr OP_AND expr  { $$ = MakeNode(LogicExpr{LogicOp::AND, std::move($1), std::move($3)}); }
-  | OP_NOT expr       { $$ = MakeNode(NotExpr{std::move($2)}); }
-  | expr OP_EQ  expr  { $$ = MakeNode(CmpExpr{CmpOp::EQ,  std::move($1), std::move($3)}); }
-  | expr OP_NEQ expr  { $$ = MakeNode(CmpExpr{CmpOp::NEQ, std::move($1), std::move($3)}); }
-  | expr OP_LT  expr  { $$ = MakeNode(CmpExpr{CmpOp::LT,  std::move($1), std::move($3)}); }
-  | expr OP_LTE expr  { $$ = MakeNode(CmpExpr{CmpOp::LTE, std::move($1), std::move($3)}); }
-  | expr OP_GT  expr  { $$ = MakeNode(CmpExpr{CmpOp::GT,  std::move($1), std::move($3)}); }
-  | expr OP_GTE expr  { $$ = MakeNode(CmpExpr{CmpOp::GTE, std::move($1), std::move($3)}); }
-  | expr OP_PLUS  expr { $$ = MakeNode(ArithExpr{ArithOp::ADD, std::move($1), std::move($3)}); }
-  | expr OP_MINUS expr { $$ = MakeNode(ArithExpr{ArithOp::SUB, std::move($1), std::move($3)}); }
-  | expr OP_MUL   expr { $$ = MakeNode(ArithExpr{ArithOp::MUL, std::move($1), std::move($3)}); }
-  | expr OP_DIV   expr { $$ = MakeNode(ArithExpr{ArithOp::DIV, std::move($1), std::move($3)}); }
-  | expr OP_MOD   expr { $$ = MakeNode(ArithExpr{ArithOp::MOD, std::move($1), std::move($3)}); }
-  | expr OP_POW   expr { $$ = MakeNode(ArithExpr{ArithOp::POW, std::move($1), std::move($3)}); }
-  | OP_MINUS expr %prec UMINUS { $$ = MakeNode(NegateExpr{std::move($2)}); }
-  | NUMBER  { $$ = MakeNode(NumLiteral{ParseNumber($1)}); }
-  | STRING  { $$ = MakeNode(StrLiteral{std::move($1)}); }
-  | FIELD   { $$ = MakeNode(FieldRef{std::move($1)}); }
-  | KW_NULL { $$ = MakeNode(NullLiteral{}); }
+    expr OP_OR  expr  { $$ = make_unique<LogicExpr>(LogicOp::OR,  std::move($1), std::move($3)); }
+  | expr OP_AND expr  { $$ = make_unique<LogicExpr>(LogicOp::AND, std::move($1), std::move($3)); }
+  | OP_NOT expr       { $$ = make_unique<NotExpr>(std::move($2)); }
+  | expr OP_EQ  expr  { $$ = make_unique<CmpExpr>(CmpOp::EQ,  std::move($1), std::move($3)); }
+  | expr OP_NEQ expr  { $$ = make_unique<CmpExpr>(CmpOp::NEQ, std::move($1), std::move($3)); }
+  | expr OP_LT  expr  { $$ = make_unique<CmpExpr>(CmpOp::LT,  std::move($1), std::move($3)); }
+  | expr OP_LTE expr  { $$ = make_unique<CmpExpr>(CmpOp::LTE, std::move($1), std::move($3)); }
+  | expr OP_GT  expr  { $$ = make_unique<CmpExpr>(CmpOp::GT,  std::move($1), std::move($3)); }
+  | expr OP_GTE expr  { $$ = make_unique<CmpExpr>(CmpOp::GTE, std::move($1), std::move($3)); }
+  | expr OP_PLUS  expr { $$ = make_unique<ArithExpr>(ArithOp::ADD, std::move($1), std::move($3)); }
+  | expr OP_MINUS expr { $$ = make_unique<ArithExpr>(ArithOp::SUB, std::move($1), std::move($3)); }
+  | expr OP_MUL   expr { $$ = make_unique<ArithExpr>(ArithOp::MUL, std::move($1), std::move($3)); }
+  | expr OP_DIV   expr { $$ = make_unique<ArithExpr>(ArithOp::DIV, std::move($1), std::move($3)); }
+  | expr OP_MOD   expr { $$ = make_unique<ArithExpr>(ArithOp::MOD, std::move($1), std::move($3)); }
+  | expr OP_POW   expr { $$ = make_unique<ArithExpr>(ArithOp::POW, std::move($1), std::move($3)); }
+  | OP_MINUS expr %prec UMINUS { $$ = make_unique<NegateExpr>(std::move($2)); }
+  | NUMBER  { $$ = make_unique<NumLiteral>(ParseNumber($1)); }
+  | STRING  { $$ = make_unique<StrLiteral>(std::move($1)); }
+  | FIELD   { $$ = make_unique<FieldRef>(std::move($1)); }
+  | KW_NULL { $$ = make_unique<NullLiteral>(); }
   | IDENT LPAREN opt_arg_list RPAREN
-      {
-        FuncCallExpr fc;
-        fc.name = std::move($1);
-        fc.args = std::move($3);
-        $$ = MakeNode(std::move(fc));
-      }
+      { $$ = make_unique<FuncCallExpr>(std::move($1), std::move($3)); }
   | LPAREN expr RPAREN { $$ = std::move($2); }
 ;
 

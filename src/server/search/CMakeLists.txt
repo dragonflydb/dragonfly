@@ -13,6 +13,7 @@ else()
   # (same pattern as src/core/search/CMakeLists.txt with dfly_search_core).
   add_library(filter_parser_lib
     filter_driver.cc
+    filter_expr.cc
     ${gen_dir}/filter_lexer.cc
     ${gen_dir}/filter_parser.cc)
 

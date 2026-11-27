@@ -27,8 +27,12 @@ class FilterScanner : public FilterLexer {
                             matcher().size() - skip_left - skip_right);
   }
 
+  // Byte offsets: RE/flex location() rescans the whole line for every token, which is quadratic.
   dfly::aggregate::location loc() {
-    return location();
+    auto pos = [](size_t offset) {
+      return dfly::aggregate::position(nullptr, 1, static_cast<int>(offset + 1));
+    };
+    return {pos(matcher().first()), pos(matcher().last())};
   }
 
   // Unescape a string literal body (quotes already stripped) and return a STRING token.

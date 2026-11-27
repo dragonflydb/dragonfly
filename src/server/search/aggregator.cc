@@ -254,7 +254,8 @@ AggregationStep MakeLimitStep(size_t offset, size_t num) {
 
 void Aggregator::DoFilter(const FilterExprNode& expr) {
   auto& values = result.values;
-  std::erase_if(values, [&](const DocValues& doc) { return !IsTruthy(EvalFilterExpr(expr, doc)); });
+  FilterExprEvaluator eval{expr};
+  std::erase_if(values, [&](const DocValues& doc) { return !IsTruthy(eval.Eval(doc)); });
 }
 
 std::variant<AggregationStep, std::string> MakeFilterStep(std::string_view raw_expr) {
@@ -275,8 +276,9 @@ std::variant<AggregationStep, std::string> MakeApplyStep(std::string_view raw_ex
 
   auto shared = std::shared_ptr<FilterExprNode>(std::get<FilterExpr>(std::move(parsed)).release());
   return AggregationStep{[shared, alias = std::move(alias)](Aggregator* agg) {
+    FilterExprEvaluator eval{*shared};
     for (auto& doc : agg->result.values) {
-      doc[alias] = EvalFilterExpr(*shared, doc);
+      doc[alias] = eval.Eval(doc);
     }
     agg->result.fields_to_print.insert(alias);
   }};
