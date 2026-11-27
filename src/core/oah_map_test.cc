@@ -11,6 +11,7 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <unordered_map>
 
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -735,6 +736,59 @@ TEST_F(OAHMapTest, RandomPairs) {
   vals.clear();
   m_->RandomPairsUnique(20, keys, vals, false);
   EXPECT_EQ(keys.size(), 10u);
+
+  // RandomPairs allows repetitions, so it returns `count` live pairs even beyond the map size. The
+  // reserved table is sparse, yet each of the 10 live fields is picked about 1000 times (stddev
+  // ~30), not in proportion to the empty buckets in front of it.
+  keys.clear();
+  m_->RandomPairs(10000, keys, vals, true);
+  ASSERT_EQ(keys.size(), 10000u);
+  ASSERT_EQ(vals.size(), 10000u);
+  unordered_map<string, unsigned> picked;
+  for (size_t i = 0; i < keys.size(); ++i) {
+    EXPECT_GE(stoi(keys[i]), 10);
+    EXPECT_EQ(vals[i], "val" + keys[i]);
+    ++picked[keys[i]];
+  }
+  EXPECT_EQ(picked.size(), 10u);
+  for (const auto& [key, times] : picked)
+    EXPECT_NEAR(times, 1000, 250) << key;
+
+  // Once every field has expired there is nothing left to pick, and nothing is allocated for the
+  // requested count. TTLs are relative to the current time (2), so these fields expire at 3.
+  for (unsigned i = 10; i < 20; i++)
+    m_->Find(to_string(i)).SetExpiryTime(1);
+  m_->set_time(4);
+  vector<string> no_keys, no_vals;
+  m_->RandomPairs(1'000'000, no_keys, no_vals, true);
+  EXPECT_EQ(no_keys.capacity(), 0u);
+  EXPECT_EQ(no_vals.capacity(), 0u);
+}
+
+TEST_F(OAHMapTest, ScanPairs) {
+  for (unsigned i = 0; i < 200; i++)
+    EXPECT_TRUE(m_->AddOrUpdate(to_string(i), "val" + to_string(i)));
+  for (unsigned i = 0; i < 100; i++)
+    m_->Find(to_string(i)).SetExpiryTime(1);
+  m_->set_time(2);
+
+  // Each live field is reported once together with its own value; expired fields are skipped.
+  unordered_map<string, string> scanned;
+  unsigned reported = 0;
+  uint32_t cursor = 0;
+  do {
+    cursor = m_->ScanPairs(cursor, [&](string_view key, string_view value) {
+      scanned.emplace(key, value);
+      ++reported;
+    });
+  } while (cursor != 0);
+
+  EXPECT_EQ(reported, 100u);
+  ASSERT_EQ(scanned.size(), 100u);
+  for (const auto& [key, value] : scanned) {
+    EXPECT_GE(stoi(key), 100);
+    EXPECT_EQ(value, "val" + key);
+  }
 }
 
 TEST_F(OAHMapTest, ReallocIfNeeded) {
