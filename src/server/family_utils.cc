@@ -108,7 +108,11 @@ bool DeleteCollectionIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, string
 
   if (auto res = db_slice.FindMutable(db_cntx, key, obj_type); res) {
     db_slice.DelMutable(db_cntx, std::move(*res));
-    RecordDelete(db_cntx.db_index, key);
+
+    // Nothing may be journaled while expiry is paused, e.g. after a migration LSN. Replicas and
+    // migration targets have the member TTLs and drop the container themselves.
+    if (!db_slice.IsExpiryPaused())
+      RecordDelete(db_cntx.db_index, key);
     return true;
   }
   return false;

@@ -135,7 +135,7 @@ cv_status Transaction::BatonBarrier::Wait(time_point tp) {
 Transaction::Guard::Guard(Transaction* tx) : tx(tx) {
   DCHECK(tx->cid_->opt_mask() & CO::GLOBAL_TRANS);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
+    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).PauseExpiry();
     return OpStatus::OK;
   };
   tx->Execute(cb, false);
@@ -143,7 +143,7 @@ Transaction::Guard::Guard(Transaction* tx) : tx(tx) {
 
 Transaction::Guard::~Guard() {
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
+    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).ResumeExpiry();
     return OpStatus::OK;
   };
   tx->Execute(cb, true);

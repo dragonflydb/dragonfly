@@ -608,10 +608,15 @@ class DbSlice {
   // Resets events_ member. Used by CONFIG RESETSTAT
   void ResetEvents();
 
-  // Controls the expiry/eviction state. The server may enter states where
-  // Both evictions and expiries will be stopped for a short period of time.
-  void SetExpireAllowed(bool is_allowed) {
-    expire_allowed_ = is_allowed;
+  // Stops expiry and eviction until every PauseExpiry() call is matched by ResumeExpiry().
+  void PauseExpiry() {
+    ++expiry_pauses_;
+  }
+
+  void ResumeExpiry();
+
+  bool IsExpiryPaused() const {
+    return expiry_pauses_ > 0;
   }
 
   // Track keys for the client represented by the the weak reference to its connection.
@@ -766,7 +771,8 @@ class DbSlice {
   // The namespace owning this slice. Never null and never changes.
   Namespace* ns_;
 
-  bool expire_allowed_ = true;
+  // Counted, because overlapping pauses (e.g. concurrent migrations) end independently.
+  unsigned expiry_pauses_ = 0;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
 

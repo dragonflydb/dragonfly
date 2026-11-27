@@ -1605,10 +1605,16 @@ void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key, std::optional<Slo
   }
 }
 
+void DbSlice::ResumeExpiry() {
+  DCHECK_GT(expiry_pauses_, 0u);
+  --expiry_pauses_;
+}
+
 bool DbSlice::AllowExpiredDeletions() const {
   // Replicas do not expire keys on their own unless replica_delete_expired is set (which allows
   // them to proactively delete expired keys on the read path).
-  return expire_allowed_ && !(owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired));
+  return !IsExpiryPaused() &&
+         !(owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired));
 }
 
 auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it) const -> ExpireResult {
@@ -1616,7 +1622,7 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it) const -> ExpireRe
     return ExpireResult::Valid;
 
   if (!AllowExpiredDeletions())
-    return expire_allowed_ ? ExpireResult::Valid : ExpireResult::ExpiryPaused;
+    return IsExpiryPaused() ? ExpireResult::ExpiryPaused : ExpireResult::Valid;
 
   // A serializer may still reference the entry, and the journal append may block.
   if (!CanDeleteWithoutBlocking(it.bucket_address()))
@@ -1852,7 +1858,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
       return {0, evicted_bytes};
   }
 
-  if ((!IsCacheMode()) || !expire_allowed_)
+  if (!IsCacheMode() || IsExpiryPaused())
     return {0, 0};
 
   auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);

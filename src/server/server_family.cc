@@ -1239,10 +1239,14 @@ bool StartStreamers(string_view dir, const vector<AofResume>& resume) {
   return !failed;
 }
 
-// Turns expiry and eviction on or off on every shard.
+// Pauses or resumes expiry and eviction on every shard. Each pause needs a matching resume.
 void AllowExpiryOnAllShards(bool allowed) {
   shard_set->RunBriefInParallel([allowed](EngineShard* shard) {
-    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(allowed);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    if (allowed)
+      db_slice.ResumeExpiry();
+    else
+      db_slice.PauseExpiry();
   });
 }
 
@@ -1765,30 +1769,29 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
 
   // We should not expire/evict keys while clients are paused.
   shard_set->RunBriefInParallel(
-      [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(false); });
+      [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).PauseExpiry(); });
 
-  return fb2::Fiber("client_pause",
-                    [is_pause_in_progress, pause_state, ns, maybe_cleanup]() mutable {
-                      // On server shutdown we sleep 10ms to make sure all running task finish,
-                      // therefore 10ms steps ensure this fiber will not left hanging .
-                      constexpr auto step = 10ms;
-                      while (is_pause_in_progress()) {
-                        ThisFiber::SleepFor(step);
-                      }
+  return fb2::Fiber(
+      "client_pause", [is_pause_in_progress, pause_state, ns, maybe_cleanup]() mutable {
+        // On server shutdown we sleep 10ms to make sure all running task finish,
+        // therefore 10ms steps ensure this fiber will not left hanging .
+        constexpr auto step = 10ms;
+        while (is_pause_in_progress()) {
+          ThisFiber::SleepFor(step);
+        }
 
-                      ServerState& etl = *ServerState::tlocal();
-                      if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
-                        shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-                          ServerState::tlocal()->SetPauseState(pause_state, false);
-                        });
-                        shard_set->RunBriefInParallel([ns](EngineShard* shard) {
-                          ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
-                        });
-                      }
-                      if (maybe_cleanup) {
-                        maybe_cleanup();
-                      }
-                    });
+        ServerState& etl = *ServerState::tlocal();
+        if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+          shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+            ServerState::tlocal()->SetPauseState(pause_state, false);
+          });
+          shard_set->RunBriefInParallel(
+              [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).ResumeExpiry(); });
+        }
+        if (maybe_cleanup) {
+          maybe_cleanup();
+        }
+      });
 }
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {

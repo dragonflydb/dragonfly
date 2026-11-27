@@ -213,7 +213,9 @@ void DeleteHw(HMapWrap& hw, const OpArgs& op_args, std::string_view key) {
   if (auto del_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); del_it) {
     del_it->post_updater.Run();
     db_slice.DelAtomic(op_args.db_cntx, del_it->it.GetInnerIt());
-    if (op_args.shard->journal()) {
+
+    // See DeleteCollectionIfEmpty: no journaling while expiry is paused.
+    if (op_args.shard->journal() && !db_slice.IsExpiryPaused()) {
       RecordJournal(op_args, "DEL"sv, {key});
     }
   }

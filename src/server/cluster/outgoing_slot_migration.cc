@@ -138,10 +138,6 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     streamer_.SendFinalize(attempt);
   }
 
-  void AbortFinalize() {
-    streamer_.AbortFinalize();
-  }
-
   dfly::GenericError GetError() const {
     return exec_st_.GetError();
   }
@@ -457,13 +453,6 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   LOG(INFO) << "FINALIZE flows for " << cf_->MyID() << " : " << migration_info_.node_info.id;
   OnAllShards([attempt](auto& migration) { migration->Finalize(attempt); });
 
-  // Unless the target acknowledged this attempt, resume streaming before writes are unpaused.
-  bool acked = false;
-  absl::Cleanup abort_finalize([this, &acked] {
-    if (!acked)
-      OnAllShards([](auto& migration) { migration->AbortFinalize(); });
-  });
-
   auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID(), " ", attempt);
   VLOG(1) << "send " << cmd;
 
@@ -509,7 +498,6 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     }
 
     if (*ack_attempt == attempt) {
-      acked = true;
       break;
     } else {
       LOG(WARNING) << "Incorrect attempt payload " << cf_->MyID() << " : "
