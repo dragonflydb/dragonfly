@@ -69,7 +69,6 @@ extern "C" {
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/journal/aof_manifest.h"
-#include "server/journal/aof_replay.h"
 #include "server/journal/aof_streamer.h"
 #include "server/journal/executor.h"
 #include "server/journal/journal.h"
@@ -1105,9 +1104,6 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
   std::_Exit(EXIT_FAILURE);
 }
 
-// Loads a snapshot, blocking until it finishes.
-using AofLoadFn = std::function<GenericError(const string& path)>;
-
 // Why a local save cannot become the AOF checkpoint, or an empty string.
 string AofSaveError(bool dfs_format, string_view basename) {
   // TODO: RDB bases.
@@ -1163,31 +1159,6 @@ string AofStartupError(string_view dir) {
 }
 
 #ifdef __linux__
-// Bytes of the DFS file set whose summary is base_path: <prefix>summary.dfs and every
-// <prefix>NNNN.dfs, listed like FileSnapshotStorage::ListShardFiles(), since an adopted dump may
-// come from a server with more shards. Exact names, so other dumps sharing the prefix don't count.
-size_t AofBaseSize(string_view dir, string_view base_path) {
-  string_view prefix = base_path;
-  absl::ConsumeSuffix(&prefix, "summary.dfs");
-  size_t size = 0;
-  error_code ec;
-  uintmax_t summary_size = filesystem::file_size(filesystem::path(dir) / base_path, ec);
-  if (!ec)
-    size += summary_size;
-
-  io::Result<io::StatShortVec> files = io::StatFiles(absl::StrCat(dir, "/", prefix, "????.dfs"));
-  if (!files)
-    return size;
-  for (const io::StatShort& file : *files) {
-    string_view name = string_view(file.name).substr(file.name.rfind('/') + 1);
-    if (absl::ConsumePrefix(&name, prefix) && absl::ConsumeSuffix(&name, ".dfs") &&
-        rng::all_of(name, absl::ascii_isdigit)) {
-      size += file.size;
-    }
-  }
-  return size;
-}
-
 // Makes a finished save the AOF base: commits the manifest, then deletes the segments below the
 // cut. The save itself succeeded, so a failure here is only logged. Returns the new base's size if
 // the checkpoint committed.
@@ -1222,47 +1193,7 @@ optional<size_t> CommitAofCheckpoint(const string& base_file, bool owned,
 }
 #endif
 
-// Starts every shard's AofStreamer where its log resumes. False if any failed.
-bool StartStreamers(string_view dir, const vector<AofResume>& resume) {
-  atomic_bool failed = false;
-  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
-    ShardId sid = shard->shard_id();
-    auto streamer = make_unique<AofStreamer>(string(dir), sid, shard_set->size());
-    const AofResume& r = resume[sid];
-    if (error_code ec = streamer->Start(r.seq, r.next_lsn, r.log_size); ec) {
-      LOG(ERROR) << "Failed to start AOF on shard " << sid << ": " << ec.message();
-      failed = true;
-      return;
-    }
-    shard->set_aof_streamer(std::move(streamer));
-  });
-  return !failed;
-}
-
-// Turns expiry and eviction on or off on every shard.
-void AllowExpiryOnAllShards(bool allowed) {
-  shard_set->RunBriefInParallel([allowed](EngineShard* shard) {
-    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(allowed);
-  });
-}
-
 #ifdef __linux__
-// Loads the base named by the manifest, or exits. False if a shutdown stopped it.
-bool LoadAofBase(string_view dir, const string& base_path, const AofLoadFn& load) {
-  string path = absl::StrCat(dir, "/", base_path);
-
-  // The user may have deleted or moved a dump that is the base.
-  if (access(path.c_str(), F_OK) != 0)
-    ErrorAndExit(absl::StrCat("the AOF base ", path, " is missing"));
-  if (GenericError ec = load(path); ec) {
-    // A shutdown rejects the load's commands: it stops the restore, it is no failure.
-    if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
-      return false;
-    ErrorAndExit(absl::StrCat("failed to load the AOF base ", path, ": ", ec.Format()));
-  }
-  return true;
-}
-
 // The --dbfilename dump a first start adopts as its base, empty if none. Exits if it cannot tell.
 string FindDumpToAdopt(string_view dir, detail::SnapshotStorage* storage) {
   auto dump = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename));
@@ -1276,155 +1207,7 @@ string FindDumpToAdopt(string_view dir, detail::SnapshotStorage* storage) {
     ErrorAndExit(absl::StrCat("--aof adopts only DFS dumps for now, found ", *dump));
   return *dump;
 }
-
-// First start: adopts the --dbfilename dump, if any, as the base instead of taking a snapshot.
-// Returns the base, empty if none, or nullopt if a shutdown stopped it: the manifest stays
-// bootstrapping, so the next start redoes it.
-optional<string> BootstrapAof(string_view dir, const string& adopt_path, const AofLoadFn& load) {
-  AofManifest manifest;
-
-  // Nothing is logged before the load finishes, so every shard's cut is the journal's first lsn.
-  manifest.cuts.assign(shard_set->size(), {0, 1});
-  if (error_code ec = WriteAofManifest(dir, manifest); ec)
-    ErrorAndExit(absl::StrCat("failed to write the AOF manifest: ", ec.message()));
-
-  if (!adopt_path.empty()) {
-    // TODO: record the dump's identity, in case it is replaced before the next start.
-    manifest.base_path = filesystem::path(adopt_path).filename().string();
-    if (!LoadAofBase(dir, manifest.base_path, load))
-      return nullopt;
-  }
-
-  // A shutdown that came after the load: no streamers; the next start redoes the bootstrap.
-  if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
-    return nullopt;
-  if (!StartStreamers(dir, vector<AofResume>(shard_set->size())))
-    ErrorAndExit("failed to open AOF segments");
-
-  // Committed once the cut segments exist, so an active manifest always has them.
-  manifest.state = AofManifest::State::kActive;
-  if (error_code ec = WriteAofManifest(dir, manifest); ec)
-    ErrorAndExit(absl::StrCat("failed to write the AOF manifest: ", ec.message()));
-  return manifest.base_path;
-}
-
-// Starts the streamers paused, in new segments past the existing ones, so every file stays until a
-// new base commits.
-void StartPausedStreamers(string_view dir, const AofManifest& manifest) {
-  io::Result<vector<string>> files = ListAofFiles(dir);
-  if (!files)
-    ErrorAndExit(absl::StrCat("failed to list AOF files: ", files.error().message()));
-  vector<AofResume> resume(shard_set->size());
-  for (ShardId sid = 0; sid < resume.size() && sid < manifest.cuts.size(); ++sid)
-    resume[sid].seq = manifest.cuts[sid].seq;
-  for (const string& path : *files) {
-    string_view name = string_view(path).substr(path.rfind('/') + 1);
-    if (!absl::ConsumeSuffix(&name, ".tmp"))
-      absl::ConsumeSuffix(&name, ".discarded");
-    uint32_t sid;
-    uint64_t seq;
-    if (AofSegmentWriter::ParseSegmentName(name, &sid, &seq) && sid < resume.size())
-      resume[sid].seq = max(resume[sid].seq, seq + 1);
-  }
-  if (!StartStreamers(dir, resume))
-    ErrorAndExit("failed to open AOF segments");
-  shard_set->RunBriefInParallel([](EngineShard* shard) { shard->aof_streamer()->Pause(); });
-}
-
-void ResumeRebasing(string_view dir, const AofManifest& manifest) {
-  LOG(WARNING) << "AOF manifest is rebasing: a full sync was interrupted. Starting empty; the old "
-                  "AOF files stay until a new base commits";
-  StartPausedStreamers(dir, manifest);
-}
-
-// A REPLICAOF cancelled the restore: its full sync replaces the data. The manifest is marked
-// rebasing, every file stays until a new base commits, and appending is paused.
-void CancelAofRestore(string_view dir, const AofManifest& manifest) {
-  LOG(INFO) << "AOF restore cancelled by REPLICAOF: a full sync replaces the data";
-  AofManifest rebasing = manifest;
-  rebasing.state = AofManifest::State::kRebasing;
-  if (error_code ec = WriteAofManifest(dir, rebasing); ec)
-    ErrorAndExit(absl::StrCat("failed to mark the AOF manifest rebasing: ", ec.message()));
-  StartPausedStreamers(dir, manifest);
-  AllowExpiryOnAllShards(true);
-}
-
-enum class AofResumeResult : uint8_t {
-  kResumed,
-
-  // A shutdown stopped it: nothing was appended, so the next start replays again.
-  kStopped,
-
-  // A REPLICAOF cancelled it, see CancelAofRestore().
-  kCancelled,
-};
-
-// Loads the manifest's base, replays the log on top and resumes it. The caller holds LOADING.
-AofResumeResult ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
-                          const AofRestoreState* restore, const AofLoadFn& load) {
-  if (error_code ec = CollectAofGarbage(dir, manifest); ec)
-    ErrorAndExit(absl::StrCat("failed to remove stale AOF files: ", ec.message()));
-
-  // No expiry or eviction from the base load until the streamers run: a key may pass its deadline
-  // before a later record, such as PERSIST, changes it, and commands allowed while LOADING (SCAN)
-  // would expire it. Resumed once the streamers run, so every expiry is logged.
-  AllowExpiryOnAllShards(false);
-
-  // TODO(#8410): RdbLoader still drops keys whose TTL passed (ShouldDiscardKey), so a key the log
-  // later PERSISTs is lost. The base must load as it was, as Valkey does for AOF preambles.
-  if (!manifest.base_path.empty() && !LoadAofBase(dir, manifest.base_path, load))
-    return AofResumeResult::kStopped;
-
-  // A shutdown that came after the base loaded: nothing to replay or append.
-  if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
-    return AofResumeResult::kStopped;
-  vector<AofResume> resume;
-  if (error_code ec = ReplayAof(dir, manifest, service, &restore->cancel, &resume); ec) {
-    if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
-      return AofResumeResult::kStopped;
-    if (ec != errc::operation_canceled)
-      ErrorAndExit(absl::StrCat("AOF replay failed: ", ec.message()));
-    CancelAofRestore(dir, manifest);
-    return AofResumeResult::kCancelled;
-  }
-
-  // A replay that ended without noticing a shutdown, e.g. an empty log.
-  if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
-    return AofResumeResult::kStopped;
-  if (!StartStreamers(dir, resume))
-    ErrorAndExit("failed to open AOF segments");
-
-  AllowExpiryOnAllShards(true);
-  return AofResumeResult::kResumed;
-}
 #endif
-
-// The AOF base the server started from.
-struct AofBase {
-  // Summary file name, empty without a base.
-  string file;
-
-  // Bytes on disk of the base: the summary plus every shard file.
-  size_t size = 0;
-
-  // The manifest was rebasing: nothing was loaded and appending is paused.
-  bool rebasing = false;
-
-  // A shutdown stopped the restore: nothing was appended and no streamer runs.
-  bool cancelled = false;
-};
-
-// How startup restores the AOF, decided before the server listens.
-struct AofStartPlan {
-  enum class Kind : uint8_t { kBootstrap, kResume, kRebasing };
-  Kind kind = Kind::kBootstrap;
-
-  // kResume and kRebasing.
-  AofManifest manifest;
-
-  // kBootstrap: the --dbfilename dump to adopt, empty if none.
-  string adopt_path;
-};
 
 // Checks the configuration and the AOF files, so a misconfiguration or a missing file fails before
 // the server listens. Exits if startup cannot proceed.
@@ -1477,50 +1260,6 @@ AofStartPlan PrepareAof(const string& dir, detail::SnapshotStorage* storage) {
   return plan;
 #else
   ErrorAndExit("--aof is supported only on Linux");
-#endif
-}
-
-// Restores the data the plan describes, then starts logging. Runs in a fiber while the server is
-// LOADING, held by the caller. Exits if it cannot.
-AofBase RunAof(const string& dir, const AofStartPlan& plan, Service* service,
-               const AofRestoreState* restore, const AofLoadFn& load) {
-#ifdef __linux__
-  string base_path;
-  AofBase base;
-  switch (plan.kind) {
-    case AofStartPlan::Kind::kBootstrap:
-      if (optional<string> path = BootstrapAof(dir, plan.adopt_path, load); path)
-        base_path = std::move(*path);
-      else
-        base.cancelled = true;
-      break;
-    case AofStartPlan::Kind::kRebasing:
-      ResumeRebasing(dir, plan.manifest);
-      base.rebasing = true;
-      break;
-    case AofStartPlan::Kind::kResume:
-      switch (ResumeAof(dir, plan.manifest, service, restore, load)) {
-        case AofResumeResult::kResumed:
-          base_path = plan.manifest.base_path;
-          break;
-        case AofResumeResult::kStopped:
-          base.cancelled = true;
-          break;
-        case AofResumeResult::kCancelled:
-          base.rebasing = true;
-          break;
-      }
-      break;
-  }
-  if (base.cancelled) {
-    LOG(INFO) << "AOF restore stopped by shutdown";
-    return base;
-  }
-  base.file = base_path;
-  base.size = base_path.empty() ? 0 : AofBaseSize(dir, base_path);
-  return base;
-#else
-  return {};
 #endif
 }
 
@@ -1919,26 +1658,21 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     // Clients get -LOADING until the base is loaded, the log replayed and the streamers run. Held
     // for the whole restore, so no client write lands between the base load and the replay.
     CHECK(service_.RequestLoadingState());
-    aof_restore_.done.Start(1);
-    load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
-        "aof_load", [this, dir, plan = std::move(plan)] {
-          AofBase base = RunAof(dir, plan, &service_, &aof_restore_, [this](const string& path) {
-            return Load(path, LoadExistingKeys::kFail).Get();
-          });
-          if (base.cancelled) {
-            service_.RemoveLoadingState();
-            aof_restore_.done.Dec();
-            return;
+    aof_restore_.Start(
+        service_.proactor_pool().GetNextProactor(), dir, std::move(plan), &service_,
+        [this](const string& path) { return Load(path, LoadExistingKeys::kFail).Get(); },
+        [this](optional<AofBase> base) {
+          // A shutdown stopped the restore: nothing to publish or to checkpoint.
+          if (base) {
+            thread_safe_save_info_.Update([&base](SaveInfoData* data) {
+              data->aof_base_file = base->file;
+              data->aof_base_size = base->size;
+              data->aof_rebase = base->rebasing ? AofRebase::kSyncing : AofRebase::kNone;
+            });
+            aof_checkpoint_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+                "aof_checkpoint", [this] { AofCheckpointScheduling(); });
           }
-          thread_safe_save_info_.Update([&base](SaveInfoData* data) {
-            data->aof_base_file = base.file;
-            data->aof_base_size = base.size;
-            data->aof_rebase = base.rebasing ? AofRebase::kSyncing : AofRebase::kNone;
-          });
-          aof_checkpoint_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
-              "aof_checkpoint", [this] { AofCheckpointScheduling(); });
           service_.RemoveLoadingState();
-          aof_restore_.done.Dec();
         });
   } else if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
     // check for '--replicaof' before loading anything
@@ -2007,6 +1741,7 @@ void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
   load_fiber_.JoinIfNeeded();
+  aof_restore_.Join();
 
   JoinSnapshotSchedule();
 
@@ -2317,10 +2052,7 @@ GenericError ServerFamily::PauseAofAndEnterRebasing() {
     return {};
 
   // The full sync replaces the data an AOF restore is still loading: stop it, then rebase as usual.
-  if (!aof_restore_.done.IsCompleted()) {
-    aof_restore_.cancel = true;
-    aof_restore_.done.Wait();
-  }
+  aof_restore_.Cancel();
 
   thread_safe_save_info_.Update([](SaveInfoData* data) {
     data->aof_rebase_epoch++;
@@ -4257,7 +3989,7 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   // During an AOF restore, whatever the role (an accepted REPLICAOF already made the node a
   // replica), only REPLICAOF <host> may start: its full sync cancels the restore. NO ONE would end
   // LOADING mid-restore, and a slot range would flush the other slots.
-  if (!aof_restore_.done.IsCompleted()) {
+  if (aof_restore_.Running()) {
     if (replicaof_args->IsReplicaOfNoOne() || replicaof_args->slot_range)
       return cmd_cntx->SendError(kLoadingErr);
   } else if (ServerState::IsMaster() && ss->gstate() == GlobalState::LOADING) {
