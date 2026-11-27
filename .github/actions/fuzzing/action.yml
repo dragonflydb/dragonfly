@@ -160,8 +160,10 @@ runs:
         AFL_CUSTOM_MUTATOR_ONLY: 1
         AFL_ENABLE_SAVE: ${{ inputs.mode == 'long' && '1' || '' }}
         AFL_ENABLE_TIERING: ${{ inputs.tiering == 'true' && '1' || '' }}
-        # Used to alternate tiered_experimental_cooling between nightly campaigns.
+        # Used to alternate tiered_experimental_cooling and cache mode between nightly campaigns.
         AFL_RUN_NUMBER: ${{ inputs.run-number }}
+        # PR (smoke) runs never use cache mode.
+        AFL_CACHE_MODE: ${{ inputs.mode == 'smoke' && 'false' || '' }}
         FUZZ_FOCUS_COMMANDS: ${{ inputs.focus-commands }}
 
     - name: Clean up fuzzing temporary directories

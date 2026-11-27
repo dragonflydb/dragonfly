@@ -121,8 +121,10 @@ line number. Suggest what to investigate.>
 
 ## Important Notes
 
-- The triage script uses port **6379** (resp) or **11211** (memcache).
-  Ensure no other Dragonfly or Redis instance is using these ports.
+- The triage script uses port **6379** (resp) or **11211** (memcache), and for
+  cache-mode archives also the admin port from `repro.env` (**6380** by default),
+  where it rebuilds the fuzz run's fill. Ensure no other Dragonfly or Redis
+  instance is using these ports.
 - The script adds `--restricted_commands` flags to avoid false positives from
   commands like DEBUG SLEEP that the fuzzer might generate.
 - Some crashes are non-deterministic (thread timing). The script reports

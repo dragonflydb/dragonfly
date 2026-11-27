@@ -44,6 +44,7 @@ NC='\033[0m'
 # ─── Config ───────────────────────────────────────────────────────────────────
 RESP_PORT=6379
 MC_PORT=11211
+ADMIN_PORT=""       # set from repro.env: cache-mode runs fill the server through the admin port
 STARTUP_TIMEOUT=5   # seconds to wait for Dragonfly to accept connections
 POST_REPLAY_WAIT=3  # seconds to wait after replay for Dragonfly to crash
 
@@ -257,6 +258,7 @@ stop_dragonfly() {
     wait "$DF_PID" 2>/dev/null && true || true
     DF_PID=""
     wait_port_free "$RESP_PORT" 5 || true
+    [[ -z "$ADMIN_PORT" ]] || wait_port_free "$ADMIN_PORT" 5 || true
 }
 
 # Returns 0 once DF_PID is gone, 1 if it is still alive after POST_REPLAY_WAIT seconds. Used
@@ -274,9 +276,13 @@ wait_for_death() {
 # inputs could not be verified (listed in the log), other = replay failed.
 run_replay() {
     local mode="$1" crash_data_dir="$2" replay_log="$3" replay_port="$4" rc
+
+    # repro.env also carries a cache-mode fill, which the replay rebuilds before the inputs.
+    local repro_args=()
+    [[ -f "$REPRO_ENV" ]] && repro_args=(--repro-env "$REPRO_ENV")
     echo "=== pass: $mode ===" >>"$replay_log"
     python3 "$REPLAY_SCRIPT" "$crash_data_dir" "$CRASH_ID" 127.0.0.1 "$replay_port" \
-        --mode "$mode" --pid "$DF_PID" --protocol "$MODE" >>"$replay_log" 2>&1 &
+        --mode "$mode" --pid "$DF_PID" --protocol "$MODE" "${repro_args[@]}" >>"$replay_log" 2>&1 &
     REPLAY_PID=$!
     wait "$REPLAY_PID" && rc=0 || rc=$?
     REPLAY_PID=""
@@ -296,6 +302,7 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     # Reset per-archive port defaults (may be overridden from repro.env below)
     RESP_PORT=6379
     MC_PORT=11211
+    ADMIN_PORT=""
 
     echo -e "${CYAN}${BOLD}─── [$IDX/$TOTAL] Crash ${CRASH_ID} ───${NC}"
 
@@ -347,12 +354,13 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
         MISSING=$(grep '^HISTORY_MISSING=' "$REPRO_ENV" | cut -d= -f2 || true)
         MEM_LIMIT_KB=$(grep '^MEM_LIMIT_KB=' "$REPRO_ENV" | cut -d= -f2 || true)
         MEM_LIMIT_KB="${MEM_LIMIT_KB:-$((4 * 1024 * 1024))}"
-        # Only flags go to the server; PROTOCOL=, GUESSED= and MEM_LIMIT_KB= are metadata.
+        # Only flags go to the server; PROTOCOL=, GUESSED=, MEM_LIMIT_KB= and FILL*= are metadata.
         mapfile -t DF_ARGS < <(grep '^--' "$REPRO_ENV" || true)
         RESP_PORT=$(grep '^--port=' "$REPRO_ENV" | cut -d= -f2 || true)
         RESP_PORT="${RESP_PORT:-6379}"
         MC_PORT=$(grep '^--memcached_port=' "$REPRO_ENV" | cut -d= -f2 || true)
         MC_PORT="${MC_PORT:-11211}"
+        ADMIN_PORT=$(grep '^--admin_port=' "$REPRO_ENV" | cut -d= -f2 || true)
     else
         print_warn "repro.env not found — using default flags (older crash archive)"
         GUESSED=1
@@ -387,10 +395,10 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
         CONFIG_CHANGED+="crash history ambiguous (the crash input is the newest record of ${AMBIG} sets); "
     fi
 
-    # Both ports must be free before starting: a foreign service already listening there would
+    # All ports must be free before starting: a foreign service already listening there would
     # pass the readiness check and receive the fuzz input if Dragonfly failed to bind.
     PORTS_BUSY=0
-    for port in "$RESP_PORT" $([[ "$MODE" == "memcache" ]] && echo "$MC_PORT"); do
+    for port in "$RESP_PORT" $([[ "$MODE" == "memcache" ]] && echo "$MC_PORT") $ADMIN_PORT; do
         if (>/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
             print_warn "Port $port still in use — waiting..."
             wait_port_free "$port" 5 || {

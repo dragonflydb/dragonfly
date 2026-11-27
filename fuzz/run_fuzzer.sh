@@ -39,6 +39,19 @@ AFL_TIER_DIR="${AFL_TIER_DIR:-/tmp}"
 # cover both code paths, falling back to the server default (true) when neither is set.
 AFL_TIER_COOLING="${AFL_TIER_COOLING:-}"
 
+# Cache mode (--cache_mode): pin with AFL_CACHE_MODE=true|false; otherwise follow AFL_RUN_NUMBER in
+# pairs (runs 1-2 on, 3-4 off, ...), so with cooling alternating every run each cooling value is
+# fuzzed both with and without cache mode. Off when neither is set.
+AFL_CACHE_MODE="${AFL_CACHE_MODE:-}"
+
+# In cache mode the harness runs DEBUG POPULATE <AFL_CACHE_FILL> on the admin port before the first
+# input, then sets maxmemory to used_memory / AFL_CACHE_PRESSURE so that writes evict. The fill is
+# deterministic (one thread, no RAND); 48-byte values stay below tiered_min_value_size, so tiering
+# never offloads it; 50000 keys leave the table at its densest (~89% of its capacity).
+AFL_CACHE_FILL="${AFL_CACHE_FILL:-50000 fill 48}"
+AFL_CACHE_PRESSURE="${AFL_CACHE_PRESSURE:-0.995}"
+AFL_ADMIN_PORT="${AFL_ADMIN_PORT:-6380}"
+
 # Persistent record: restart server every N iterations and record the last N inputs.
 # This ensures that on crash, ALL inputs that built the current server state are available
 # for replay. Without this, state from earlier iterations is lost and crashes become
@@ -120,6 +133,38 @@ setup_directories() {
         TIER_COOLING=""
     fi
 
+    if [[ -n "${AFL_CACHE_MODE}" ]]; then
+        CACHE_MODE="${AFL_CACHE_MODE}"
+    elif [[ "${AFL_RUN_NUMBER:-}" =~ ^[0-9]+$ ]]; then
+        CACHE_MODE=$([[ $(((10#$AFL_RUN_NUMBER - 1) / 2 % 2)) -eq 0 ]] && echo true || echo false)
+    else
+        CACHE_MODE=false
+    fi
+    if [[ "$CACHE_MODE" != true && "$CACHE_MODE" != false ]]; then
+        print_warning "AFL_CACHE_MODE must be true or false, got: ${CACHE_MODE}"
+        exit 1
+    fi
+    CACHE_FLAGS=()
+    if [[ "$CACHE_MODE" == true ]]; then
+        # The process RSS dwarfs the small limit: RSS eviction would empty the fill, and the RSS OOM
+        # check would reject every write and stop accepting connections. A budget threshold below
+        # the table growth estimate makes inserts evict instead of growing the table.
+        CACHE_FLAGS=(
+            --cache_mode=true
+            --admin_port="${AFL_ADMIN_PORT}"
+            --admin_bind=127.0.0.1
+            --enable_heartbeat_rss_eviction=false
+            --rss_oom_deny_ratio=-1
+            --eviction_memory_budget_threshold=0.01
+        )
+
+        # The fill runs under a large limit so that it evicts nothing; tiering sets its own.
+        if [[ -z "$TIER_PREFIX" ]]; then
+            CACHE_FLAGS+=(--maxmemory=1G)
+        fi
+        print_info "Cache mode enabled — fill: ${AFL_CACHE_FILL}, pressure: ${AFL_CACHE_PRESSURE}"
+    fi
+
     if [[ -z "$(ls -A "$CORPUS_DIR" 2>/dev/null)" ]]; then
         if [[ -d "${SEEDS_DIR}" ]] && [[ -n "$(ls -A "${SEEDS_DIR}" 2>/dev/null)" ]]; then
             print_info "Copying seeds to corpus..."
@@ -149,6 +194,7 @@ show_config() {
     echo "  Loop limit:      ${AFL_LOOP_LIMIT} (= AFL_PERSISTENT_RECORD)"
     echo "  Save mode:       ${AFL_ENABLE_SAVE:-off}"
     echo "  Tiering:         ${TIER_PREFIX:-off}${TIER_PREFIX:+ (direct=${TIER_DIRECT}, cooling=${TIER_COOLING})}"
+    echo "  Cache mode:      ${CACHE_MODE}${CACHE_FLAGS:+ (fill: ${AFL_CACHE_FILL}, pressure: ${AFL_CACHE_PRESSURE})}"
     echo ""
     print_note "Fuzzing integrated in dragonfly (USE_AFL + persistent mode)"
     print_note "Usage: ./run_fuzzer.sh [resp|memcache]"
@@ -186,6 +232,14 @@ write_repro_env() {
             echo "--tiered_offload_threshold=${AFL_TIER_OFFLOAD_THRESHOLD}"
             echo "--backing_file_direct=${TIER_DIRECT}"
             echo "--tiered_experimental_cooling=${TIER_COOLING}"
+        fi
+        for flag in "${CACHE_FLAGS[@]}"; do
+            echo "$flag"
+        done
+        if [[ "$CACHE_MODE" == true ]]; then
+            # Not server flags: replay_crash.py --repro-env repeats the harness fill.
+            echo "FILL=${AFL_CACHE_FILL}"
+            echo "FILL_PRESSURE=${AFL_CACHE_PRESSURE}"
         fi
         [[ "$TARGET" == "memcache" ]] && echo "--memcached_port=11211"
     } > "$out"
@@ -236,6 +290,14 @@ run_fuzzer() {
         )
     fi
 
+    if [[ "$CACHE_MODE" == true ]]; then
+        AFL_CMD+=(
+            "${CACHE_FLAGS[@]}"
+            --afl_cache_fill="${AFL_CACHE_FILL}"
+            --afl_cache_pressure="${AFL_CACHE_PRESSURE}"
+        )
+    fi
+
     if [[ "$TARGET" == "memcache" ]]; then
         AFL_CMD+=(--memcached_port=11211 --afl_target_port=11211)
     fi
@@ -277,6 +339,13 @@ run_fuzzer() {
         export AFL_PYTHON_MODULE=memcache_mutator
     else
         export AFL_PYTHON_MODULE=resp_mutator
+    fi
+
+    # The mutators also pick fill keys (cache_keys.py).
+    if [[ "$CACHE_MODE" == true ]]; then
+        export FUZZ_CACHE_FILL="${AFL_CACHE_FILL}"
+    else
+        unset FUZZ_CACHE_FILL
     fi
 
     exec "${AFL_CMD[@]}"

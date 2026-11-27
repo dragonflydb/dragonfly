@@ -50,6 +50,7 @@ ABSL_DECLARE_FLAG(std::string, dir);
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <cmath>
 #include <thread>
 #endif
 
@@ -133,6 +134,11 @@ ABSL_FLAG(uint32_t, afl_loop_limit, UINT_MAX,
 ABSL_FLAG(uint16_t, afl_target_port, 0,
           "Port to send fuzz input to. Defaults to --port (RESP). "
           "Set to --memcached_port to fuzz the memcache protocol.");
+ABSL_FLAG(string, afl_cache_fill, "",
+          "DEBUG POPULATE arguments to run on --admin_port before the first fuzz input, "
+          "e.g. '50000 fill 48'. Empty - no fill.");
+ABSL_FLAG(double, afl_cache_pressure, 0.995,
+          "After --afl_cache_fill, maxmemory is set to used_memory divided by this ratio.");
 #endif
 
 using namespace util;
@@ -960,6 +966,110 @@ void ClearDumpDirectory() {
   }
 }
 
+// Sends one command on a blocking socket. Returns true for a simple or bulk string reply and
+// stores its payload in `reply`; otherwise stores the raw reply received so far.
+bool SendAdminCommand(int fd, const std::vector<string>& args, string* reply) {
+  string req = StrCat("*", args.size(), "\r\n");
+  for (const string& arg : args)
+    absl::StrAppend(&req, "$", arg.size(), "\r\n", arg, "\r\n");
+  reply->clear();
+  if (send(fd, req.data(), req.size(), MSG_NOSIGNAL) != ssize_t(req.size()))
+    return false;
+
+  char buf[4096];
+  while (true) {
+    size_t eol = reply->find("\r\n");
+    if (eol != string::npos) {
+      if ((*reply)[0] == '+') {
+        *reply = reply->substr(1, eol - 1);
+        return true;
+      }
+      int64_t len = -1;
+      if ((*reply)[0] != '$' || !absl::SimpleAtoi(string_view(*reply).substr(1, eol - 1), &len) ||
+          len < 0)
+        return false;
+      if (reply->size() >= eol + 2 + len + 2) {
+        *reply = reply->substr(eol + 2, len);
+        return true;
+      }
+    }
+    ssize_t n = recv(fd, buf, sizeof(buf), 0);
+    if (n <= 0)
+      return false;
+    reply->append(buf, n);
+  }
+}
+
+// Returns the number after "<name>:" in an INFO reply.
+bool InfoField(string_view info, string_view name, uint64_t* value) {
+  for (string_view line : absl::StrSplit(info, "\r\n")) {
+    if (absl::ConsumePrefix(&line, name) && absl::ConsumePrefix(&line, ":"))
+      return absl::SimpleAtoi(line, value);
+  }
+  return false;
+}
+
+// Fills the server deterministically before the first input and lowers maxmemory so that writes
+// evict. DEBUG is restricted, hence the admin port. Exits on failure so that a run never fuzzes
+// without its fill.
+void ApplyAflCacheFill() {
+  string fill = GetFlag(FLAGS_afl_cache_fill);
+  if (fill.empty())
+    return;
+
+  double pressure = GetFlag(FLAGS_afl_cache_pressure);
+  if (!std::isfinite(pressure) || pressure <= 0) {
+    LOG(ERROR) << "AFL++: --afl_cache_pressure must be a positive finite number";
+    exit(1);
+  }
+
+  // The admin listener starts before the target one, so it already accepts connections here.
+  uint16_t admin_port = GetFlag(FLAGS_admin_port);
+  int fd = admin_port ? socket(AF_INET, SOCK_STREAM, 0) : -1;
+  struct sockaddr_in a = {};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(admin_port);
+  inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+  if (fd >= 0 && connect(fd, (struct sockaddr*)&a, sizeof(a)) != 0) {
+    close(fd);
+    fd = -1;
+  }
+  if (fd < 0) {
+    LOG(ERROR) << "AFL++: --afl_cache_fill needs a reachable --admin_port";
+    exit(1);
+  }
+  struct timeval tv = {.tv_sec = 60, .tv_usec = 0};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+  // A busy admin port does not stop the server, so the listener may belong to another process.
+  string reply;
+  uint64_t pid = 0;
+  if (!SendAdminCommand(fd, {"INFO", "SERVER"}, &reply) || !InfoField(reply, "process_id", &pid) ||
+      pid != static_cast<uint64_t>(getpid())) {
+    LOG(ERROR) << "AFL++: --admin_port " << admin_port << " is not served by this process";
+    exit(1);
+  }
+
+  std::vector<string> populate = {"DEBUG", "POPULATE"};
+  for (string_view arg : absl::StrSplit(fill, ' ', absl::SkipEmpty()))
+    populate.emplace_back(arg);
+
+  uint64_t used = 0;
+  bool ok = SendAdminCommand(fd, populate, &reply) &&
+            SendAdminCommand(fd, {"INFO", "MEMORY"}, &reply) &&
+            InfoField(reply, "used_memory", &used);
+  if (ok) {
+    // replay_crash.py --repro-env computes the same limit.
+    uint64_t limit = static_cast<uint64_t>(used / pressure);
+    ok = SendAdminCommand(fd, {"CONFIG", "SET", "maxmemory", StrCat(limit)}, &reply);
+  }
+  close(fd);
+  if (!ok) {
+    LOG(ERROR) << "AFL++: cache fill failed: " << reply;
+    exit(1);
+  }
+}
+
 // Initializes AFL++ fuzzing by starting the server in a separate thread,
 // waiting for it to become ready, and preparing stdin for fuzzing input.
 // Returns the server thread handle. The caller is responsible for the fuzzing loop.
@@ -980,6 +1090,7 @@ std::thread InitAflFuzzing(ProactorPool* pool, AcceptServer* acceptor) {
     LOG(ERROR) << "AFL++: Server not ready after 100 attempts, exiting...";
     exit(1);
   }
+  ApplyAflCacheFill();
 
   uint32_t afl_loop_limit = GetFlag(FLAGS_afl_loop_limit);
   LOG(INFO) << "AFL++: Server ready, starting fuzzing loop with limit " << afl_loop_limit

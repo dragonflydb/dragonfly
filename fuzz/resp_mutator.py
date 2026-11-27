@@ -8,6 +8,8 @@ import json
 import os
 import random
 
+import cache_keys
+
 # fmt: off
 # (name, min_args, max_args): arg counts after the command name. min_args meets the
 # registered arity; max_args caps the option grammar. Admin/cluster cmds excluded.
@@ -227,6 +229,28 @@ SPECIAL = [
     b"CAPACITY",
     # topk options
     b"WITHCOUNT",
+    # search schema / query options
+    b"ON",
+    b"JSON",
+    b"SCHEMA",
+    b"TEXT",
+    b"TAG",
+    b"NUMERIC",
+    b"VECTOR",
+    b"HNSW",
+    b"SORTABLE",
+    b"INDEXEMPTY",
+    b"INDEXMISSING",
+    b"PARAMS",
+    b"SCORER",
+    b"GROUPBY",
+    b"REDUCE",
+    # client kill / tracking options
+    b"SKIPME",
+    b"MAXAGE",
+    b"OPTIN",
+    b"OPTOUT",
+    b"NOLOOP",
 ]
 JSON_VALUES = [b'{"a":1}', b"[1,2,3]", b'"str"', b"42", b"null", b"true"]
 JSON_PATHS = [b"$", b"$.a", b"$.*", b"$.arr[0]", b"."]
@@ -297,6 +321,9 @@ def _encode_resp(*args):
 
 def _random_arg():
     """Generate a random argument value."""
+    key = cache_keys.fill_key()
+    if key:
+        return key
     r = random.random()
     if r < 0.3:
         return random.choice(KEYS)
@@ -435,6 +462,12 @@ def _mutate_commands(commands):
         if len(result) > 0:
             idx = random.randint(0, len(result) - 1)
             result[idx] = list(result[idx]) + [_random_arg()]
+
+    keys = cache_keys.burst_keys()
+    if keys:
+        result.insert(
+            random.randint(0, len(result)), [b"MSET"] + [x for k in keys for x in (k, b"v")]
+        )
 
     return result
 
