@@ -4,6 +4,7 @@
 #include <absl/cleanup/cleanup.h>
 
 #include <random>
+#include <utility>
 
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -298,29 +299,59 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   absl::FlagSaver fs;
   SetTestFlag("cache_mode", "true");
   ResetService();
-  Run({"debug", "populate", "18000", "key", "32", "RAND"});
+  ASSERT_EQ(Run({"debug", "populate", "18000", "key", "32", "RAND"}), "OK");
 
-  // Scan starts traversing the database, because we populated the database with lots of items we
-  // assume that scan will return items from the same bucket that reside next to each other.
-  auto resp = Run({"scan", "0"});
-  ASSERT_THAT(resp, ArrLen(2));
-  StringVec vec = StrArray(resp.GetVec()[1]);
-  ASSERT_GE(vec.size(), 10);
+  // Find a regular bucket with three occupied slots so the key in slot 2 can bump twice.
+  auto [first, third] = shard_set->Await(0, [] {
+    auto* table = namespaces->GetDefaultNamespace().GetDbSlice(0).GetTables(0);
+    pair<string, string> keys;
+    auto find_adjacent = [&](PrimeTable::bucket_iterator it) {
+      if (it.bucket_id() >= PrimeTable::kBucketNum || it.slot_id() != 0)
+        return;
 
-  resp = Run({"info", "stats"});
-  EXPECT_EQ(InfoReply(resp.GetString()).GetInt("bump_ups"), 0);
+      auto next = it;
+      ++next;
+      if (next.is_done() || next.slot_id() != 1)
+        return;
 
-  Run({"del", vec[1]});
-  Run({"lpush", vec[1], "a"});
+      ++next;
+      if (!next.is_done() && next.slot_id() == 2)
+        keys = {it->first.ToString(), next->first.ToString()};
+    };
 
-  resp = Run({"get", vec[2]});
-  string val = resp.GetString();
-  auto mget_resp = StrArray(Run({"mget", vec[2], vec[2], vec[2]}));
-  EXPECT_THAT(mget_resp, ElementsAre(val, val, val));
+    PrimeTable::Cursor cursor;
+    do {
+      cursor = table->TraverseBuckets(cursor, find_adjacent);
+    } while (cursor && keys.second.empty());
+    return keys;
+  });
+  ASSERT_FALSE(third.empty()) << "No regular bucket with keys in slots 0 through 2";
 
-  resp = Run({"info", "stats"});
-  size_t bumps = InfoReply(resp.GetString()).GetInt("bump_ups");
-  EXPECT_EQ(bumps, 2);  // one bump for get and one for mget
+  auto bump_ups = [&] { return InfoReply(Run({"info", "stats"}).GetString()).GetInt("bump_ups"); };
+  auto expect_slot = [&](string_view key, unsigned slot) {
+    EXPECT_THAT(Run({"debug", "object", key}).GetString(), HasSubstr(StrCat(" slot:", slot, " ")));
+  };
+
+  EXPECT_EQ(bump_ups(), 0);
+
+  // Multiple references to the same key in one MGET trigger a single bump.
+  auto values = StrArray(Run({"mget", third, third, third}));
+  expect_slot(third, 1);
+  EXPECT_EQ(bump_ups(), 1);
+
+  auto resp = Run({"get", third});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  string value = resp.GetString();
+  EXPECT_THAT(values, ElementsAre(value, value, value));
+  expect_slot(third, 0);
+  EXPECT_EQ(bump_ups(), 2);
+
+  EXPECT_THAT(Run({"del", third}), IntArg(1));
+  EXPECT_EQ(bump_ups(), 2);
+
+  EXPECT_THAT(Run({"get", first}), ArgType(RespExpr::STRING));
+  expect_slot(first, 1);
+  EXPECT_EQ(bump_ups(), 2);
 }
 
 TEST_F(StringFamilyTest, MSetGet) {
