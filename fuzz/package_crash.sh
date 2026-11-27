@@ -216,9 +216,9 @@ echo "     (cd \"\$WORK\" && ulimit -v \"\$MEM_KB\" && exec <absolute-path-to-dr
 echo "     DF_PID=\$!   # loopback only: the replay server has no authentication"
 echo "  3. Replay:"
 if [[ "$MODE_HINT" == "memcache" ]]; then
-    echo "     python3 replay_crash.py crashes ${CRASH_ID} 127.0.0.1 ${REPLAY_PORT} --protocol memcache --pid \"\$DF_PID\""
+    echo "     python3 replay_crash.py crashes ${CRASH_ID} 127.0.0.1 ${REPLAY_PORT} --protocol memcache --pid \"\$DF_PID\" --repro-env repro.env"
 else
-    echo "     python3 replay_crash.py crashes ${CRASH_ID} 127.0.0.1 ${REPLAY_PORT} --pid \"\$DF_PID\""
+    echo "     python3 replay_crash.py crashes ${CRASH_ID} 127.0.0.1 ${REPLAY_PORT} --pid \"\$DF_PID\" --repro-env repro.env"
 fi
 echo "  4. Stop the server and remove its directory:"
 echo "     kill \"\$DF_PID\"; wait \"\$DF_PID\" 2>/dev/null; rm -rf \"\$WORK\""

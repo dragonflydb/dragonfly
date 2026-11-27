@@ -22,10 +22,14 @@ Modes:
            tail of a pipeline when the peer closes, so this mode is timing-dependent; it is what
            the fuzzer did.
 
-Liveness is checked through /proc (--pid) or bare TCP connects; no extra command is ever sent
-to the server outside the drain barrier. With --pid nothing is sent at all unless /proc shows
-that the process itself accepted a probe connection to the exact address used for the replay
-(the host is resolved once to one IPv4 address).
+Liveness is checked through /proc (--pid) or bare TCP connects; apart from the fill below, no
+extra command is ever sent to the server outside the drain barrier. With --pid nothing is sent
+at all unless /proc shows that the process itself accepted a probe connection to the exact
+address used for the replay (the host is resolved once to one IPv4 address).
+
+With --repro-env, the state a cache-mode harness builds before its first input (the FILL= and
+FILL_PRESSURE= lines written by run_fuzzer.sh) is rebuilt the same way before the replay:
+DEBUG POPULATE on the admin port, then maxmemory = used_memory / FILL_PRESSURE.
 
 The fuzzer attributes a crash to the input in flight when the process died, which is often the
 NEXT input: after an assertion the process keeps running for tens of milliseconds while the
@@ -35,19 +39,21 @@ Usage:
     # Start a plain (non-AFL) dragonfly on an empty --dir with the flags from repro.env, then:
     python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000 [host] [port]
         [--mode drain|harness] [--pid PID] [--protocol resp|memcache] [--tail N]
-        [--no-crash-input] [--timeout SEC] [--wait SEC] [--verbose]
+        [--no-crash-input] [--timeout SEC] [--wait SEC] [--repro-env PATH] [--verbose]
 
 Exit codes: 0 = server alive (drain: every input verified; harness: nothing is verified, the
 server simply survived and no input was skipped); 3 = server died (the input is printed, with a note when earlier inputs
 were unverified, since the state may then differ from the fuzz run); 4 = server alive but some
 inputs could not be verified (listed); 1 = nothing to replay, the server could not be reached,
-or the endpoint could not be confirmed to belong to --pid; 2 = invalid arguments.
+the endpoint could not be confirmed to belong to --pid, or the --repro-env fill failed;
+2 = invalid arguments.
 """
 
 import argparse
 import glob
 import math
 import os
+import re
 import socket
 import sys
 import time
@@ -438,6 +444,89 @@ def listening(host, port):
     return True
 
 
+def require_endpoint(host, port, pid, wait):
+    """Exits unless host:port listens within `wait` seconds and, with --pid, provably belongs to
+    that process."""
+
+    # Readiness means an open listener, whatever --pid says: the process exists before it listens.
+    deadline = time.monotonic() + wait
+    while not listening(host, port):
+        if time.monotonic() >= deadline:
+            print(
+                f"\033[0;31m[ERROR]\033[0m No listener at {host}:{port} after"
+                f" {wait:g}s; is Dragonfly running?"
+            )
+            sys.exit(1)
+        time.sleep(0.1)
+
+    # Never feed fuzz input to whatever else happens to answer on the port (e.g. when the
+    # server failed to bind): with --pid that process must provably accept our connections.
+    if pid is not None and endpoint_owned_by(pid, host, port) is not True:
+        print(
+            f"\033[0;31m[ERROR]\033[0m Cannot confirm that {host}:{port} is served by"
+            f" pid {pid} (wrong pid, another service, or /proc not readable);"
+            " not sending anything."
+        )
+        sys.exit(1)
+
+
+# ─── Cache-mode fill ──────────────────────────────────────────────────────────
+
+
+def read_fill(repro_env):
+    """Returns (DEBUG POPULATE args, pressure, admin port) from repro.env; the args are None when
+    the fuzz run had no fill."""
+    fill, pressure, admin_port = None, None, None
+    with open(repro_env) as f:
+        for line in f:
+            key, _, value = line.strip().partition("=")
+            if key == "FILL":
+                fill = value.split()
+            elif key == "FILL_PRESSURE":
+                pressure = float(value)
+                if not 0 < pressure < math.inf:
+                    raise ValueError(f"FILL_PRESSURE must be a positive finite number, got {value}")
+            elif key == "--admin_port":
+                admin_port = int(value)
+    return fill, pressure, admin_port
+
+
+def resp_command(sock, reader, *args):
+    """Sends one command and returns the payload of its reply; raises on an error reply."""
+    parts = [b"*%d\r\n" % len(args)]
+    for arg in args:
+        arg = arg if isinstance(arg, bytes) else str(arg).encode()
+        parts.append(b"$%d\r\n%s\r\n" % (len(arg), arg))
+    sock.sendall(b"".join(parts))
+    line = reader.readline()
+    if not line.endswith(b"\r\n"):
+        raise ConnectionError("connection closed by the server")
+    if line[:1] == b"-":
+        raise RuntimeError(line[1:-2].decode(errors="replace"))
+    if line[:1] == b"$":
+        size = int(line[1:-2])
+        return None if size < 0 else reader.read(size + 2)[:-2]
+    return line[1:-2]
+
+
+def apply_fill(host, admin_port, fill, pressure):
+    """Does what the harness does before its first input (ApplyAflCacheFill in dfly_main.cc).
+    Returns (used_memory after the fill, the maxmemory set)."""
+    s = connect(host, admin_port, 60.0)
+    if s is None:
+        raise ConnectionError(f"cannot connect to the admin port {host}:{admin_port}")
+    with s, s.makefile("rb") as reader:
+        resp_command(s, reader, "DEBUG", "POPULATE", *fill)
+        info = resp_command(s, reader, "INFO", "MEMORY") or b""
+        match = re.search(rb"^used_memory:(\d+)", info, re.M)
+        if not match:
+            raise RuntimeError("INFO MEMORY has no used_memory")
+        used = int(match.group(1))
+        limit = int(used / pressure)
+        resp_command(s, reader, "CONFIG", "SET", "maxmemory", limit)
+    return used, limit
+
+
 def _proc_addr(hex_addr):
     """Decodes a /proc/net/tcp{,6} address column into (ipv4 or None, is_wildcard)."""
     raw = bytes.fromhex(hex_addr)
@@ -622,6 +711,9 @@ def main():
     ap.add_argument(
         "--wait", type=finite_seconds(0), default=10.0, help="seconds to wait for the listener"
     )
+    ap.add_argument(
+        "--repro-env", help="the fuzz run's repro.env: rebuild its cache-mode fill before replaying"
+    )
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -661,25 +753,31 @@ def main():
         print(f"\033[0;32m[INFO]\033[0m Using {resolved[0][4][0]} for {args.host}")
         args.host = resolved[0][4][0]
 
-    # Readiness means an open listener, whatever --pid says: the process exists before it listens.
-    deadline = time.monotonic() + args.wait
-    while not listening(args.host, args.port):
-        if time.monotonic() >= deadline:
-            print(
-                f"\033[0;31m[ERROR]\033[0m No listener at {args.host}:{args.port} after"
-                f" {args.wait:g}s; is Dragonfly running?"
-            )
+    require_endpoint(args.host, args.port, args.pid, args.wait)
+
+    if args.repro_env:
+        try:
+            fill, pressure, admin_port = read_fill(args.repro_env)
+        except (OSError, ValueError) as e:
+            print(f"\033[0;31m[ERROR]\033[0m Cannot read {args.repro_env}: {e}")
             sys.exit(1)
-        time.sleep(0.1)
-    # Never feed fuzz input to whatever else happens to answer on the port (e.g. when the
-    # server failed to bind): with --pid that process must provably accept our connections.
-    if args.pid is not None and endpoint_owned_by(args.pid, args.host, args.port) is not True:
-        print(
-            f"\033[0;31m[ERROR]\033[0m Cannot confirm that {args.host}:{args.port} is served by"
-            f" pid {args.pid} (wrong pid, another service, or /proc not readable);"
-            " not sending anything."
-        )
-        sys.exit(1)
+        if fill:
+            if pressure is None or admin_port is None:
+                print(
+                    f"\033[0;31m[ERROR]\033[0m {args.repro_env} has FILL= but no"
+                    " FILL_PRESSURE= or --admin_port="
+                )
+                sys.exit(1)
+            require_endpoint(args.host, admin_port, args.pid, args.wait)
+            try:
+                used, limit = apply_fill(args.host, admin_port, fill, pressure)
+            except (OSError, RuntimeError, ValueError) as e:
+                print(f"\033[0;31m[ERROR]\033[0m Cache fill failed: {e}")
+                sys.exit(1)
+            print(
+                f"\033[0;32m[INFO]\033[0m Cache fill: DEBUG POPULATE {' '.join(fill)} on port"
+                f" {admin_port}, maxmemory {limit} (used_memory {used} / {pressure:g})"
+            )
 
     liveness = (args.host, args.port, args.pid)
     barrier_cls, walk = PROTOCOLS[args.protocol]

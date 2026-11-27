@@ -62,6 +62,10 @@ Configuration via environment variables:
 | `AFL_ENABLE_TIERING` | off | Set to `1` to enable tiered storage (offload/fetch code paths) |
 | `AFL_TIER_DIR` | `/tmp` | Base directory for tiering backing files |
 | `AFL_TIER_COOLING` | unset | Pin `tiered_experimental_cooling`; unset = `AFL_RUN_NUMBER` parity in CI, `true` locally |
+| `AFL_CACHE_MODE` | unset | Pin `--cache_mode`; unset = `AFL_RUN_NUMBER` pairs in CI (runs 1-2 on, 3-4 off), off locally; PR runs never use it |
+| `AFL_CACHE_FILL` | `50000 fill 48` | `DEBUG POPULATE` arguments of the cache-mode fill |
+| `AFL_CACHE_PRESSURE` | `0.995` | After the fill, maxmemory = used_memory / this ratio |
+| `AFL_ADMIN_PORT` | `6380` | Admin port the harness fills the server through |
 | `BUILD_DIR` | `build-dbg` | Path to build directory |
 
 Save mode (`AFL_ENABLE_SAVE=1`) enables `--dbfilename=dump` and writes snapshots
@@ -79,6 +83,25 @@ disk (`AFL_TIER_DIR` points at the runner temp dir) and alternates
 paths get nightly coverage. The chosen values are recorded in `repro.env`;
 `triage_crashes.sh` re-probes O_DIRECT locally and falls back to buffered IO
 if the local filesystem rejects it.
+
+Cache mode (`--cache_mode=true`) alternates in pairs of nightly runs, so with
+cooling alternating every run each cooling value is fuzzed with and without it.
+Eviction needs memory pressure, so before the first input of every server start
+the harness fills the server on the admin port with `DEBUG POPULATE 50000 fill 48`
+(deterministic: one thread, no `RAND`; 48-byte values are never offloaded by
+tiering) and then sets maxmemory to `used_memory / 0.995`. The fill runs under
+`--maxmemory=1G` so that it evicts nothing itself. Cache-mode runs also pass
+`--rss_oom_deny_ratio=-1` and `--enable_heartbeat_rss_eviction=false` (the
+process RSS is far above the small limit: writes would be rejected, new
+connections refused and the fill evicted) and `--eviction_memory_budget_threshold=0.01`
+(less headroom than a table growth needs, so an insert that would grow the table
+evicts instead). About 10% of the arguments the mutators generate are fill keys
+(`cache_keys.py`; the memcache mutator uses them as keys only), half existing and
+half new, and about 10% of the inputs get a write of 4-8 new fill keys (`MSET`, or
+`set` lines for memcache): the fixed vocabulary alone never needs the table to
+grow. INFO `hard_evictions` counts the evictions done by inserts. `repro.env`
+records the fill as `FILL=` and `FILL_PRESSURE=`; `replay_crash.py --repro-env`
+rebuilds it before replaying, and `triage_crashes.sh` passes it automatically.
 
 ## Custom Mutators
 
@@ -191,8 +214,10 @@ WORK=$(mktemp -d)   # empty --dir; also the cwd, where a relative --tiered_prefi
 DF_PID=$!   # loopback only: the replay server has no authentication
 
 # RESP replay (drain mode: every command executes; reports the input after which the server died).
-# The replay waits up to --wait seconds (default 10) for the listener:
-python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000 --pid "$DF_PID"
+# The replay waits up to --wait seconds (default 10) for the listener; --repro-env rebuilds a
+# cache-mode run's fill first:
+python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000 --pid "$DF_PID" \
+  --repro-env fuzz/artifacts/resp/repro.env
 
 # Exact fuzzer behaviour (send, one read, close), byte for byte. The drain above already changed
 # the server's state, so start a fresh server on a new empty --dir first, as triage does:
@@ -201,7 +226,8 @@ DF=$(realpath ./build-dbg-plain/dragonfly)   # absolute: the server starts from 
 WORK=$(mktemp -d)   # empty --dir; also the cwd, where a relative --tiered_prefix lands
 (cd "$WORK" && ulimit -v "$MEM_KB" && exec "$DF" "${DF_FLAGS[@]}" --dir="$WORK" --bind=127.0.0.1) &
 DF_PID=$!   # loopback only: the replay server has no authentication
-python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000 --pid "$DF_PID" --mode harness
+python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000 --pid "$DF_PID" --mode harness \
+  --repro-env fuzz/artifacts/resp/repro.env
 kill "$DF_PID"; wait "$DF_PID" 2>/dev/null; rm -rf "$WORK"   # always stop the replay server
 # Useful options: --tail N (last N RECORD inputs only), --no-crash-input, --verbose (per-input
 # verification status), --timeout SEC (drain cap per input).
@@ -213,7 +239,8 @@ earlier inputs were unverified a note says so, since the state may then differ f
 run); 4 = the server survived but some inputs could not be verified (they are listed with the
 reason: the input ends in the middle of a command and was sent without a barrier, a blocking
 command or open MULTI never answered, or the server closed the connection); 0 = survived (in
-drain mode every input was verified; harness mode verifies nothing). Liveness is checked
+drain mode every input was verified; harness mode verifies nothing). Without `--repro-env` a
+cache-mode crash replays against an empty server instead of the harness fill. Liveness is checked
 through `--pid` or a bare TCP connect, never with an extra command, and with `--pid` the
 replay refuses to send anything unless `/proc` proves that the listener on the port is that
 process's own socket (use the pid of the server you started, as the same user, on a local
@@ -234,7 +261,8 @@ WORK=$(mktemp -d)   # empty --dir; also the cwd, where a relative --tiered_prefi
 DF_PID=$!   # loopback only: the replay server has no authentication
 
 # Memcache replay:
-python3 fuzz/replay_crash.py fuzz/artifacts/memcache/default/crashes 000000 127.0.0.1 11211 --protocol memcache --pid "$DF_PID"
+python3 fuzz/replay_crash.py fuzz/artifacts/memcache/default/crashes 000000 127.0.0.1 11211 --protocol memcache --pid "$DF_PID" \
+  --repro-env fuzz/artifacts/memcache/repro.env
 kill "$DF_PID"; wait "$DF_PID" 2>/dev/null; rm -rf "$WORK"
 ```
 
@@ -266,9 +294,9 @@ WORK=$(mktemp -d)   # empty --dir; also the cwd, where a relative --tiered_prefi
 DF_PID=$!   # loopback only: the replay server has no authentication
 
 # RESP:
-python3 replay_crash.py crashes 000000 --pid "$DF_PID"
+python3 replay_crash.py crashes 000000 --pid "$DF_PID" --repro-env repro.env
 # Memcache:
-python3 replay_crash.py crashes 000000 127.0.0.1 11211 --protocol memcache --pid "$DF_PID"
+python3 replay_crash.py crashes 000000 127.0.0.1 11211 --protocol memcache --pid "$DF_PID" --repro-env repro.env
 kill "$DF_PID"; wait "$DF_PID" 2>/dev/null; rm -rf "$WORK"
 ```
 
@@ -276,8 +304,8 @@ kill "$DF_PID"; wait "$DF_PID" 2>/dev/null; rm -rf "$WORK"
 
 | Target | Directory | Seeds | Coverage |
 |--------|-----------|-------|----------|
-| `resp` | `seeds/resp/` | 122 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops, CMS, Top-K, field expiry, hash expiry, SADDEX, GEORADIUS, hybrid vector search (FT.HYBRID), sharded pub/sub, bloom SCANDUMP/LOADCHUNK, RESP3 reply serialization (`HELLO 3`), RM, BF.INFO, option-grammar depth seeds (`*_gap.resp`) |
-| `memcache` | `seeds/memcache/` | 15 | set/get, add/replace, append/prepend, cas, incr/decr, delete, multiget, gat, noreply, meta commands (ms/mg/md/ma with valid flags), stats/version |
+| `resp` | `seeds/resp/` | 135 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops, CMS, Top-K, field expiry, hash expiry, SADDEX, GEORADIUS, hybrid vector search (FT.HYBRID), sharded pub/sub, bloom SCANDUMP/LOADCHUNK, RESP3 reply serialization (`HELLO 3`), RM, BF.INFO, option-grammar depth seeds (`*_gap.resp`), JSON indexes, vector types and HNSW, field flags / `ismissing` / scorers / aliases, CLIENT KILL filters and tracking, JSON.GET formatting, SELECT in MULTI, ACL rules, RESTORE of a hash with field TTLs, cache-mode fill keys, LOAD_FROM joins, deep FILTER/APPLY and query expressions |
+| `memcache` | `seeds/memcache/` | 16 | set/get, add/replace, append/prepend, cas, incr/decr, delete, multiget, gat, noreply, meta commands (ms/mg/md/ma with valid flags), stats/version, cache-mode fill keys |
 
 Every seed must consist of commands that **execute successfully** on a fresh
 fuzz server (no unknown-command, arity, syntax, wrong-type, or missing-state
@@ -287,7 +315,8 @@ command needs earlier in the same file. `fuzz/check_fuzz_coverage.py` enforces
 that every mutator command appears in command position in a strictly-parseable
 seed (for both `resp` and `memcache`); it rejects a seed the RESP/memcache
 parser cannot read, so a mis-framed seed fails CI instead of silently
-contributing nothing.
+contributing nothing. Seeds are public: do not add one that reproduces a
+vulnerability before its fix is on `main`.
 
 The one sanctioned exception is a command whose sole fuzzing value is a parser
 branch that has **no** successful dispatch path: memcache `cas`. Dragonfly's

@@ -11,6 +11,8 @@ Usage:
 
 import random
 
+import cache_keys
+
 # fmt: off
 # (command, type, min_extra_args, max_extra_args)
 # type: "store" = key flags exptime bytes [noreply]\r\ndata\r\n
@@ -70,6 +72,9 @@ def init(seed):
 
 
 def _random_key():
+    key = cache_keys.fill_key()
+    if key:
+        return key
     if random.random() < 0.8:
         return random.choice(KEYS)
     return random.choice(FUZZ_VALUES)
@@ -326,6 +331,11 @@ def _mutate_commands(commands):
             else:
                 line = line + b" noreply"
             result[idx] = (line, value)
+
+    keys = cache_keys.burst_keys()
+    if keys:
+        pos = random.randint(0, len(result))
+        result[pos:pos] = [(b"set %s 0 0 1" % k, b"v") for k in keys]
 
     return result
 
