@@ -112,8 +112,11 @@ float HalfToFloat(uint16_t h) {
   return static_cast<float>(std::bit_cast<_Float16>(h));
 }
 
+// The bfloat conversions use integer ops: clang cannot lower __bf16 casts on arm64 (Apple clang
+// at -O3, clang 18 on Linux at any level: "Cannot select: fp_extend / fp_round").
 float Bf16ToFloat(uint16_t b) {
-  return static_cast<float>(std::bit_cast<__bf16>(b));
+  // A bfloat is the upper half of a float, so widening is exact.
+  return std::bit_cast<float>(static_cast<uint32_t>(b) << 16);
 }
 
 uint16_t FloatToHalf(float f) {
@@ -121,19 +124,13 @@ uint16_t FloatToHalf(float f) {
 }
 
 uint16_t FloatToBf16(float f) {
-#ifdef __APPLE__
-  // Round-to-nearest-even truncation of the float32 bits, done manually instead of via
-  // static_cast<__bf16>(f): that cast crashes Apple clang's backend on arm64
-  // ("Cannot select: bf16 = fp_round") at -O3.
+  // Round to nearest even; a NaN stays a quiet NaN.
   uint32_t bits = std::bit_cast<uint32_t>(f);
   if (std::isnan(f)) {
     return static_cast<uint16_t>((bits >> 16) | 0x0040);
   }
   bits += 0x7fff + ((bits >> 16) & 1);
   return static_cast<uint16_t>(bits >> 16);
-#else
-  return std::bit_cast<uint16_t>(static_cast<__bf16>(f));
-#endif
 }
 
 std::vector<std::byte> EncodeOnesVector(size_t dim, VectorDataType dt) {

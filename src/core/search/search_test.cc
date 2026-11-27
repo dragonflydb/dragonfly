@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <memory_resource>
 #include <random>
@@ -2305,6 +2306,19 @@ TEST_F(SearchTest, HalfBf16SpecialValues) {
   EXPECT_TRUE(std::isnan(Bf16ToFloat(0x7FC0)));
   EXPECT_EQ(FloatToBf16(INFINITY), 0x7F80);
   EXPECT_TRUE(std::isnan(Bf16ToFloat(FloatToBf16(std::nanf("")))));
+
+  // Bfloat conversions are exact one way and round to nearest even the other way.
+  auto from_bits = [](uint32_t u) { return std::bit_cast<float>(u); };
+  EXPECT_EQ(FloatToBf16(from_bits(0x3F808000)), 0x3F80);  // tie, rounds down to even
+  EXPECT_EQ(FloatToBf16(from_bits(0x3F818000)), 0x3F82);  // tie, rounds up to even
+  EXPECT_EQ(FloatToBf16(from_bits(0x3F808001)), 0x3F81);  // above the tie
+  EXPECT_EQ(FloatToBf16(from_bits(0x7F7FFFFF)), 0x7F80);  // FLT_MAX overflows to inf
+  EXPECT_EQ(FloatToBf16(from_bits(0x00018000)), 0x0002);  // subnormal tie, not flushed to zero
+  EXPECT_EQ(FloatToBf16(-0.0f), 0x8000);
+  EXPECT_EQ(FloatToBf16(-std::nanf("")) & 0x8000, 0x8000);
+  EXPECT_TRUE(std::isnan(Bf16ToFloat(FloatToBf16(from_bits(0x7F800001)))));  // low-bit payload
+  EXPECT_TRUE(std::signbit(Bf16ToFloat(0x8000)));
+  EXPECT_EQ(Bf16ToFloat(0x0001), from_bits(0x00010000));  // subnormal
 
   // Smallest positive subnormal half round-trips and stays finite.
   float sub = HalfToFloat(0x0001);
