@@ -5979,6 +5979,11 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromSyntaxErrors) {
       ErrArg("bad arguments for LOAD_FROM: one of the field must be from the current index 'idx3'. "
              "Got 'idx2.str2' and 'idx1.str1'"));
 
+  // Test when both fields are from the same index
+  EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD_FROM", "idx2", "1", "idx2.num2=idx2.str2"}),
+              ErrArg("bad arguments for LOAD_FROM: fields must be from different indexes. "
+                     "Got 'idx2.num2' and 'idx2.str2'"));
+
   // Test when field of index does not exist
   EXPECT_THAT(Run({"ft.aggregate", "idx1", "*", "LOAD", "2", "idx1.num1", "idx1.str1", "LOAD_FROM",
                    "idx2", "1", "idx2.num2=idx1.nonexistent_field"}),
