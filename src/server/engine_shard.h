@@ -265,6 +265,8 @@ class EngineShard {
   // Merge underutilized buddy-segment pairs in the dash table.
   CompactTableStats CompactTable(double threshold, DbIndex db_idx);
 
+  friend void RetireExpiredAndEvictForTest(EngineShard*);
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
@@ -393,6 +395,8 @@ class EngineShard {
   using Counter = util::SlidingCounter<7>;
 
   Counter counter_[COUNTER_TOTAL];
+
+  uint32_t heartbeat_ns_rotation_ = 0;
 
   static __thread EngineShard* shard_;
 };
