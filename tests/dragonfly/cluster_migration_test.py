@@ -184,8 +184,12 @@ async def test_migration_serializer_expired_fields(df_factory):
         await nodes[0].client.execute_command("HSETEX", "hkey", "1", f"f{i}", "v")
         await nodes[0].client.execute_command("SADDEX", "skey", "1", f"m{i}")
     await nodes[0].client.execute_command("SET", "normal", "val")
-    await nodes[0].client.execute_command("HSETEX", "hkey", "1000", "keep", "v")
-    await nodes[0].client.execute_command("SADDEX", "skey", "1000", "keep")
+    # Separate keys, so hkey and skey still become empty during migration.
+    for i in range(8):
+        await nodes[0].client.execute_command("HSETEX", "hkey2", "1", f"f{i}", "v")
+        await nodes[0].client.execute_command("SADDEX", "skey2", "1", f"m{i}")
+    await nodes[0].client.execute_command("HSETEX", "hkey2", "1000", "keep", "v")
+    await nodes[0].client.execute_command("SADDEX", "skey2", "1000", "keep")
 
     # TTL is 1s; wait generously to tolerate slow/loaded CI runners.
     await asyncio.sleep(2.0)
@@ -211,10 +215,10 @@ async def test_migration_serializer_expired_fields(df_factory):
     # Server survived — no zombie crash.
 
     # Member TTLs migrate, and members that expired on the source do not.
-    assert await nodes[1].client.execute_command("HGETALL", "hkey") == {"keep": "v"}
-    assert await nodes[1].client.execute_command("SMEMBERS", "skey") == {"keep"}
-    assert 0 < await nodes[1].client.execute_command("FIELDTTL", "hkey", "keep") <= 1000
-    assert 0 < await nodes[1].client.execute_command("FIELDTTL", "skey", "keep") <= 1000
+    assert await nodes[1].client.execute_command("HGETALL", "hkey2") == {"keep": "v"}
+    assert await nodes[1].client.execute_command("SMEMBERS", "skey2") == {"keep"}
+    assert 0 < await nodes[1].client.execute_command("FIELDTTL", "hkey2", "keep") <= 1000
+    assert 0 < await nodes[1].client.execute_command("FIELDTTL", "skey2", "keep") <= 1000
 
 
 @pytest.mark.parametrize("db", [0, 2])

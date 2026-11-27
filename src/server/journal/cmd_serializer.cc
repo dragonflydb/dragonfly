@@ -71,6 +71,16 @@ class CommandAggregator {
   size_t max_aggragation_bytes_;
 };
 
+// HSETEX and SADDEX reject deadlines beyond kMaxExpireDeadlineSec, but an RDB load can set them.
+uint32_t CapMemberDeadline(string_view key, uint32_t deadline, uint32_t now) {
+  const uint32_t max_deadline = now + kMaxExpireDeadlineSec;
+  if (deadline <= max_deadline)
+    return deadline;
+  LOG_EVERY_T(ERROR, 1) << "Member deadline of key " << key << " is too far, migrating it as "
+                        << max_deadline + kMemberExpiryBase;
+  return max_deadline;
+}
+
 }  // namespace
 
 CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size)
@@ -228,7 +238,7 @@ size_t CmdSerializer::SerializeSetWithExpiry(DbIndex db_index, string_view key,
         if (!timed || it.ExpiryTime() != deadline) {
           timed.reset();
           deadline = it.ExpiryTime();
-          ttl = absl::StrCat(deadline - now);
+          ttl = absl::StrCat(CapMemberDeadline(key, deadline, now) - now);
           timed.emplace(key, saddex, max_serialization_buffer_size_);
         }
         timed->AddArg(std::move(str));
@@ -300,6 +310,28 @@ size_t CmdSerializer::SerializeHashWithExpiry(DbIndex db_index, string_view key,
     ++commands;
   };
 
+  // Fields with a TTL go first: HSETEX creates the hash as a StringMap, which tiering never
+  // offloads. An HSET-created listpack could be offloaded, and HSETEX rejects offloaded hashes.
+  StringMap* string_map = static_cast<StringMap*>(pv.RObjPtr());
+  {
+    optional<CommandAggregator> timed;
+    uint32_t deadline = 0;
+    for (auto it = string_map->begin(); it != string_map->end(); ++it) {
+      // Plain fields go in the second pass. Expired ones are dropped: the target must not see them.
+      if (!it.HasExpiry() || it.ExpiryTime() <= now)
+        continue;
+      if (!timed || it.ExpiryTime() != deadline) {
+        timed.reset();
+        deadline = it.ExpiryTime();
+        exat = absl::StrCat(uint64_t{CapMemberDeadline(key, deadline, now)} + kMemberExpiryBase);
+        timed.emplace(key, hsetex, max_serialization_buffer_size_);
+      }
+      const auto& [k, v] = *it;
+      timed->AddArg(string{k, sdslen(k)}, CommandAggregator::CommitMode::kNoCommit);
+      timed->AddArg(string{v, sdslen(v)});
+    }
+  }
+
   {
     CommandAggregator plain(
         key,
@@ -308,31 +340,12 @@ size_t CmdSerializer::SerializeHashWithExpiry(DbIndex db_index, string_view key,
           ++commands;
         },
         max_serialization_buffer_size_);
-    optional<CommandAggregator> timed;
-    uint32_t deadline = 0;
-
-    StringMap* string_map = static_cast<StringMap*>(pv.RObjPtr());
     for (auto it = string_map->begin(); it != string_map->end(); ++it) {
+      if (it.HasExpiry())
+        continue;
       const auto& [k, v] = *it;
-      string field{k, sdslen(k)};
-      string value{v, sdslen(v)};
-      if (!it.HasExpiry()) {
-        plain.AddArg(std::move(field), CommandAggregator::CommitMode::kNoCommit);
-        plain.AddArg(std::move(value));
-        continue;
-      }
-
-      // Expired on the source: the target must not see it.
-      if (it.ExpiryTime() <= now)
-        continue;
-      if (!timed || it.ExpiryTime() != deadline) {
-        timed.reset();
-        deadline = it.ExpiryTime();
-        exat = absl::StrCat(uint64_t{deadline} + kMemberExpiryBase);
-        timed.emplace(key, hsetex, max_serialization_buffer_size_);
-      }
-      timed->AddArg(std::move(field), CommandAggregator::CommitMode::kNoCommit);
-      timed->AddArg(std::move(value));
+      plain.AddArg(string{k, sdslen(k)}, CommandAggregator::CommitMode::kNoCommit);
+      plain.AddArg(string{v, sdslen(v)});
     }
   }
 
