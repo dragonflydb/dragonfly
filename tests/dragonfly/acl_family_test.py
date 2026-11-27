@@ -451,6 +451,54 @@ async def test_acl_load_updates_default_user_connections(df_factory, tmp_dir):
     await default_client.aclose()
 
 
+async def test_acl_load_keeps_connections_of_remaining_users(df_factory, tmp_dir):
+    acl = create_temp_file(
+        "user default on nopass ~* +@all\n"
+        "user kept on >pass ~* +@all\n"
+        "user moved on >pass ~* +@all\n"
+        "user gone on >pass ~* +@all\n",
+        tmp_dir,
+    )
+    df = df_factory.create(aclfile=acl)
+    df.start()
+
+    async def connect(user):
+        reader, writer = await asyncio.open_connection("127.0.0.1", df.port)
+        writer.write(f"AUTH {user} pass\r\n".encode())
+        assert await reader.readline() == b"+OK\r\n"
+        return reader, writer
+
+    kept_reader, kept_writer = await connect("kept")
+    moved_reader, moved_writer = await connect("moved")
+    gone_reader, gone_writer = await connect("gone")
+
+    with open(acl, "w") as f:
+        f.write(
+            "user default on nopass ~* +@all\n"
+            "user kept on >pass ~* -@all +ping\n"
+            "user moved on >pass NAMESPACE:other ~* +@all\n"
+        )
+    await df.client().execute_command("ACL LOAD")
+
+    # Like Valkey, a remaining user stays connected with its reloaded rules.
+    @assert_eventually
+    async def kept_denied():
+        kept_writer.write(b"GET foo\r\n")
+        assert (await kept_reader.readline()).startswith(b"-NOPERM")
+
+    await kept_denied()
+    kept_writer.write(b"PING\r\n")
+    assert await kept_reader.readline() == b"+PONG\r\n"
+
+    # Removed users and users moved to another namespace are disconnected.
+    for reader in (gone_reader, moved_reader):
+        async with async_timeout.timeout(5):
+            assert await reader.read() == b""
+
+    for writer in (kept_writer, moved_writer, gone_writer):
+        writer.close()
+
+
 async def test_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert [] == res
