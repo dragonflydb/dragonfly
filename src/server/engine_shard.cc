@@ -12,6 +12,7 @@
 #include <memory>
 
 #include "base/flags.h"
+#include "core/memory_accounting.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
 #include "core/search/stateless_allocator.h"
@@ -36,6 +37,8 @@ extern "C" {
 #include "util/fibers/proactor_base.h"
 
 using namespace std;
+
+ABSL_FLAG(bool, enable_scope_based_mem_track, false, "Enable scope based memory metric");
 
 ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
@@ -519,6 +522,8 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
   InitTLStatelessAllocMR(shard_->memory_resource());
+  if (GetFlag(FLAGS_enable_scope_based_mem_track))
+    InitMemoryAccounting(shard_->mi_resource_);
 
   shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
 }
@@ -547,6 +552,9 @@ void EngineShard::DestroyThreadLocal() {
 
   QList::ShutdownThread();
   detail::InternedString::ResetPool();
+
+  // End accounting while the shard's memory resource is still alive.
+  ShutdownMemoryAccounting();
   shard_->~EngineShard();
   CleanupStatelessAllocMR();
 
@@ -777,7 +785,8 @@ void EngineShard::Heartbeat() {
   // If this starves expiry/eviction in practice, the design should consider changing direction:
   // lazily register the suspended transaction's locks here (like ScheduleInShard does) and
   // proceed instead of skipping.
-  if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock || running_tx_ != nullptr) {
+  // Entries of buckets that are mid-serialization are skipped by expiry and eviction below.
+  if (db_slice.IsJournalAppendBlocked() || !can_acquire_global_lock || running_tx_ != nullptr) {
     uint64_t now = absl::GetCurrentTimeNanos();
 
     uint64_t elapsed_ms = (now - stalled_start_ns_) / 1000000;
@@ -795,7 +804,8 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
-  if (tiered_storage_) {
+  // Tiered offloading and repacking change values in place, so they keep the shard-wide check.
+  if (tiered_storage_ && !db_slice.IsAnyBucketBlocked()) {
     tiered_storage_->Heartbeat();
   }
 }
@@ -884,6 +894,19 @@ void EngineShard::RetireExpiredAndEvict() {
         }
       }
     }
+
+    // Expiry/eviction above only marks watchers as awakened. Dispatch them in the same atomic
+    // section. Eviction may suspend sending tracking invalidations, so recheck running_tx_.
+    if (GetContTx() == nullptr && running_tx_ == nullptr) {
+      for (Namespace* ns : ns_snapshot) {
+        if (GetContTx() != nullptr || running_tx_ != nullptr) {
+          break;
+        }
+        if (auto* bc = ns->GetBlockingController(shard_id()); bc) {
+          bc->NotifyPendingAtomic();
+        }
+      }
+    }
   }  // journal_flush_guard destroyed here — atomic section ends before sending the events
 
   // Send keyspace notifications for expired/evicted keys outside the atomic section
@@ -893,22 +916,12 @@ void EngineShard::RetireExpiredAndEvict() {
     ns->GetDbSlice(shard_id()).SendQueuedExpiredKeyEvents();
   }
 
+  // Without it, tracking invalidations of the expired keys wait for a command on this shard.
+  db_slice.SendQueuedInvalidationMessagesAsync();
+
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
     eviction_state_.deleted_bytes_at_prev_eviction = deleted_bytes;
-  }
-
-  // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
-  // section, because NotifyPending may preempt before and after its readiness checks.
-  if (GetContTx() == nullptr) {
-    for (Namespace* ns : ns_snapshot) {
-      if (GetContTx() != nullptr) {
-        break;
-      }
-      if (auto* bc = ns->GetBlockingController(shard_id()); bc) {
-        bc->NotifyPending();
-      }
-    }
   }
 }
 
@@ -1057,7 +1070,7 @@ void EngineShard::CacheStats() {
 }
 
 size_t EngineShard::UsedMemoryWithoutSearch() const {
-  return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
+  return UsedMemoryThreadLocal(mi_resource_);
 }
 
 size_t EngineShard::UsedMemory() const {
@@ -1201,14 +1214,6 @@ EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbInd
   }
 
   return stats;
-}
-
-void EngineShard::AddTypeMemDelta(size_t type, int64_t delta) {
-  if (delta == 0)
-    return;
-
-  DCHECK_LT(type, type_attributed_memory_.size());
-  type_attributed_memory_[type] += delta;
 }
 
 }  // namespace dfly

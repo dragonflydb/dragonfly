@@ -21,6 +21,10 @@
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 
+namespace facade {
+struct ClientInfo;
+}  // namespace facade
+
 namespace dfly {
 
 class Service;
@@ -139,11 +143,7 @@ class Replica : ProtocolClient {
   // Get the current replication phase based on state_mask_
   std::string GetCurrentPhase() const;
 
-  std::string GetClientInfo() const;
-
-  uint32_t GetClientId() const {
-    return client_id_;
-  }
+  facade::ClientInfo GetClientInfo() const;
 
   // Used *only* in TakeOver flow and replicaof no one. There is small data race if
   // thread_flow_map_ gets written by the MainReplicationFiber thread but

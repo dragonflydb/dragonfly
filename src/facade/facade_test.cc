@@ -32,7 +32,7 @@ bool RespMatcher::MatchAndExplain(RespExpr e, MatchResultListener* listener) con
     }
   }
 
-  if (type_ == RespExpr::STRING || type_ == RespExpr::ERROR) {
+  if (type_ == RespExpr::STRING || type_ == RespExpr::ERROR || type_ == RespExpr::VERB) {
     RespExpr::Buffer ebuf = e.GetBuf();
     std::string_view actual{reinterpret_cast<const char*>(ebuf.data()), ebuf.size()};
 
@@ -40,11 +40,11 @@ bool RespMatcher::MatchAndExplain(RespExpr e, MatchResultListener* listener) con
       *listener << "Actual does not contain '" << exp_str_ << "'";
       return false;
     }
-    if (type_ == RespExpr::STRING && exp_str_ != actual) {
+    if (type_ != RespExpr::ERROR && exp_str_ != actual) {
       *listener << "\nActual string: " << actual;
       return false;
     }
-  } else if (type_ == RespExpr::INT64) {
+  } else if (type_ == RespExpr::INT64 || type_ == RespExpr::BOOL) {
     auto actual = get<int64_t>(e.u);
     if (exp_int_ != actual) {
       *listener << "\nActual : " << actual << " expected: " << exp_int_;
@@ -72,6 +72,7 @@ void RespMatcher::DescribeTo(std::ostream* os) const {
   switch (type_) {
     case RespExpr::STRING:
     case RespExpr::ERROR:
+    case RespExpr::VERB:
       *os << exp_str_;
       break;
 
@@ -83,6 +84,9 @@ void RespMatcher::DescribeTo(std::ostream* os) const {
       break;
     case RespExpr::DOUBLE:
       *os << exp_double_;
+      break;
+    case RespExpr::BOOL:
+      *os << (exp_int_ ? "true" : "false");
       break;
     default:
       *os << "TBD";

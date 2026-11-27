@@ -27,7 +27,7 @@ ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 500,
           "migration_buckets_serialization_threshold");
 
 ABSL_FLAG(float, migration_buckets_cpu_budget, 0.2,
-          "How much CPU budget to use for migration buckets serialization and slot flushing");
+          "Per-shard CPU budget shared by all outgoing migration serializers and slot flushing");
 
 ABSL_FLAG(uint32_t, replication_dispatch_threshold, 1500,
           "Number of bytes to aggregate before replication");
@@ -176,8 +176,9 @@ void ReplicaStreamer::PeriodicFlushFiber(chrono::milliseconds period) {
 
 SlotMigrationStreamer::SlotMigrationStreamer(DbSlice* slice, cluster::SlotSet slots,
                                              ExecutionState* cntx)
-    : SerializerBase(slice, cntx), writer_(cntx, {}), my_slots_(std::move(slots)) {
-  DCHECK(slice != nullptr);
+    : SerializerBase(slice, cntx, &slice->shard_owner()->migration_cpu_aggregator()),
+      writer_(cntx, {}),
+      my_slots_(std::move(slots)) {
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
@@ -239,15 +240,15 @@ void SlotMigrationStreamer::PaceTraversal(bool done) {
 
   // If someone else throtles due to huge pending_buf_, give it priority.
   // In addition if bucket writing was too intensive on CPU and we are overloaded.
-  // Note that we account for CPU time from OnChangeBlocking and here as well
-  // (inside SerializerBase::SerializeBucket).
+  // Account for serialization and slot cleanup across all migrations on this shard, including
+  // work from OnChangeBlocking and traversal.
   // But we only throttle here, so if we migrated lots of slots during mutations, we
   // won't progress here but if we have not, then this fiber will progress withing the
   // CPU budget we defined for it.
   auto should_stall = [this] {
     return writer_.throttle_waiters() > 0 ||
            (writer_.pending_bytes() >= writer_.output_limit() / 3) ||
-           cpu_aggregator_.IsOverloaded(absl::GetFlag(FLAGS_migration_buckets_cpu_budget));
+           cpu_aggregator_->IsOverloaded(absl::GetFlag(FLAGS_migration_buckets_cpu_budget));
   };
 
   while (base_cntx_->IsRunning() && should_stall()) {
@@ -358,25 +359,16 @@ bool SlotMigrationStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-bool SlotMigrationStreamer::ShouldSerialize(DbIndex db_index, const PrimeKey& pk) const {
-  // Cluster mode blocks SELECT, but loading an RDB file taken from a non-cluster instance can
-  // still activate other databases. Slot ownership covers only db 0, so keys in other databases
-  // are not migrated. This applies to both the traversal and OnChange flows.
-  if (db_index != 0)
-    return false;
-
+bool SlotMigrationStreamer::ShouldSerialize(DbIndex, const PrimeKey& pk) const {
   return ShouldWrite(pk.GetSlice(&key_buffer_));
 }
 
 void SlotMigrationStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,
                                                  const PrimeValue& pv, time_t expire,
                                                  uint32_t mc_flags) {
-  // ShouldSerialize filters out other databases. CmdSerializer hard-codes db index 0 into
-  // the journal entries it produces, so to remove this DCHECK we must first pass db_index through
-  // CmdSerializer.
-  DCHECK_EQ(db_index, 0u);
   ++EngineShard::tlocal()->stats().total_migrated_keys;
-  migration_stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
+  migration_stats_.commands +=
+      cmd_serializer_->SerializeEntry(db_index, pk.ToString(), pk, pv, expire);
 }
 
 }  // namespace dfly

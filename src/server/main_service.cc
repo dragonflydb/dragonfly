@@ -96,6 +96,7 @@ ABSL_FLAG(uint32_t, lua_max_stall_ms, 0,
           "busy without yielding for longer than this many milliseconds. 0 disables the check.");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
+ABSL_DECLARE_FLAG(bool, aof);
 ABSL_FLAG(size_t, listpack_max_field_len, 64,
           "Maximum length of a hash field or value to be stored in listpack encoding");
 ABSL_FLAG(size_t, listpack_max_bytes, 1024,
@@ -425,10 +426,13 @@ class EvalSerializer : public ObjectExplorer {
       buf = StripCRLF(str);
       str = buf;
     }
+
+    // The message is chosen by the script, so use a fixed error type to keep the error stats
+    // bounded.
     if (!str.empty() && str.front() == '-') {
-      rb_->SendError(str);
+      rb_->SendError(str, facade::kScriptErrType);
     } else {
-      rb_->SendError(absl::StrCat("-", str));
+      rb_->SendError(absl::StrCat("-", str), facade::kScriptErrType);
     }
   }
 
@@ -580,51 +584,36 @@ ExecScriptUse DetermineScriptPresense(const std::vector<StoredCmd>& body) {
 Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
                                       const ConnectionState::ExecInfo& exec_info,
                                       const ScriptMgr& script_mgr) {
-  // Check if script most LIKELY has global eval transactions
-  bool contains_global = false;
-  bool contains_admin_cmd = false;
-  Transaction::MultiMode multi_mode = Transaction::LOCK_AHEAD;
-
-  if (state == ExecScriptUse::SCRIPT_RUN) {
-    contains_global = script_mgr.AreGlobalByDefault();
-  }
-
+  bool contains_global = state == ExecScriptUse::SCRIPT_RUN && script_mgr.AreGlobalByDefault();
   bool transactional = contains_global;
-  if (!transactional) {
-    for (const auto& scmd : exec_info.body) {
-      // We can only tell if eval is transactional based on they keycount
-      if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
-        auto keys = DetermineKeys(scmd.Cid(), scmd.Args());
-        transactional |= (keys && keys.value().NumArgs() > 0);
-      } else {
-        transactional |= scmd.Cid()->IsTransactional();
-      }
-      contains_global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
-      contains_admin_cmd |= scmd.Cid()->opt_mask() & CO::ADMIN;
+  bool contains_admin_cmd = false;
+  for (const auto& scmd : exec_info.body) {
+    const auto* cid = scmd.Cid();
 
-      // We can't run no-key-transactional commands in lock-ahead mode currently,
-      // because it means we have to schedule on all shards
-      if (scmd.Cid()->opt_mask() & CO::NO_KEY_TRANSACTIONAL)
-        contains_global = true;
-
-      if (contains_global)
-        break;
+    // EVAL without keys does not require scheduling unless scripts use global mode.
+    if (absl::StartsWith(cid->name(), "EVAL")) {
+      auto keys = DetermineKeys(cid, scmd.Args());
+      transactional |= (keys && keys->NumArgs() > 0);
+    } else {
+      transactional |= cid->IsTransactional();
     }
+    contains_admin_cmd |= cid->opt_mask() & CO::ADMIN;
+
+    // Key locks are scoped to one database, so SELECT requires shard locks.
+    // No-key transactional commands also cannot use lock-ahead mode.
+    contains_global |= (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL)) ||
+                       cid->name() == "SELECT";
   }
 
   // multi/exec contains commands like ping that do not affect db state.
   if (!transactional && exec_info.watched_keys.empty())
     return Transaction::NOT_DETERMINED;
 
-  if (contains_admin_cmd) {
-    multi_mode = Transaction::NON_ATOMIC;
-  }
-  // Atomic modes fall back to GLOBAL if they contain global commands.
-  else if (contains_global && multi_mode == Transaction::LOCK_AHEAD) {
-    multi_mode = Transaction::GLOBAL;
-  }
+  // Administrative commands require non-atomic mode even if they follow a global command.
+  if (contains_admin_cmd)
+    return Transaction::NON_ATOMIC;
 
-  return multi_mode;
+  return contains_global ? Transaction::GLOBAL : Transaction::LOCK_AHEAD;
 }
 
 string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned num_uniq_shards) {
@@ -785,7 +774,11 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
     // we will end up triggerring the callback on the following commands. To avoid this
     // we reset it.
     tx->SetTrackingCallback({});
-    if (cmd_cntx->cid()->IsReadOnly() && info.ShouldTrackKeys()) {
+    tx->SetTrackingNoLoopClient(info.IsNoLoop() ? cntx->conn()->GetClientId() : 0);
+
+    // A read-only script tracks the keys its commands read, not its own.
+    const auto* cid = cmd_cntx->cid();
+    if (cid->IsReadOnly() && !cid->IsEvalGroup() && info.ShouldTrackKeys()) {
       auto conn = cntx->conn()->Borrow();
       tx->SetTrackingCallback([conn](Transaction* trans) {
         auto* shard = EngineShard::tlocal();
@@ -883,6 +876,10 @@ bool ShouldLogError(const CommandId& cid, string_view reason, const facade::Pars
 
   if (cid.name() != "CLIENT")
     return true;
+
+  // CLIENT KILL <addr> found nothing to kill, which is not a failure.
+  if (reason == kNoSuchClient)
+    return false;
   return tail_args.empty() || !absl::EqualsIgnoreCase(tail_args.Front(), "maint_notifications");
 }
 
@@ -1068,6 +1065,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("background_snapshotting");
+  config_registry.RegisterMutable("snapshot_output_buffer_limit");
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
   config_registry.RegisterMutable("slot_migration_throttle_us");
@@ -1125,10 +1123,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   });
 
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
-  // We assume that listeners.front() is the main_listener
-  // see dfly_main RunEngine
   if (!tcp_disabled && main_listener) {
-    acl_family_.Init(main_listener);
+    acl_family_.Init(listeners);
   }
 
   // Initialize shard_set with a callback running once in a while in the shard threads.
@@ -1392,8 +1388,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
     }
   }
 
-  // JWT-derived auth carries its own expiration contract (see acl::JwtValidator): once
-  // it lapses, we must force a reauth.
+  // External auth may require reauthentication after expiry.
   if (dfly_cntx.authenticated && dfly_cntx.IsAuthExpired()) {
     if (cmd_name != "AUTH" && !cid.IsQuit() && !cid.IsReset() && cmd_name != "HELLO") {
       return ErrorReply{"-NOAUTH JWT token expired, please re-authenticate.",
@@ -1907,13 +1902,13 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
     // Memcached protocol doesn't support authentication, so we don't require it.
-    // This also means JWT validation is not supported/enforced for Memcached connections.
+    // External auth validation is not enforced for Memcached connections.
     if (owner->GetProtocol() == Protocol::MEMCACHE) {
       res->req_auth = false;
       res->authenticated = true;  // Automatically authenticated for Memcached protocol
     } else {
-      // JWT validation must gate every connection even if the local "default" user is nopass.
-      res->req_auth = acl::JwtValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
+      // External auth must gate connections even if the default user is nopass.
+      res->req_auth = acl::AuthValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
     }
   }
 
@@ -1986,6 +1981,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   conn_state.tracking_info_.SetClientTracking(false);
 
   conn_state.db_index = 0;
+  cntx->conn()->SetName({});
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->SetRespVersion(RespVersion::kResp2);
@@ -2012,6 +2008,11 @@ void Service::Multi(CmdArgParser, CommandContext* cmd_cntx) {
 }
 
 void Service::Watch(CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Its transaction takes a txid, which can race with the AOF replay moving the txid sequence past
+  // the replayed ones and get a duplicate.
+  if (GetFlag(FLAGS_aof) && ServerState::tlocal()->gstate() == GlobalState::LOADING)
+    return cmd_cntx->SendError(kLoadingErr);
+
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
 
@@ -2598,8 +2599,20 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
       slot_checker.Add(s);
     }
 
+    // Sharded publish channels participate in slot checks without requiring database key locks.
+    for (const auto& scmd : exec_info.body) {
+      if (scmd.Cid()->IsSPublish())
+        slot_checker.Add(scmd.Args()[0]);
+    }
+
     if (slot_checker.IsCrossSlot()) {
       return rb->SendError(kCrossSlotError);
+    }
+
+    // Commands were validated when queued, but a migration may have moved their slot before EXEC.
+    if (auto slot = slot_checker.GetUniqueSlotId()) {
+      if (auto error = cluster::SlotOwnershipError(*slot); error.status != OpStatus::OK)
+        return rb->SendError(std::move(error));
     }
   }
 
@@ -2981,6 +2994,17 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   return prev;
 }
 
+Service::LoadingScope::~LoadingScope() {
+  if (service_)
+    service_->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+}
+
+optional<Service::LoadingScope> Service::EnterExclusiveLoading() {
+  if (SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) != GlobalState::ACTIVE)
+    return nullopt;
+  return LoadingScope{this};
+}
+
 bool Service::RequestLoadingState() {
   GlobalState prev = SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (prev == GlobalState::ACTIVE || prev == GlobalState::LOADING) {
@@ -3046,7 +3070,7 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
   ConnectionState& conn_state = server_cntx->conn_state;
   VLOG_IF(1, conn_state.replication_info.repl_session_id)
-      << "OnConnectionClose: " << server_cntx->conn()->GetName()
+      << "OnConnectionClose: " << server_cntx->conn()->GetClientId()
       << ", repl_session_id: " << conn_state.replication_info.repl_session_id;
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
@@ -3077,10 +3101,10 @@ Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) co
                       !server_cntx->transaction->Blocker()->IsCompleted();
 
   return {.db_index = server_cntx->db_index(),
-          .async_dispatch = server_cntx->async_dispatch,
           .conn_closing = server_cntx->conn_closing,
           .has_subscribers = bool(server_cntx->conn_state.subscribe_info),
           .is_blocked = server_cntx->blocked,
+          .is_tracking = server_cntx->conn_state.tracking_info_.IsTrackingOn(),
           .is_scheduled = is_scheduled};
 }
 
@@ -3214,7 +3238,7 @@ void Service::RegisterCommands() {
 }
 
 const acl::AclFamily* Service::TestInit() {
-  acl_family_.Init(nullptr);
+  acl_family_.Init({});
   return &acl_family_;
 }
 

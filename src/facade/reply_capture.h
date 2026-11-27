@@ -29,6 +29,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
   void SendLong(long val) override;
   void SendDouble(double val) override;
+  void SendBool(bool val) override;
   void SendSimpleString(std::string_view str) override;
   void SendBulkString(std::string_view str) override;
   using RedisReplyBuilderBase::SendBulkString;  // keep the guarded rvalue overload visible

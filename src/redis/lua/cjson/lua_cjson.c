@@ -39,6 +39,7 @@
 #include <assert.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
 #include <limits.h>
 #include <lua.h>
 #include <lauxlib.h>
@@ -62,8 +63,8 @@
 #define DEFAULT_SPARSE_CONVERT 0
 #define DEFAULT_SPARSE_RATIO 2
 #define DEFAULT_SPARSE_SAFE 10
-#define DEFAULT_ENCODE_MAX_DEPTH 1000
-#define DEFAULT_DECODE_MAX_DEPTH 1000
+/* Restrict to control stack on Dragonfly fiber caused by recursion. */
+#define CJSON_MAX_DEPTH 50
 #define DEFAULT_ENCODE_INVALID_NUMBERS 0
 #define DEFAULT_DECODE_INVALID_NUMBERS 1
 #define DEFAULT_ENCODE_KEEP_BUFFER 1
@@ -125,8 +126,8 @@ typedef struct {
     int encode_number_precision;
     int encode_keep_buffer;
 
-    int decode_invalid_numbers;
     int decode_max_depth;
+    int decode_invalid_numbers;
 } json_config_t;
 
 typedef struct {
@@ -139,13 +140,13 @@ typedef struct {
 
 typedef struct {
     json_token_type_t type;
-    int index;
+    size_t index;
     union {
         const char *string;
         double number;
         int boolean;
     } value;
-    int string_len;
+    size_t string_len;
 } json_token_t;
 
 static const char *char2escape[256] = {
@@ -274,22 +275,27 @@ static int json_cfg_encode_sparse_array(lua_State *l)
     return 3;
 }
 
-/* Configures the maximum number of nested arrays/objects allowed when
- * encoding */
+static int json_cfg_max_depth(lua_State *l, int *setting)
+{
+    lua_Integer requested = luaL_optinteger(l, 1, *setting);
+    luaL_argcheck(l, requested >= 1 && requested <= INT_MAX, 1,
+                  "depth must be a positive integer in the int range");
+    if (requested <= CJSON_MAX_DEPTH)
+        *setting = (int)requested;
+    lua_pushinteger(l, *setting);
+    return 1;
+}
+
 static int json_cfg_encode_max_depth(lua_State *l)
 {
     json_config_t *cfg = json_arg_init(l, 1);
-
-    return json_integer_option(l, 1, &cfg->encode_max_depth, 1, INT_MAX);
+    return json_cfg_max_depth(l, &cfg->encode_max_depth);
 }
 
-/* Configures the maximum number of nested arrays/objects allowed when
- * encoding */
 static int json_cfg_decode_max_depth(lua_State *l)
 {
     json_config_t *cfg = json_arg_init(l, 1);
-
-    return json_integer_option(l, 1, &cfg->decode_max_depth, 1, INT_MAX);
+    return json_cfg_max_depth(l, &cfg->decode_max_depth);
 }
 
 /* Configures number precision when converting doubles to text */
@@ -384,8 +390,8 @@ static void json_create_config(lua_State *l)
     cfg->encode_sparse_convert = DEFAULT_SPARSE_CONVERT;
     cfg->encode_sparse_ratio = DEFAULT_SPARSE_RATIO;
     cfg->encode_sparse_safe = DEFAULT_SPARSE_SAFE;
-    cfg->encode_max_depth = DEFAULT_ENCODE_MAX_DEPTH;
-    cfg->decode_max_depth = DEFAULT_DECODE_MAX_DEPTH;
+    cfg->encode_max_depth = CJSON_MAX_DEPTH;
+    cfg->decode_max_depth = CJSON_MAX_DEPTH;
     cfg->encode_invalid_numbers = DEFAULT_ENCODE_INVALID_NUMBERS;
     cfg->decode_invalid_numbers = DEFAULT_DECODE_INVALID_NUMBERS;
     cfg->encode_keep_buffer = DEFAULT_ENCODE_KEEP_BUFFER;
@@ -461,17 +467,14 @@ static void json_encode_exception(lua_State *l, json_config_t *cfg, strbuf_t *js
 static void json_append_string(lua_State *l, strbuf_t *json, int lindex)
 {
     const char *escstr;
-    int i;
     const char *str;
-    size_t len;
+    size_t i, len;
 
     str = lua_tolstring(l, lindex, &len);
 
-    /* Worst case is len * 6 (all unicode escapes).
-     * This buffer is reused constantly for small strings
-     * If there are any excess pages, they won't be hit anyway.
-     * This gains ~5% speedup. */
-    strbuf_ensure_empty_length(json, len * 6 + 2);
+    if (len > SIZE_MAX - 3)
+        abort(); /* Overflow check */
+    strbuf_ensure_empty_length(json, len + 2);
 
     strbuf_append_char_unsafe(json, '\"');
     for (i = 0; i < len; i++) {
@@ -479,9 +482,9 @@ static void json_append_string(lua_State *l, strbuf_t *json, int lindex)
         if (escstr)
             strbuf_append_string(json, escstr);
         else
-            strbuf_append_char_unsafe(json, str[i]);
+            strbuf_append_char(json, str[i]);
     }
-    strbuf_append_char_unsafe(json, '\"');
+    strbuf_append_char(json, '\"');
 }
 
 /* Find the size of the array on the top of the Lua stack
@@ -704,7 +707,7 @@ static int json_encode(lua_State *l)
     strbuf_t local_encode_buf;
     strbuf_t *encode_buf;
     char *json;
-    int len;
+    size_t len;
 
     luaL_argcheck(l, lua_gettop(l) == 1, 1, "expected 1 argument");
 
@@ -1107,8 +1110,8 @@ static void json_throw_parse_error(lua_State *l, json_parse_t *json,
         found = json_token_type_name[token->type];
 
     /* Note: token->index is 0 based, display starting from 1 */
-    luaL_error(l, "Expected %s but found %s at character %d",
-               exp, found, token->index + 1);
+    luaL_error(l, "Expected %s but found %s at character %I",
+               exp, found, (lua_Integer)(token->index + 1));
 }
 
 static inline void json_decode_ascend(json_parse_t *json)
@@ -1120,8 +1123,7 @@ static void json_decode_descend(lua_State *l, json_parse_t *json, int slots)
 {
     json->current_depth++;
 
-    if (json->current_depth <= json->cfg->decode_max_depth &&
-        lua_checkstack(l, slots)) {
+    if (json->current_depth <= json->cfg->decode_max_depth && lua_checkstack(l, slots)) {
         return;
     }
 
@@ -1230,9 +1232,11 @@ static void json_process_value(lua_State *l, json_parse_t *json,
         double num = token->value.number;
         double intpart;
         /* Convert to integer when possible for Lua 5.1 compatibility.
-         * This ensures tostring(cjson.decode('{"id":42}').id) returns "42" not "42.0" */
-        if (modf(num, &intpart) == 0.0 &&
-            intpart >= LUA_MININTEGER && intpart <= LUA_MAXINTEGER) {
+         * This ensures tostring(cjson.decode('{"id":42}').id) returns "42" not "42.0".
+         * LUA_MAXINTEGER rounds up to 2^63 as a double, so the upper bound must be exclusive,
+         * otherwise 2^63 passes the check and the cast below is undefined behavior. */
+        if (modf(num, &intpart) == 0.0 && intpart >= (double)LUA_MININTEGER &&
+            intpart < -(double)LUA_MININTEGER) {
             lua_pushinteger(l, (lua_Integer)intpart);
         } else {
             lua_pushnumber(l, num);

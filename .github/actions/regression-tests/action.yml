@@ -180,6 +180,15 @@ runs:
           echo "REGRESSION_JUNIT_ARTIFACT=junit-regression-${GITHUB_JOB}-${RUNNER_OS}-${RUNNER_ARCH}-${KIND}-${SAFE_FILTER}-${SAFE_RUNTIME_FLAGS}-${UNIQUE_SUFFIX}"
         } >> "${GITHUB_ENV}"
 
+    - name: Prepare MinIO for S3 snapshot tests
+      if: inputs.s3-bucket != '' && inputs.test-suites == '' && inputs.test-cases == '' && inputs.iterations == '1'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        cd "${GITHUB_WORKSPACE}/tests"
+        timeout 5m python3 -m dragonfly.minio
+
     - name: Run S3 snapshot tests with MinIO
       if: inputs.s3-bucket != '' && inputs.test-suites == '' && inputs.test-cases == '' && inputs.iterations == '1'
       shell: bash
@@ -204,7 +213,7 @@ runs:
           df_runtime_args+=(--df force_epoll=true)
         fi
 
-        # MinIO binary is downloaded and started by conftest.py when MINIO_S3_ENDPOINT is set
+        # conftest.py starts the prepared MinIO binary when MINIO_S3_ENDPOINT is set.
         MINIO_S3_ENDPOINT=http://localhost:9000 timeout 10m pytest -k "s3" --timeout=300 --color=yes dragonfly/snapshot_test.py "${df_runtime_args[@]}" --log-cli-level=INFO -v
 
     - name: Verify core dump capture

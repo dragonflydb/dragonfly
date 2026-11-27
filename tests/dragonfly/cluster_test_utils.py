@@ -174,14 +174,6 @@ async def wait_for_error(admin_client, node_id, error, timeout=10, exact=True):
             assert len(states) != 0 and all(matches(state[4]) for state in states), states
 
 
-async def wait_for_migration_start(admin_client, node_id):
-    while (
-        len(await admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id))
-        == 0
-    ):
-        await asyncio.sleep(0.1)
-
-
 async def check_for_no_state_status(admin_clients):
     for client in admin_clients:
         state = await client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")

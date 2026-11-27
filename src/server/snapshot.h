@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "server/detail/egress_throttle.h"
+#include "server/detail/queued_sink_writer.h"
 #include "server/journal/types.h"
 #include "server/rdb_save.h"
 #include "server/serializer_base.h"
@@ -82,6 +82,13 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   void ConsumeJournalChange(const journal::JournalChangeItem& item) final;
   void ThrottleIfNeeded() final;
 
+  // Also true while an entry is suspended mid-serialization outside a consume point (e.g. loading
+  // a tiered list node): a journal append or a flush would land inside the entry's bytes.
+  bool IsJournalAppendBlocked() const override {
+    return SerializerBase::IsJournalAppendBlocked() ||
+           (serializer_ && serializer_->IsEntryInProgress());
+  }
+
  private:
   // Main snapshotting fiber that iterates over all buckets in the db slice.
   void IterateBucketsFb(bool send_full_sync_cut);
@@ -92,6 +99,12 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Called under stream_mu_ to perform RDB serialization of a single entry.
   void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             time_t expire, uint32_t mc_flags) override;
+
+  // True when serializing outside the traversal fiber: a command's OnChange, its journal entry or
+  // an expiry/eviction delete.
+  bool OnMutationPath() const {
+    return !snapshot_fb_.IsActive();
+  }
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
@@ -115,18 +128,17 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   uint32_t journal_cb_id_ = 0;
 
   util::fb2::Fiber snapshot_fb_;
-  util::fb2::CondVarAny seq_cond_;
+
+  // Hands chunks to consumer_ from its own fiber, in the order they were produced, so a mutation
+  // fiber that serializes a bucket inline does not wait on the sink while it holds the shard's
+  // transaction queue.
+  detail::QueuedSinkWriter writer_;
 
   const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
   bool use_background_mode_ = false;
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
-
-  uint64_t rec_id_ = 1, last_pushed_id_ = 0;
-
-  // Limits this snapshot's socket egress to a configured bandwidth budget.
-  detail::EgressThrottler throttler_{0};
 
   struct Stats {
     size_t keys_total = 0;

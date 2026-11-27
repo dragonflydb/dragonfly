@@ -691,10 +691,6 @@ class TLocalClient {
     return max;
   }
 
-  unsigned num_conns() const {
-    return drivers_.size();
-  }
-
   void AdjustCycle();
 
  private:

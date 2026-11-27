@@ -456,11 +456,10 @@ everything after the first hole, so writing on is pointless.
   retried. The shard's log goes on in the active segment, but every later checkpoint fails before
   its cut, so only a restart recovers.
 - **Clients.** The server keeps serving reads and writes. Writes accepted while the log is
-  stopped are lost if the server restarts before a checkpoint. For now, the failure shows only in
-  the logs.
+  stopped are lost if the server restarts before a checkpoint. `INFO persistence` reports the
+  failure as `aof_last_write_status:err` until a checkpoint clears it.
 
 **Possible directions.**
-- Report the state through metrics and `INFO persistence` (`aof_last_write_status`).
 - Schedule a checkpoint right after a failure, or right after the one in progress, instead of
   waiting for the next trigger.
 - Stricter error policies: reject writes until a checkpoint clears the state (like Redis's
@@ -548,7 +547,7 @@ A save becomes the checkpoint depending only on where its output lives:
 
 | Save | Checkpoint? |
 |---|---|
-| Automatic trigger, shard-count change at restart | Yes: an AOF-owned base, `<name>-base-<ckpt>-*` |
+| Automatic trigger, shard-count change at restart | Yes: an AOF-owned base, `appendonly-base-<ckpt>-*` |
 | SAVE, BGSAVE, `--snapshot_cron` to a local file (in `--dir`) | Yes: the manifest references the dump by path |
 | S3 or other cloud storage | No, it stays a plain save |
 
@@ -601,7 +600,7 @@ threshold.
 
 Checkpoints bound the log only while they succeed. `INFO persistence` reports
 `aof_last_bgrewrite_status`, `aof_checkpoint_failures` (consecutive), `aof_current_size` and
-`aof_rewrite_trigger_size`. Each failure is logged, and retried with backoff.
+`aof_rewrite_trigger_size`. Each failure is logged, and the next once-a-second check retries it.
 
 **Open edge cases.**
 - The user deletes or moves the dump that is the current base. Replay fails at the next start.
@@ -939,14 +938,62 @@ data without the journal must trigger a **re-base**, a checkpoint whose cut also
 `AofStreamer` if needed.
 - `CONFIG SET appendonly yes` (first enable at runtime).
 - Replica full sync (`RdbLoader` bypasses the journal): stop appending and mark the manifest
-  invalid when it starts, re-base when stable sync starts. Stable sync already journals applied
+  `rebasing` when it starts, re-base when stable sync starts. Stable sync already journals applied
   entries on the replica.
 - `DFLY LOAD` and `DEBUG RELOAD`.
 
 Incoming slot migrations need nothing: the target applies them through the journal executor.
 
+#### Crash before the re-base commits
+
+A replica can crash between the start of its full sync and the commit of the base that follows
+it. Its manifest is then `rebasing`. A restart loads nothing: the node starts empty, keeps every
+AOF file and keeps appending paused, so `aof_state` stays `rebasing`. Only `REPLICAOF` (a full
+sync, then the re-base) or `REPLICAOF NO ONE` (the promotion takes the re-base checkpoint) ends
+that state. Until then, writes the node accepts are not logged and do not survive a restart.
+
+#### Future recovery design (proposal)
+
+Not implemented. The old files hold the replica's data from before the sync: a past state of the
+same datastore, which may be newer than the last backup. A restart could load that old dataset,
+log the writes it serves and resume the AOF, and a later full sync would replace the data as
+usual.
+
+The difficulty is telling the old log apart from what the re-base already wrote. The re-base's
+rotation opens the next segment of each shard, and the manifest's chain is every segment from the
+cut onward. Without a fence, replay would continue from the old log into the new master's writes
+and apply them on top of the old dataset. Records dropped while appending was paused usually leave
+an LSN gap that stops replay, but nothing guarantees one: with no writes during the sync, the LSNs
+line up.
+
+Valkey keeps the old manifest during a full sync and writes new data to files it does not name.
+Its manifest lists every file by name, so the next base and its log become part of the
+dataset only when the manifest naming them is written. Two ways to give the manifest the same
+property:
+
+- **List the segments, as Valkey does.** The manifest names each shard's segments instead of
+  only the first one. A rotation adds the new segment before it receives records, which means
+  listing a spare when it is prepared, not in the cut, which must not block. During a full sync,
+  new segments stay unlisted until the base that covers them commits, and startup deletes any
+  segment the manifest does not list. The manifest is then the whole truth, with no rebasing state
+  on disk, at the cost of a format change, a manifest write per prepared spare, and serializing
+  those writes with checkpoint commits.
+- **Record where the old log ends.** When the full sync starts, the manifest is marked
+  `rebasing` and records each shard's last segment of the old log. The chain stays implicit
+  everywhere else. A restart in `rebasing` replays the old log only up to that segment, deletes
+  the segments after it, marks the manifest `active` and resumes appending. Further full syncs
+  before a commit keep the recorded end, since only the data before the first one is complete.
+  It is a single extra field written at the sync start, with a manifest write that already
+  happens.
+
+Recording where the old log ends is preferred, because it fits our rotation model. A rotation
+happens inside a checkpoint's cut, which must not block, so the manifest cannot follow every
+rotation the way Valkey's follows every new file. The boundary needs to be written only once, at
+the sync start, where appending has already stopped and a blocking manifest write is allowed.
+
 **Open edge cases.**
-- What a crash between "manifest invalid" and the re-base means for the replica at startup.
+- Reporting how recent a restarted node's old dataset is, so the control plane can choose between
+  it and the last backup when no other copy remains.
 - Non-default namespaces (journal records carry no namespace).
 
 ### Multi-shard tail atomicity
@@ -1006,8 +1053,10 @@ and `CONFIG SET appendonly`.
   `aof_checkpoint_failures`, `aof_base_file`, `aof_current_size`, `aof_base_size`,
   `aof_rewrite_trigger_size`, `aof_last_write_status`
 - **MVP, per shard:** `aof_buffered_bytes`, `aof_unsynced_bytes`, `aof_throttle_usec`,
-  `aof_fsync_latency`, `aof_load_discarded_bytes`
-- **Fsync policy:** `aof_delayed_fsync`
+  `aof_fsync_count`, `aof_fsync_usec_total`, `aof_delayed_fsync`, `aof_load_discarded_bytes`.
+  The fsync fields are cumulative counters, so a scraper misses no sync between two reads: the
+  mean latency over a window is the ratio of their rates, and `aof_delayed_fsync` counts periodic
+  syncs that came due while the previous one still ran.
 
 ---
 

@@ -233,7 +233,7 @@ class Transaction {
   // Called when this transaction heads the watch queue of a ready key on shard sid. Returns true
   // if the key is reserved for it: either this call woke it, or this shard already did and the
   // command has CO::WAKE_ALL_READY_KEYS. Returns false if it can be dropped from the queue.
-  bool NotifySuspended(ShardId sid);
+  bool NotifySuspended(ShardId sid, uint64_t now_ms);
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
   // Must be called from coordinator thread.
@@ -420,17 +420,15 @@ class Transaction {
     tracking_cb_ = std::move(f);
   }
 
+  // The client of a CLIENT TRACKING NOLOOP connection, or 0: its own writes do not notify it.
+  void SetTrackingNoLoopClient(uint32_t client_id) {
+    tracking_noloop_client_ = client_id;
+  }
+
   void MaybeInvokeTrackingCb() {
     if (tracking_cb_) {
       tracking_cb_(this);
     }
-  }
-
-  // Remove once BZPOP is stabilized
-  std::string DEBUGV18_BlockInfo() {
-    return "claimed=" + std::to_string(blocking_barrier_.IsClaimed()) +
-           " coord_state=" + std::to_string(int(coordinator_state_)) +
-           " local_res=" + std::to_string(int(local_result_));
   }
 
  private:
@@ -682,6 +680,9 @@ class Transaction {
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};
 
+  // Time the waking shard's readiness check ran at, set by the NotifySuspended that woke us.
+  uint64_t wake_time_ms_{0};
+
   // Stores status if COORD_CANCELLED was set. Apart from cancelled, it can be moved for cluster
   // changes
   OpStatus block_cancel_result_ = OpStatus::OK;
@@ -700,6 +701,7 @@ class Transaction {
   } stats_;
 
   std::function<void(Transaction* trans)> tracking_cb_;
+  uint32_t tracking_noloop_client_ = 0;
 
   struct TLTmpSpace {
     std::vector<PerShardCache>& GetShardIndex(unsigned size);

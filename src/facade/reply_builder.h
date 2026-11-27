@@ -99,6 +99,11 @@ class SinkReplyBuilder {
   // `additional_bytes` hints how many bytes did not fit into the buffer to possibly grow it
   void Flush(size_t additional_bytes = 0);
 
+  // True if reply bytes are waiting to be flushed.
+  bool HasBufferedOutput() const {
+    return total_size_ != 0;
+  }
+
   std::error_code GetError() const {
     return ec_;
   }
@@ -248,6 +253,7 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 
   void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number
+  virtual void SendBool(bool val);      // RESP3: Boolean, RESP2: Integer 1 or 0
 
   virtual void SendNullArray();
   virtual void StartCollection(unsigned len, CollectionType ct);
@@ -280,8 +286,6 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 // Non essential redis reply builder functions implemented on top of the base resp protocol
 class RedisReplyBuilder : public RedisReplyBuilderBase {
  public:
-  using ScoredArray = absl::Span<const std::pair<std::string, double>>;
-
   RedisReplyBuilder(util::FiberSocketBase* socket) : RedisReplyBuilderBase(socket) {
   }
 
@@ -306,8 +310,6 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = CollectionType::ARRAY);
   template <typename I> void SendLongArr(absl::Span<const I> longs);
 
-  void SendScoredArray(ScoredArray arr, bool with_scores);
-  void SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr);
   void StartArray(unsigned len);
   void SendEmptyArray();
 };

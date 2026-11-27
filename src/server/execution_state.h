@@ -65,13 +65,26 @@ class GenericError {
   GenericError(std::error_code ec, std::string details) : ec_{ec}, details_{std::move(details)} {
   }
 
+  // An explicit stop request, as opposed to an I/O error with the same code.
+  static GenericError Cancellation() {
+    GenericError err{std::make_error_code(std::errc::operation_canceled),
+                     "ExecutionState cancelled"};
+    err.is_explicit_cancellation_ = true;
+    return err;
+  }
+
   operator std::error_code() const;
   operator bool() const;
+
+  bool IsExplicitCancellation() const {
+    return is_explicit_cancellation_;
+  }
 
   std::string Format() const;  // Get string representation of error.
 
  private:
   std::error_code ec_;
+  bool is_explicit_cancellation_ = false;
   std::string details_;
 };
 
@@ -93,10 +106,7 @@ class ExecutionState {
 
   ~ExecutionState();
 
-  // TODO Remove. This function was created to reduce size of the code that should be refactored
-  // Cancel() method should be used instead of this function
-  // Report a cancel error the context by submitting an `errc::operation_canceled` error.
-  // If the state is CANCELLED does nothing
+  // Record an explicit cancellation and invoke the error handler if this is the first error.
   void ReportCancelError();
 
   bool IsRunning() const {

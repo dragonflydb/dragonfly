@@ -11,7 +11,7 @@
 
 ภาษาอื่น ๆ: [English](README.md) [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md)
 
-[เว็บไซต์](https://www.dragonflydb.io/) • [เอกสาร](https://dragonflydb.io/docs) • [เริ่มต้นใช้งาน](https://www.dragonflydb.io/docs/getting-started) • [Community Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly User Conference](https://www.dragonflydb.io/events/dragonfly-ascent) • [ร่วมเป็นส่วนหนึ่งของ Dragonfly Community](https://www.dragonflydb.io/community)
+[เว็บไซต์](https://www.dragonflydb.io/) • [เอกสาร](https://dragonflydb.io/docs) • [เริ่มต้นใช้งาน](https://www.dragonflydb.io/docs/getting-started) • [Community Slack](https://join.slack.com/t/dragonflycommunityhq/shared_invite/zt-4ftpylx50-SQZ0g0CD2lJMvi0EsqPNbQ) • [Dragonfly User Conference](https://www.dragonflydb.io/events/dragonfly-ascent) • [ร่วมเป็นส่วนหนึ่งของ Dragonfly Community](https://www.dragonflydb.io/community)
 
 [GitHub Discussions](https://github.com/dragonflydb/dragonfly/discussions) • [GitHub Issues](https://github.com/dragonflydb/dragonfly/issues) • [แนวทางการ Contribute](https://github.com/dragonflydb/dragonfly/blob/main/CONTRIBUTING.md) • [คู่มือสำหรับ AI Agents](AGENTS.md) • [Dragonfly Cloud](https://www.dragonflydb.io/cloud)
 

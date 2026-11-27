@@ -303,20 +303,21 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
   return true;
 }
 
-OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
+void FinishIncr(const OpArgs& op_args, string_view key, const absl::AlphaNum& new_val,
+                DbSlice::ItAndUpdater& it_upd);
+
+OpResult<string> OpIncrFloat(const OpArgs& op_args, string_view key, long double incr) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  char buf[128];
-
   if (add_res.is_new) {
-    char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
-    add_res.it->second.SetString(str);
-
-    return val;
+    string res = FormatLongDouble(incr);
+    add_res.it->second.SetString(res);
+    FinishIncr(op_args, key, res, add_res);
+    return res;
   }
 
   if (add_res.it->second.Size() == 0)
@@ -331,31 +332,62 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   RETURN_ON_BAD_STATUS(cur);
   string_view slice = *cur;
 
-  double base = 0;
-  if (!ParseDouble(slice, &base)) {
+  long double base = 0;
+  if (!ParseLongDouble(slice, &base)) {
     return OpStatus::INVALID_FLOAT;
   }
 
-  base += val;
+  base += incr;
 
   if (isnan(base) || isinf(base)) {
     return OpStatus::NAN_OR_INF_DURING_INCR;
   }
 
-  char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
+  string res = FormatLongDouble(base);
 
   add_res.post_updater.ReduceHeapUsage();
   if (add_res.it->second.IsExternal()) {
     op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &add_res.it->second);
   }
-  add_res.it->second.SetString(str);
+  add_res.it->second.SetString(res);
+  FinishIncr(op_args, key, res, add_res);
 
-  return base;
+  return res;
 }
 
-// if skip_on_missing - returns KEY_NOTFOUND.
+// Journals the new value, so replicas do not recompute it.
+void FinishIncr(const OpArgs& op_args, string_view key, const absl::AlphaNum& new_val,
+                DbSlice::ItAndUpdater& it_upd) {
+  if (!op_args.shard->journal())
+    return;
+
+  // Finish mutation accounting before journaling, which may suspend.
+  it_upd.post_updater.Run();
+  const auto& it = it_upd.it;
+  string expiry;
+  string mc_flags;
+  absl::InlinedVector<string_view, 7> args{key, new_val.Piece()};
+
+  const uint64_t expire_time = it->first.GetExpireTime();
+  if (expire_time != 0) {
+    expiry = absl::StrCat(expire_time);
+    args.insert(args.end(), {"PXAT", expiry});
+  }
+
+  if (it->second.HasFlag()) {
+    mc_flags = absl::StrCat(op_args.GetDbSlice().GetMCFlag(op_args.db_cntx.db_index, it->first));
+    args.insert(args.end(), {"_MCFLAGS", mc_flags});
+  }
+
+  if (it->first.IsSticky())
+    args.push_back("STICK");
+
+  RecordJournal(op_args, "SET", ArgSlice{args});
+}
+
 OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
                            bool skip_on_missing) {
+  DCHECK(op_args.tx->GetCId()->opt_mask() & CO::NO_AUTOJOURNAL);
   auto& db_slice = op_args.GetDbSlice();
 
   // we avoid using AddOrFind because of skip_on_missing option for memcache.
@@ -373,6 +405,8 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
 
     auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(pv), 0);
     RETURN_ON_BAD_STATUS(op_result);
+
+    FinishIncr(op_args, key, incr, *op_result);
 
     return incr;
   }
@@ -392,6 +426,8 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   int64_t new_val = prev + incr;
   DCHECK(!res->it->second.IsExternal());
   res->it->second.SetInt(new_val);
+
+  FinishIncr(op_args, key, new_val, *res);
 
   return new_val;
 }
@@ -419,12 +455,12 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
   // Above loop could have parial success (e.g. OOM), replicate only what changed
   if (auto journal = op_args.shard->journal(); journal) {
     if (stored * 2 == args.Size()) {
-      RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
+      RecordJournal(op_args, "MSET", args);
       DCHECK_EQ(result, OpStatus::OK);
     } else if (stored > 0) {
       vector<string_view> store_args(args.begin(), args.end());
       store_args.resize(stored * 2);
-      RecordJournal(op_args, "MSET", store_args, op_args.tx->GetUniqueShardCnt());
+      RecordJournal(op_args, "MSET", store_args);
     }
   }
   return result;
@@ -658,6 +694,7 @@ void CollectKeys(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags
 
     // Borrow, copy to buffer or trigger tiered read that will eventually write to buffer.
     const PrimeValue& value = it->second;
+    size_t size = value.Size();
     if (items[i].borrowed) {
       resp.borrowed = std::move(items[i].borrowed);
       if (!resp.borrowed->IsEncoded())
@@ -679,11 +716,10 @@ void CollectKeys(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags
       };
       ReadTiered(t->GetDbIndex(), it.key(), value, std::move(cb), shard->tiered_storage());
     } else {
-      value.GetString(next);
+      value.GetString(absl::MakeSpan(next, size));
     }
 
     if (!resp.borrowed) {
-      size_t size = value.Size();
       resp.value = string_view(next, size);
       next += size;
     }
@@ -1023,13 +1059,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   prime_value.SetFlag(params.memcache_flags != 0);
   db_slice.SetMCFlag(op_args_.db_cntx.db_index, key, params.memcache_flags);
 
-  // We need to remove the key from search indices, because we are overwriting it to OBJ_STRING
-  RemoveKeyFromIndexesIfNeeded(it_upd->it.key(), op_args_.db_cntx, prime_value, shard);
-
-  // If value is external, mark it as deleted
-  if (prime_value.IsExternal()) {
-    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, it_upd->it.key(), &prime_value);
-  }
+  db_slice.PrepareOverwrite(op_args_.db_cntx, it_upd->it.key(), &prime_value);
 
   // overwrite existing entry.
   prime_value.SetString(value);
@@ -1096,7 +1126,7 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
 }
 
 void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view value) {
-  absl::InlinedVector<string_view, 5> cmds({key, value});  // 5 is theoretical maximum;
+  absl::InlinedVector<string_view, 7> cmds({key, value});
 
   std::string exp_str;
   if (params.flags & SET_EXPIRE_AFTER_MS) {
@@ -1109,9 +1139,10 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
   if (params.flags & SET_STICK) {
     cmds.push_back("STICK");
   }
+  std::string mc_flags;
   if (params.memcache_flags) {
-    cmds.push_back("_MCFLAGS");
-    cmds.push_back(absl::StrCat(params.memcache_flags));
+    mc_flags = absl::StrCat(params.memcache_flags);
+    cmds.insert(cmds.end(), {"_MCFLAGS", mc_flags});
   }
 
   // Skip NX/XX because SET operation was executed.
@@ -1495,19 +1526,25 @@ cmd::CmdR CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR CmdIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto [key, val] = parser.Next<string_view, double>();
+  auto [key, incr_arg] = parser.Next<string_view, string_view>();
   if (auto err = parser.TakeError(); err)
     co_return err.MakeReply();
 
+  long double incr = 0;
+  if (!ParseLongDouble(incr_arg, &incr))
+    co_return facade::ErrorReply{kInvalidFloatErr};
+  if (isinf(incr))
+    co_return facade::ErrorReply{kNanOrInfDuringIncr};
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpIncrFloat(t->GetOpArgs(shard), key, val);
+    return OpIncrFloat(t->GetOpArgs(shard), key, incr);
   };
 
-  OpResult<double> result = co_await cmd::SingleHopT(cb);
+  OpResult<string> result = co_await cmd::SingleHopT(cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (result)
-    rb->SendDouble(result.value());
+    rb->SendBulkString(*result);
   else
     rb->SendError(result.status());
   co_return std::nullopt;
@@ -1848,11 +1885,12 @@ void RegisterStringFamily(CommandRegistry* registry) {
              ExtendGeneric)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
              ExtendGeneric)
-      << CI{"INCR", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdIncr)
-      << CI{"DECR", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdDecr)
-      << CI{"INCRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
-      << CI{"INCRBYFLOAT", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
-      << CI{"DECRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
+      << CI{"INCR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdIncr)
+      << CI{"DECR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdDecr)
+      << CI{"INCRBY", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
+      << CI{"INCRBYFLOAT", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(
+             CmdIncrByFloat)
+      << CI{"DECRBY", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGet)
       << CI{"GETDEL", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)

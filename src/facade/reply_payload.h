@@ -25,6 +25,9 @@ struct CollectionPayload;
 struct SimpleString : public std::string {};        // SendSimpleString
 struct BulkString : public std::string {};          // SendBulkString
 struct BulkStringRef : public std::string_view {};  // SendBulkString with guaranteed lifetime
+struct Bool {                                       // SendBool under RESP3
+  bool val;
+};
 
 struct VerbatimString {
   std::string str;
@@ -33,7 +36,7 @@ struct VerbatimString {
 
 using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
                              BulkStringRef, std::unique_ptr<VerbatimString> /* big struct */,
-                             cmn::BorrowedString, std::unique_ptr<CollectionPayload>>;
+                             cmn::BorrowedString, std::unique_ptr<CollectionPayload>, Bool>;
 
 #if defined(__linux__) && !defined(_LIBCPP_VERSION)
 static_assert(sizeof(Payload) == 40);

@@ -34,7 +34,12 @@ async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFacto
     replica = df_factory.create(admin_port=next(next_port))
     df_factory.start_all([master, replica])
 
-    async with master.client() as c_master, master.admin_client() as c_master_admin, replica.client() as c_replica, replica.admin_client() as c_replica_admin:
+    async with (
+        master.client() as c_master,
+        master.admin_client() as c_master_admin,
+        replica.client() as c_replica,
+        replica.admin_client() as c_replica_admin,
+    ):
         master_id = await get_node_id(c_master)
         replica_id = await get_node_id(c_replica)
 

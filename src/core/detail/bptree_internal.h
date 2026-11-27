@@ -331,10 +331,6 @@ template <typename T> class BPTreePath {
     depth_--;
   }
 
-  bool HasValidTerminal() const {
-    return depth_ > 0u && Last().second < Last().first->NumItems();
-  }
-
   T Terminal() const {
     assert(Last().second < Last().first->NumItems());
     return Last().first->Key(Last().second);

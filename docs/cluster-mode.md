@@ -309,9 +309,9 @@ background sweep:
   stamp; this catches writes that race the sweep.
 - A detached fiber walks the local hash table, deleting entries whose slot id falls in
   the unowned ranges and whose version predates the stamp. The fiber runs at background
-  priority and sleeps when over budget so foreground commands keep making progress. Slot sweeps
-  on each shard share a CPU budget controlled by `migration_buckets_cpu_budget`, including
-  work performed by their on-change hooks.
+  priority and sleeps when over budget so foreground commands keep making progress. All outgoing
+  migration serializers and slot sweeps on each shard share the CPU budget controlled by
+  `migration_buckets_cpu_budget`, including work performed by their on-change hooks.
 - Once the walk completes, the node also drops sharded pub/sub subscriptions
   associated with the flushed slots.
 
@@ -321,10 +321,28 @@ replica deletes exactly the data the master did.
 
 ### 5.4 Cluster-mode command restrictions
 
+Cluster mode supports logical databases `0` through `--dbnum - 1`. `SELECT` changes
+the connection's database. An ACL user configured with `$N` starts in database `N`
+after authentication and may only select that database; `$ALL` permits selecting
+any configured database.
+
+All databases share the same slot topology. The slot depends only on the key name,
+so identical keys in different databases have independent values but the same owner.
+`MOVE key db` transfers a key between databases on that owner. Migration and slot
+cleanup include every active database, and `DFLYCLUSTER GETSLOTINFO` aggregates their
+counters. Migration targets and replicas must allow the database IDs used by their
+sources through `--dbnum`.
+
+`SCAN`, `KEYS`, `DBSIZE`, and `FLUSHDB` operate on the selected database's keys held
+by the connected node. `FLUSHALL` clears every database on that node. These commands
+do not fan out to other cluster nodes. Snapshots and replication preserve database
+IDs and the data in each database.
+
+`SELECT` also works inside `MULTI/EXEC`, but all keys of the transaction must still
+belong to one slot, even across databases.
+
 In real cluster mode (`--cluster_mode=yes`):
 
-- `SELECT` to any DB index other than the default is rejected; cluster-mode storage is
-  single-DB.
 - Global-keyspace pub/sub (`PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE`) is rejected. Sharded
   pub/sub (`SPUBLISH`, `SSUBSCRIBE`, `SUNSUBSCRIBE`) routes by slot and is supported.
 - Multi-key commands and `MULTI/EXEC` blocks that span multiple slots return
@@ -332,8 +350,8 @@ In real cluster mode (`--cluster_mode=yes`):
   Lua scripts are not supported in cluster mode).
 
 `--cluster_mode=emulated` exposes the cluster commands on a single node that owns all
-16384 slots. In emulated mode `DFLYCLUSTER` is not available, `SELECT` and global
-pub/sub still work, and the above restrictions do not apply. Emulated mode is intended
+16384 slots. In emulated mode `DFLYCLUSTER` is not available, global pub/sub still
+works, and the above restrictions do not apply. Emulated mode is intended
 for development, migration phases, and resource-constrained environments where one node
 stands in for an entire cluster.
 
@@ -365,6 +383,10 @@ from its local data:
 Mutations to migrating slots that arrive while the snapshot walk is still running are
 streamed as ordinary write commands over the same connection, so the target catches
 up incrementally with no separate journal channel.
+
+Every command keeps the database ID of its source key, and the target creates the
+database if it doesn't exist yet. As in replication, the ID must be below the target's
+`--dbnum`.
 
 The target executes every decoded command through its normal transaction framework,
 exactly as if it had arrived from a client. The writes therefore appear on the

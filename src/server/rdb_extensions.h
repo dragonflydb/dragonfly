@@ -8,6 +8,16 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+// Redis 7.4 hash field expiration encodings. Accept them only from Redis: Dragonfly and Valkey may
+// reuse these IDs for other encodings.
+constexpr uint8_t RDB_TYPE_HASH_METADATA = 24;
+constexpr uint8_t RDB_TYPE_HASH_LISTPACK_EX = 25;
+
+constexpr bool rdbIsObjectTypeRedis(uint8_t type) {
+  return __rdbIsObjectType(type) || type == RDB_TYPE_HASH_METADATA ||
+         type == RDB_TYPE_HASH_LISTPACK_EX;
+}
+
 // Valkey 9 RDB extensions.
 constexpr int RDB_VERSION_VALKEY = 80;
 // Millisecond hash field expiry encoding shared by Valkey and Dragonfly.
@@ -41,6 +51,8 @@ constexpr uint8_t RDB_OPCODE_FULLSYNC_END = 200;
 constexpr uint8_t RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START = 201;
 constexpr uint8_t RDB_OPCODE_COMPRESSED_LZ4_BLOB_START = 202;
 constexpr uint8_t RDB_OPCODE_COMPRESSED_BLOB_END = 203;
+
+constexpr size_t kMaxCompressedBlobSize = 2ULL << 30;
 
 constexpr uint8_t RDB_OPCODE_JOURNAL_BLOB = 210;
 

@@ -69,8 +69,8 @@ flowchart TD
     SE1 --> SAVE2
 
     EXP["Expiry / Eviction<br/>(heartbeat, inline, lazy, SCAN-del)"]
-    EXP -->|"eviction: bail if<br/>WillBlockOnJournalWrite"| SKIP[skip]
-    EXP -->|"expiry/SCAN-del:<br/>WaitForUnblockedJournalWrites"| JRN_DIRECT["journal::RecordEntry (DEL)"]
+    EXP -->|"key's bucket blocked:<br/>CanDeleteWithoutBlocking"| SKIP[skip key]
+    EXP -->|"otherwise"| JRN_DIRECT["journal::RecordEntry (DEL)"]
     JRN_DIRECT --> CJC
 
     JRN[Journal change] --> CJC["ConsumeJournalChange<br/>(lock stream_mu_)"]
@@ -85,8 +85,9 @@ flowchart TD
   PS --> FS[FlushSerialized]
   FS --> HFD
 
-  HFD --> SEQ["seq_cond_.wait - ordering gate"]
-  SEQ --> CD["consumer_->ConsumeData"]
+  HFD --> WQ["writer_.Push - FIFO queue"]
+  WQ --> WFB["writer_ fiber"]
+  WFB --> CD["consumer_->ConsumeData"]
   CD --> SINK[(Replica socket / file sink)]
 ```
 
@@ -234,7 +235,7 @@ it and miss the bucket entirely.
 
 `SerializeBucket` (in `serializer_base.cc`) iterates the occupied slots of a physical bucket and
 calls `SerializeEntry` for each entry accepted by the virtual `ShouldSerialize` hook (all entries
-by default; slot migration keeps db 0 and its owned slots). No lock is held for the whole bucket:
+by default; slot migration keeps its owned slots in every db). No lock is held for the whole bucket:
 `SerializeEntry` takes `stream_mu_` per entry.
 
 `SerializeEntry` (in `serializer_base.cc`) dispatches based on value location:
@@ -285,7 +286,7 @@ drain, so `TraverseAllBuckets` reports success only after `BucketDependencies::W
 Because delayed entries are **keyed by bucket** and hold a `BucketDependencies` reference, a bucket
 is not considered free of in-flight work until all its tiered reads have been serialized. This is
 what makes the ordering invariant hold for tiered values: a mutation or deletion of a tiered key
-is blocked (via `BucketDependencies::Wait` / `WaitForUnblockedJournalWrites`) until the key's
+is blocked (via `BucketDependencies::Wait`), and expiry and eviction skip the key, until its
 delayed baseline has been emitted.
 
 > Both `SliceSnapshot` and `SlotMigrationStreamer` use this same per-bucket `DelayedEntryHandler`. (An
@@ -304,12 +305,18 @@ void Decrement(BucketIdentity);   // counter->unlock(); erase if zero; notify if
 void Wait(BucketIdentity) const;  // block until this bucket's dependencies resolve
 void WaitEmpty() const;           // block until NO bucket has dependencies
 bool HasAny() const;              // any bucket currently has dependencies?
+bool Has(BucketIdentity) const;   // this bucket currently has dependencies?
 ```
 
 `SerializerBase` exposes these to the `DbSlice` through the change-consumer interface:
 
 - `IsAnyBucketBlocked()` → `BucketDependencies::HasAny()`
 - `WaitForNoBucketBlocked()` → `BucketDependencies::WaitEmpty()`
+- `IsBucketBlocked(bucket)` → `BucketDependencies::Has(bucket)`
+- `WaitForBucketUnblocked(bucket)` → `BucketDependencies::Wait(bucket)`
+- `IsJournalAppendBlocked()` → `stream_mu_` is held (only with tagged chunks disabled), or an entry
+  is suspended mid-serialization outside a consume point (e.g. loading a tiered list node), where
+  journal bytes or a flush would land inside the entry
 
 This is the mechanism that makes mutations and deletions wait for in-progress (possibly
 preempting) bucket serialization, replacing the older single `db_slice_->GetLatch()` /
@@ -349,36 +356,46 @@ Not every journal entry goes through `OnChange`. Expiry, eviction, and SCAN-base
 
 | Source | Journal command | Trigger |
 |--------|----------------|---------|
-| `ExpireIfNeeded` (`db_slice.cc`) | `DEL` | Lazy expiry on lookup, active sweep (`DeleteExpiredStep`), heartbeat eviction |
+| `TryExpire` (`db_slice.cc`) | `DEL` | Lazy expiry on lookup, active sweep (`DeleteExpiredStep`) |
+| `FreeMemWithEvictionStepAtomic` (`db_slice.cc`) | `DEL` | Heartbeat eviction |
 | `PrimeEvictionPolicy::Evict` / `GarbageCollect` (`db_slice.cc`) | `DEL` | Inline eviction/GC when a bucket overflows on insert |
 | `generic_family.cc` (SCAN-based deletion) | `DEL` | `RecordDelete` after `DbSlice::Del` |
 | `dflycmd.cc`, `replica.cc`, `cluster_family.cc` | `PING` / `DFLYCLUSTER` | Control signals |
 
 These bypass `OnChange`, so their baseline-before-journal ordering is enforced differently — via
-the `BucketDependencies` state surfaced as `WillBlockOnJournalWrite()`:
-
-- **Eviction & GC bail out.** `PrimeEvictionPolicy::Evict` and `GarbageCollect` return early
-  (delete nothing) if `db_slice_->WillBlockOnJournalWrite()` is true — i.e. while any bucket is
-  mid-serialization. So an inline eviction can never emit a `DEL` for a key whose baseline is
-  partially written.
-- **Expiry & SCAN-delete wait.** These paths call `DbSlice::WaitForUnblockedJournalWrites()`
-  before deleting, which blocks until `WaitForNoBucketBlocked()` reports no bucket has
-  outstanding dependencies.
+the `BucketDependencies` state, queried per bucket. A deletion that does not wait must not touch
+a bucket that is mid-serialization (the serializer may still reference its values), and must not
+journal while the append would block or split an entry (see `IsJournalAppendBlocked()` below):
 
 ```cpp
-bool DbSlice::WillBlockOnJournalWrite() const {           // db_slice.cc
-  return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsAnyBucketBlocked);
-}
-void DbSlice::WaitForUnblockedJournalWrites() const {
-  std::lock_guard lk{change_cb_latch_};
-  while (WillBlockOnJournalWrite())
-    ranges::for_each(change_cb_, &ChangeConsumerInterface::WaitForNoBucketBlocked);
+bool DbSlice::CanDeleteWithoutBlocking(BucketIdentity bucket) const {  // db_slice.cc
+  return ranges::none_of(change_cb_, [bucket](const ChangeConsumerInterface* cb) {
+    return cb->IsJournalAppendBlocked() || cb->IsBucketBlocked(bucket);
+  });
 }
 ```
 
+- **Eviction & GC skip blocked buckets.** `PrimeEvictionPolicy::Evict` and `GarbageCollect` skip
+  the entries of a bucket that is mid-serialization and process the others. Evict checks before
+  `ShiftRight` too, since that moves entries within the bucket.
+- **Eviction also skips buckets not serialized yet.** Unlike expiry, eviction deletes live keys.
+  Evicting from a bucket that a snapshot has not reached would leave the key without a baseline,
+  so both inline and heartbeat eviction require the bucket version to be at least every
+  snapshot's version (`IsBucketSerialized`).
+- **Heartbeat expiry & eviction skip blocked buckets.** `DeleteExpiredStep` and heartbeat eviction
+  skip such entries and retry them on a later heartbeat. The heartbeat stops entirely only while
+  a journal append would block.
+- **Shard-wide waits remain** where there is no single bucket to check or every key must be
+  processed: `IsAnyBucketBlocked()` gates tiered offloading, repacking and memory reclaim (they
+  change values that may belong to many buckets), and `WaitForNoBucketBlocked()` is waited on
+  before SCAN, `ExpireAllIfNeeded` and the readiness checks of blocked clients. The heartbeat
+  defers those readiness checks while any bucket is blocked rather than wait.
+- **Cache-mode bump-up** waits per bucket for the buckets the bump changes: the entry's own bucket
+  and, for a stash entry, the buckets it may move into.
+
 This is the implemented replacement for the "deferred deletion queue" that older designs
 proposed: rather than queueing a `DEL` and replaying it after the bucket completes, the deleter
-waits for (or skips, for best-effort eviction) the in-flight serialization.
+skips the key and retries later (or waits, where every key must be processed).
 
 ## Tagged Chunks
 
@@ -440,17 +457,50 @@ is the only surviving role of the `eventually_consistent_` flag.
 
 ## Flushing and Backpressure
 
-### `HandleFlushData(std::string data)` — Common Blocking Sink
+### `HandleFlushData(std::string data)` — Common Sink
 
 All serialized data ultimately flows through `HandleFlushData` (`snapshot.cc`):
 
 1. If `stream_mu_.is_locked()`, increments `stats_.flushed_under_lock` (observability).
-2. Assigns a monotonically increasing record ID (`rec_id_++`).
-3. Optionally yields (background mode).
-4. **Blocks** on `seq_cond_.wait` until `id == last_pushed_id_ + 1` (sequential ordering gate).
-5. **Blocks** on `consumer_->ConsumeData(data, base_cntx_)` (downstream write).
-6. Updates `last_pushed_id_`, notifies waiters via `seq_cond_.notify_all()`.
-7. In non-background mode, sleeps up to 2ms proportional to CPU spent, to throttle.
+2. Records the egress, as a high priority write when it comes from the mutation path.
+3. **Blocks** in `writer_.Push(data)`: appends the chunk to the writer's FIFO and waits while more
+   than `--snapshot_output_buffer_limit` bytes are queued. Nothing preempts between extracting the
+   chunk from the serializer and the append, so the queue order is the production order across
+   fibers.
+4. Optionally yields (background mode), after the push so that a fiber running during the yield
+   queues behind this chunk.
+5. On the traversal fiber in non-background mode, sleeps up to 2ms proportional to CPU spent, to
+   throttle. A mutation fiber holds its shard's transaction queue, so it never sleeps here.
+
+### `writer_` (`detail::QueuedSinkWriter`)
+
+Owns the FIFO of serialized chunks and a fiber that hands them to `consumer_->ConsumeData` in
+order, so the sink only ever sees one write at a time. `Push` blocks while more than the writer's
+limit is queued; with the limit at 0 it waits until its own chunk is written.
+
+The limit is `--snapshot_output_buffer_limit`, per shard and per running snapshot. It lets a
+mutation fiber that serializes a bucket inline queue its chunks and return, instead of waiting on a
+slow replica or storage while it holds the shard's transaction queue. The traversal paces itself
+in `PaceTraversal`, between buckets where it holds no bucket dependency, by waiting until at most
+one `--serialization_max_chunk_size` chunk is queued, and no more than a quarter of the limit. One
+queued chunk keeps the sink busy, so the traversal adds little to RSS and leaves the room to the
+mutation path. Only what is queued when the wait starts counts, so sustained writes that refill
+the queue do not stall it.
+
+Before the full sync cut, the snapshot fiber lowers the limit to 0 with `LowerLimit`. `DFLY
+STARTSTABLE` stops the writer under a global transaction and the replica's mutex, and a replica
+that stopped reading would block that drain, and every shard with it, where `replication_timeout`
+can not break it, so by then nothing may be queued beyond the chunks producers still wait on, as
+without the buffer. The limit starts `--replication_stream_output_limit` above the backlog and
+follows the queue down, each write lowering it by half of the bytes written, so the journal flushes
+during that time keep half of the sink's throughput, and a small one does not wait for a write
+while it holds the shard's transaction queue. Queued chunks count toward RSS and `snapshot_serialization_bytes`
+but not `used_memory`.
+
+The snapshot fiber
+stops the writer before `consumer_->Finalize()` for saves. For replication journal entries keep
+flowing after the traversal, so `FinalizeJournalStream` stops it after the last push. A cancelled
+context makes `ConsumeData` return at once, so the queue drains without writing.
 
 ### `ConsumeBigValueChunk(std::string data)`
 
@@ -521,15 +571,14 @@ before touching a bucket.
 ### `change_cb_latch_` (LocalLatch in `DbSlice`)
 
 A non-preempting latch guarding the `change_cb_` consumer list. Held during `CallChangeCallbacks`,
-`FlushChangeToEarlierCallbacks`, and `WaitForUnblockedJournalWrites` so the consumer set cannot
+`FlushChangeToEarlierCallbacks`, and `WaitForNoBucketBlocked` so the consumer set cannot
 change underneath an iteration.
 
-### `seq_cond_` (CondVarAny)
+### `writer_` FIFO
 
-Condition variable in `HandleFlushData` ensuring records reach the consumer in `rec_id_` order. If
-fiber A has `id=5` and fiber B `id=6`, B waits until A pushes and advances `last_pushed_id_` to 5.
-Needed because fibers wake in arbitrary order and reordering flushed chunks would corrupt the wire
-protocol.
+`HandleFlushData` appends to the writer's queue without preempting, so chunks reach the consumer in
+the order they were produced, whichever fiber produced them. Reordering flushed chunks would corrupt
+the wire protocol.
 
 ## Code Paths That Reach `HandleFlushData`
 
@@ -558,7 +607,7 @@ flowchart TD
     FS --> HFD2[HandleFlushData]
   end
 
-  HFD1 --> BLOCK["seq_cond_.wait → consumer_->ConsumeData (BLOCKING)"]
+  HFD1 --> BLOCK["writer_.Push → writer fiber → consumer_->ConsumeData (BLOCKING)"]
   HFD2 --> BLOCK
 
   classDef perentry fill:#FFF3E0,stroke:#EF6C00;
@@ -603,8 +652,8 @@ for self-contained single-key writes. The following items remain open:
      consumer backpressure; the bandwidth limiter is an additional upper bound.
    - **Account post-compression bytes** (what actually hits the wire), measured where the chunk is
      handed to `ConsumeData`.
-   - Interaction with background mode and with the `seq_cond_` ordering gate (the sleep must not be
-     held while blocking other producers behind the ordering gate).
+   - Interaction with background mode and with `writer_` (the sleep must not be held while other
+     producers wait on the writer's queue).
 
 3. **Broaden journal-omit eligibility.** `is_omittable_operation` is currently set only for
    self-contained single-key writes (e.g. `SET`). Extending "skip both" to a wider, individually

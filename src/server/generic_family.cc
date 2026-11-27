@@ -18,6 +18,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "core/memory_accounting.h"
 #include "core/qlist.h"
 #include "facade/reply_builder.h"
 #include "redis/rdb.h"
@@ -168,6 +169,52 @@ struct RestoreArgs {
   [[nodiscard]] bool UpdateExpiration(int64_t now_msec);
 };
 
+int RestoredObjectType(int rdb_type) {
+  switch (rdb_type) {
+    case RDB_TYPE_STRING:
+      return OBJ_STRING;
+    case RDB_TYPE_LIST_QUICKLIST:
+    case RDB_TYPE_LIST_QUICKLIST_2:
+      return OBJ_LIST;
+    case RDB_TYPE_SET:
+    case RDB_TYPE_SET_INTSET:
+    case RDB_TYPE_SET_LISTPACK:
+    case RDB_TYPE_SET_WITH_EXPIRY:
+      return OBJ_SET;
+    case RDB_TYPE_HASH:
+    case RDB_TYPE_HASH_ZIPLIST:
+    case RDB_TYPE_HASH_LISTPACK:
+    case RDB_TYPE_HASH_METADATA:
+    case RDB_TYPE_HASH_LISTPACK_EX:
+    case RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED:
+    case RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS:
+      return OBJ_HASH;
+    case RDB_TYPE_ZSET:
+    case RDB_TYPE_ZSET_2:
+    case RDB_TYPE_ZSET_ZIPLIST:
+    case RDB_TYPE_ZSET_LISTPACK:
+      return OBJ_ZSET;
+    case RDB_TYPE_STREAM_LISTPACKS:
+    case RDB_TYPE_STREAM_LISTPACKS_2:
+    case RDB_TYPE_STREAM_LISTPACKS_3:
+      return OBJ_STREAM;
+    case RDB_TYPE_JSON:
+      return OBJ_JSON;
+    case RDB_TYPE_SBF:
+    case RDB_TYPE_SBF2:
+      return OBJ_SBF;
+    case RDB_TYPE_CMS:
+      return OBJ_CMS;
+    case RDB_TYPE_TOPK:
+      return OBJ_TOPK;
+    case RDB_TYPE_CUCKOO:
+      return OBJ_CUCKOOFILTER;
+    default:
+      LOG(DFATAL) << "No memory accounting type for restored RDB type " << rdb_type;
+      return -1;
+  }
+}
+
 class RdbRestoreValue : protected RdbLoaderBase {
  public:
   explicit RdbRestoreValue(RdbVersion rdb_version) {
@@ -186,7 +233,11 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(io::Source* sourc
   src_ = source;
   if (pending_read_.remaining == 0) {
     io::Result<uint8_t> type_id = FetchType();
-    if (type_id && rdbIsObjectTypeDF(type_id.value())) {
+
+    // Only the version identifies a DUMP producer: Dragonfly writes RDB_SER_VERSION, while Redis
+    // payloads may carry other versions (RedisShake wraps RDB values with version 6).
+    if (type_id && (rdbIsObjectTypeDF(*type_id) ||
+                    (rdb_version_ != RDB_SER_VERSION && rdbIsObjectTypeRedis(*type_id)))) {
       rdb_type_ = *type_id;
     }
   }
@@ -212,12 +263,19 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
   InMemSource data_src(data);
   // Bound declared lengths to the payload so a crafted element length can't force a huge resize.
   source_limit_ = data.size();
+
+  optional<TxMemoryScope> memory_scope;
   PrimeValue pv;
   bool first_parse = true;
   do {
     auto opaque_res = Parse(&data_src);
     if (!opaque_res) {
       return OpStatus::INVALID_VALUE;
+    }
+
+    if (!memory_scope && MemoryAccountingEnabled()) {
+      if (int obj_type = RestoredObjectType(opaque_res->rdb_type); obj_type >= 0)
+        memory_scope.emplace(obj_type);
     }
 
     LoadConfig config;
@@ -235,6 +293,11 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
     if (auto ec = FromOpaque(*opaque_res, config, &pv); ec) {
       // Handle value_expired gracefully - all fields expired during deserialize
       if (ec.value() == rdb::errc::value_expired) {
+        // A partially read hash may still contain live fields in a later batch.
+        if (pending_read_.remaining > 0) {
+          first_parse = true;
+          continue;
+        }
         return OpStatus::SKIPPED;
       }
       // we failed - report and exit
@@ -244,6 +307,10 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
   } while (pending_read_.remaining > 0);
 
   auto res = db_slice->AddOrUpdate(cntx, key, std::move(pv), args.ExpirationTime());
+
+  // do not need tracking anymore. pv moved into AddOrUpdate and was destroyed or moved to db.
+  // either way accounting is complete for it.
+  memory_scope.reset();
   if (res) {
     res->it->first.SetSticky(args.Sticky());
     AddKeyToIndexesIfNeeded(key, cntx, res->it->second, db_slice->shard_owner());
@@ -316,11 +383,12 @@ void JournalRestore(const OpArgs& op_args, string_view key, const PrimeValue& pv
   if (!op_args.shard->journal())
     return;
 
-  // A stored DUMP may predate an older replica joining. Convert it for the current receivers.
+  // Convert imported Redis encodings and stored DUMPs for the current receivers.
   string storage;
   auto version = DflyCmd::GetMinReplicaVersion();
-  if (static_cast<uint8_t>(payload.front()) == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS &&
-      version < DflyVersion::VER7) {
+  uint8_t type = static_cast<uint8_t>(payload.front());
+  if (type == RDB_TYPE_HASH_METADATA || type == RDB_TYPE_HASH_LISTPACK_EX ||
+      (type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS && version < DflyVersion::VER7)) {
     storage = RdbSerializer::DumpValue(pv, version);
     payload = storage;
   }
@@ -528,7 +596,7 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
 
   db_slice.DelMutable(t->GetDbContext(), std::move(res));
   if (shard->journal()) {
-    RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_}, 2);
+    RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_});
   }
 
   return OpStatus::OK;
@@ -556,7 +624,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     VLOG(1) << "Rename: the new key '" << dest_key_ << "' already expired, will not save the value";
 
     if (dest_found_ && shard->journal()) {  // We need to delete old dest_key_ from replica
-      RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
+      RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_});
     }
 
     return OpStatus::OK;
@@ -572,7 +640,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     // SKIPPED means all fields expired during deserialize - treat as success
     if (add_res.status() == OpStatus::SKIPPED) {
       if (dest_found_ && shard->journal()) {
-        RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
+        RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_});
       }
       return OpStatus::OK;
     }
@@ -670,7 +738,7 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
 bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, ScanResult* res) {
   size_t len = key.Size();
   char* buffer = res->AppendBuffer(len);
-  key.GetString(buffer);
+  key.GetString(absl::MakeSpan(buffer, len));
   if (opts.matcher && !opts.matcher->Matches(string_view{buffer, len})) {
     res->UndoAppend(buffer);
     return false;
@@ -692,6 +760,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
         return false;
       break;
     [[unlikely]] case DbSlice::ExpireResult::Deleted:
+    [[unlikely]] case DbSlice::ExpireResult::Deferred:
       return false;
   }
   // clang-format on
@@ -725,11 +794,6 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
 void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, ScanResult* vec) {
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
-
-  // ScanCb can preempt due to journaling expired entries and we need to make sure that
-  // we enter the callback in a timing when journaling will not cause preemption. Otherwise,
-  // the bucket might change as we Traverse and yield.
-  db_slice.WaitForUnblockedJournalWrites();
 
   unsigned cnt = 0;
 
@@ -1140,7 +1204,6 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
         return status;
     }
 
-    RemoveKeyFromIndexesIfNeeded(to_key, op_args.db_cntx, to_res.it->second, op_args.shard);
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
   }
 
@@ -1167,7 +1230,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
 
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
-    db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, to_key, &to_res.it->second);
+    db_slice.PrepareOverwrite(op_args.db_cntx, to_key, &to_res.it->second);
     to_res.it->second = std::move(from_obj);
 
     if (exp_ts) {
@@ -1658,7 +1721,7 @@ namespace {
 struct SortEntryBase {
   string key;
   const string* bound_value = nullptr;
-  vector<string> get_values;  // Stores fetched GET pattern values
+  vector<std::optional<string>> get_values;  // Stores fetched GET pattern values
 
   void BindValue(const std::string* value) {
     bound_value = value;
@@ -1827,15 +1890,25 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
   return std::make_pair(std::move(elements), obj_type);
 }
 
-// Fetch a string value from a key (for BY and GET pattern lookups)
-OpResult<string> OpFetchStringValue(const OpArgs& op_args, std::string_view key) {
+// Fetches a BY or GET pattern value, nullopt for a missing or non-string key.
+OpResult<std::optional<string>> OpFetchStringValue(const OpArgs& op_args, std::string_view key) {
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (!IsValid(it) || it->second.ObjType() != OBJ_STRING) {
-    return string{};  // Missing key defaults to empty string
+    return std::optional<string>{};
   }
 
-  return ReadStringValue(op_args.db_cntx.db_index, key, it->second,
-                         op_args.shard->tiered_storage());
+  auto value =
+      ReadStringValue(op_args.db_cntx.db_index, key, it->second, op_args.shard->tiered_storage());
+  RETURN_ON_BAD_STATUS(value);
+  return std::optional<string>{std::move(*value)};
+}
+
+// A GET of a missing or non-string key replies null.
+void SendGetValue(const std::optional<string>& value, RedisReplyBuilder* rb) {
+  if (value)
+    rb->SendBulkString(*value);
+  else
+    rb->SendNull();
 }
 
 // Runs `cb` on every shard in parallel fibers (it may block) and returns the first non-OK status.
@@ -1858,16 +1931,6 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
                            IteratorEnd&& end_it, bool has_get_patterns) {
   uint32_t len = 0;
 
-  // If we are about to overwrite an existing indexed document (HASH/JSON),
-  // remove it from search indices first to avoid duplicate entries.
-  // Use FindMutable (not FindReadOnly) because HNSW preservation may modify the PrimeValue.
-  {
-    auto existing = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key);
-    if (IsValid(existing.it)) {
-      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, existing.it->second, op_args.shard);
-    }
-  }
-
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
   QList::Where where = QList::TAIL;
   std::vector rpush_args{key};
@@ -1880,9 +1943,9 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
 
   for (auto it = start_it; it != end_it; ++it) {
     if (has_get_patterns) {
-      // Store all GET pattern values for this entry
+      // Store all GET pattern values for this entry, a missing one as an empty string
       for (const auto& value : it->get_values)
-        add_item(value);
+        add_item(value ? string_view{*value} : string_view{});
     } else {
       // No GET patterns - store the element itself
       add_item(it->ResultKey());
@@ -2032,7 +2095,7 @@ OpStatus PopulateGetPatternValues(const SortParams& params, const DbContext& db_
   return FetchGetPatternValues(
       params, db_cntx, *entries,
       [&](size_t idx) -> std::string_view { return (*entries)[idx].ResultKey(); },
-      [&](size_t entry_idx, size_t pattern_idx, string value) {
+      [&](size_t entry_idx, size_t pattern_idx, std::optional<string> value) {
         (*entries)[entry_idx].get_values[pattern_idx] = std::move(value);
       });
 }
@@ -2089,7 +2152,7 @@ struct SortVisitor {
         if (has_get_patterns && !it->get_values.empty()) {
           // Send all GET pattern values for this entry
           for (const auto& value : it->get_values) {
-            rb->SendBulkString(value);
+            SendGetValue(value, rb);
           }
         } else {
           // No GET patterns - send the element itself
@@ -2151,7 +2214,7 @@ OpStatus PopulateSortEntriesFromByPattern(const SortParams& params,
             if (!external_value)
               return external_value.status();
             auto& entry = dest[idx];
-            if (!entry.Parse(std::move(*external_value)))
+            if (!entry.Parse(std::move(*external_value).value_or(string{})))
               return OpStatus::INVALID_NUMERIC_RESULT;
             entry.BindValue(&raw_elements[idx]);
           }
@@ -2318,16 +2381,17 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
   DCHECK(!raw_elements.empty());
 
   // Fetch GET pattern values if needed (for unsorted path)
-  vector<vector<string>> get_values_per_element;
+  vector<vector<std::optional<string>>> get_values_per_element;
   if (!params.get_patterns.empty()) {
     // Pre-allocate storage for GET pattern values
-    get_values_per_element.resize(raw_elements.size(), vector<string>(params.get_patterns.size()));
+    get_values_per_element.resize(raw_elements.size(),
+                                  vector<std::optional<string>>(params.get_patterns.size()));
 
     // Use generic fetcher with lambdas to access raw_elements and store in get_values_per_element
     OpStatus status = FetchGetPatternValues(
         params, db_cntx, raw_elements,
         [&](size_t idx) -> std::string_view { return raw_elements[idx]; },
-        [&](size_t elem_idx, size_t pattern_idx, string value) {
+        [&](size_t elem_idx, size_t pattern_idx, std::optional<string> value) {
           get_values_per_element[elem_idx][pattern_idx] = std::move(value);
         });
     if (status != OpStatus::OK)
@@ -2388,7 +2452,7 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
   for (auto it = start_it; it != end_it; ++it, ++elem_idx) {
     if (!get_values.empty() && !get_values[elem_idx].empty()) {
       for (const auto& value : get_values[elem_idx]) {
-        rb->SendBulkString(value);
+        SendGetValue(value, rb);
       }
     } else {
       rb->SendBulkString(*it);
@@ -2499,11 +2563,6 @@ void GenericFamily::Move(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
-  // A key moved to db > 0 would escape slot-scoped operations.
-  if (IsClusterEnabled()) {
-    return cmd_cntx->SendError("MOVE is not allowed in cluster mode");
-  }
-
   if (target_db < 0 || uint32_t(target_db) >= absl::GetFlag(FLAGS_dbnum)) {
     return cmd_cntx->SendError(kDbIndOutOfRangeErr);
   }
@@ -2523,8 +2582,12 @@ void GenericFamily::Move(CmdArgParser parser, CommandContext* cmd_cntx) {
       res = OpMove(op_args, key, target_db);
       // MOVE runs as global command but we want to write the
       // command to only one journal.
-      if (res != OpStatus::IO_ERROR && op_args.shard->journal()) {
-        RecordJournal(op_args, "MOVE"sv, ArgSlice{key, target_db_str});
+      // A failed move must not replay before the destination's baseline is serialized.
+      if (res == OpStatus::OK && op_args.shard->journal()) {
+        // Global transactions track no slot, but migrations filter journal entries by slot.
+        journal::RecordEntry(t->txid(), journal::Op::COMMAND, op_args.db_cntx.db_index,
+                             KeySlot(key),
+                             journal::Entry::Payload("MOVE"sv, ArgSlice{key, target_db_str}));
       }
     }
     return OpStatus::OK;
@@ -2634,9 +2697,6 @@ void GenericFamily::Select(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (parser.TakeError()) {
     return cmd_cntx->SendError(kInvalidDbIndErr);
   }
-  if (IsClusterEnabled() && index != 0) {
-    return cmd_cntx->SendError("SELECT is not allowed in cluster mode");
-  }
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
     return cmd_cntx->SendError(kDbIndOutOfRangeErr);
   }
@@ -2651,10 +2711,6 @@ void GenericFamily::Select(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (auto* tx = cmd_cntx->tx(); tx && tx->IsMulti()) {
     if (tx->GetMultiMode() == Transaction::LOCK_AHEAD)
       return cmd_cntx->SendError("SELECT is not allowed in regular EXEC/EVAL");
-  }
-
-  if (cntx->conn_state.exec_info.IsRunning()) {
-    return cmd_cntx->SendError("SELECT is not allowed in a transaction");
   }
 
   cntx->conn_state.db_index = index;
@@ -2829,7 +2885,7 @@ void GenericFamily::RandomKey(CmdArgParser parser, CommandContext* cmd_cntx) {
   scan_opts.limit = 3;  // number of entries per shard
   std::vector<ScanResult> candidates_collection(shard_set->size());
 
-  // OpScan can preempt (WaitForUnblockedJournalWrites suspends on CondVar during BGSAVE),
+  // OpScan can preempt (sending the queued expired events and journal throttling may suspend),
   // so we must run on a regular fiber rather than the dispatcher (RunBriefInParallel).
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     auto* prime_table = cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index);
@@ -2956,7 +3012,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPTTL}.HFUNC(Pttl)
       << CI{"FIELDTTL", CO::READONLY | CO::FAST, 3, 1, 1, acl::kFieldTtl}.HFUNC(FieldTtl)
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
-      << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
+      << CI{"TYPE", CO::READONLY | CO::FAST, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
       << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, -2, 1, -1, acl::kUnlink}
              .SetAsyncHandler(CmdDel)

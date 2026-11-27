@@ -8,7 +8,6 @@
 #include <absl/types/span.h>
 
 #include "base/logging.h"
-#include "core/json/detail/flat_dfs.h"
 #include "core/json/detail/jsoncons_dfs.h"
 #include "core/json/jsonpath_grammar.hh"
 #include "src/core/json/driver.h"
@@ -20,7 +19,6 @@ using nonstd::make_unexpected;
 namespace dfly::json {
 
 using detail::Dfs;
-using detail::FlatDfs;
 
 namespace {
 
@@ -74,13 +72,6 @@ IndexExpr IndexExpr::Normalize(size_t array_len) const {
 }
 
 void PathSegment::Evaluate(const JsonType& json) const {
-  CHECK(type() == SegmentType::FUNCTION);
-  AggFunction* func = std::get<shared_ptr<AggFunction>>(value_).get();
-  CHECK(func);
-  func->Apply(json);
-}
-
-void PathSegment::Evaluate(FlatJson json) const {
   CHECK(type() == SegmentType::FUNCTION);
   AggFunction* func = std::get<shared_ptr<AggFunction>>(value_).get();
   CHECK(func);
@@ -167,158 +158,6 @@ unsigned DeletePath(const Path& path, JsonType* json) {
 
   Dfs dfs = Dfs::Delete(path, json);
   return dfs.matches();
-}
-
-// Flat json path evaluation
-void EvaluatePath(const Path& path, FlatJson json, PathFlatCallback callback) {
-  if (path.empty()) {  // root node
-    callback(nullopt, json);
-    return;
-  }
-
-  if (path.front().type() != SegmentType::FUNCTION) {
-    FlatDfs::Traverse(path, json, std::move(callback));
-    return;
-  }
-
-  // Handling the case of `func($.somepath)`
-  // We pass our own callback to gather all the results and then call the function.
-  FlatJson result;
-  absl::Span<const PathSegment> path_tail(path.data() + 1, path.size() - 1);
-
-  const PathSegment& func_segment = path.front();
-
-  if (path_tail.empty()) {
-    LOG(DFATAL) << "Invalid path";  // parser should not allow this.
-  } else {
-    FlatDfs::Traverse(path_tail, json, [&](auto, FlatJson val) { func_segment.Evaluate(val); });
-  }
-  AggFunction::Result res = func_segment.GetResult();
-  flexbuffers::Builder fbb;
-  FlatJson val = visit(  // Transform the result to a flexbuffer reference.
-      Overloaded{
-          [](monostate) { return FlatJson{}; },
-          [&](double d) {
-            fbb.Double(d);
-            fbb.Finish();
-            return flexbuffers::GetRoot(fbb.GetBuffer());
-          },
-
-          [&](int64_t i) {
-            fbb.Int(i);
-            fbb.Finish();
-            return flexbuffers::GetRoot(fbb.GetBuffer());
-          },
-      },
-      res);
-
-  callback(nullopt, val);
-}
-
-JsonType FromFlat(FlatJson src) {
-  if (src.IsNull()) {
-    return JsonType::null();
-  }
-
-  if (src.IsBool()) {
-    return JsonType(src.AsBool());
-  }
-
-  if (src.IsInt()) {
-    return JsonType(src.AsInt64());
-  }
-
-  if (src.IsFloat()) {
-    return JsonType(src.AsDouble());
-  }
-  if (src.IsString()) {
-    flexbuffers::String str = src.AsString();
-    return JsonType(string_view{str.c_str(), str.size()});
-  }
-
-  CHECK(src.IsVector());
-  auto vec = src.AsVector();
-  JsonType js =
-      src.IsMap() ? JsonType{jsoncons::json_object_arg} : JsonType{jsoncons::json_array_arg};
-  auto keys = src.AsMap().Keys();
-  for (unsigned i = 0; i < vec.size(); ++i) {
-    JsonType value = FromFlat(vec[i]);
-    if (src.IsMap()) {
-      js[keys[i].AsKey()] = std::move(value);
-    } else {
-      js.push_back(std::move(value));
-    }
-  }
-  return js;
-}
-
-void FromJsonType(const JsonType& src, flexbuffers::Builder* fbb) {
-  if (src.is_null()) {
-    return fbb->Null();
-  }
-
-  if (src.is_bool()) {
-    return fbb->Bool(src.as_bool());
-  }
-
-  if (src.is_int64()) {
-    return fbb->Int(src.as<int64_t>());
-  }
-
-  if (src.is_double()) {
-    return fbb->Double(src.as_double());
-  }
-
-  if (src.is_string()) {
-    string_view sv = src.as_string_view();
-    fbb->String(sv.data(), sv.size());
-    return;
-  }
-
-  if (src.is_object()) {
-    auto range = src.object_range();
-    size_t start = fbb->StartMap();
-    for (auto it = range.cbegin(); it != range.cend(); ++it) {
-      fbb->Key(it->key().c_str(), it->key().size());
-      FromJsonType(it->value(), fbb);
-    }
-    fbb->EndMap(start);
-    return;
-  }
-
-  CHECK(src.is_array());
-  auto range = src.array_range();
-  size_t start = fbb->StartVector();
-  for (auto it = range.cbegin(); it != range.cend(); ++it) {
-    FromJsonType(*it, fbb);
-  }
-  fbb->EndVector(start, false, false);
-}
-
-unsigned MutatePath(const Path& path, MutateCallback callback, FlatJson json,
-                    flexbuffers::Builder* fbb) {
-  JsonType mut_json = FromFlat(json);
-  unsigned res = MutatePath(path, std::move(callback), &mut_json);
-
-  // Populate the output builder 'fbb' with the resulting JSON state
-  // (mutated or original if res == 0) and finalize it.
-  // The builder MUST be finished before returning so that the caller
-  // can safely access the resulting flatbuffer data (e.g., via GetBuffer()).
-  // Skipping Finish() would leave the builder in an invalid, unusable state.
-  FromJsonType(mut_json, fbb);  // Always convert (changed or not) JSON
-  fbb->Finish();                // Always finish the builder
-
-  // Return the number of actual mutations that occurred.
-  return res;
-}
-
-unsigned DeletePath(const Path& path, FlatJson json, flexbuffers::Builder* fbb) {
-  JsonType mut_json = FromFlat(json);
-  unsigned res = DeletePath(path, &mut_json);
-
-  FromJsonType(mut_json, fbb);
-  fbb->Finish();
-  return res;
 }
 
 }  // namespace dfly::json

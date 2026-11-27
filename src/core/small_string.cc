@@ -34,8 +34,6 @@ thread_local TL tl;
 
 constexpr XXH64_hash_t kHashSeed = 24061983;  // same as in compact_object.cc
 
-static constexpr unsigned kMaxSize = (1 << 8) - 1;
-
 }  // namespace
 
 void SmallString::InitThreadLocal(void* heap) {

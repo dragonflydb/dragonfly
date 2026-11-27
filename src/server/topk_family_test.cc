@@ -9,6 +9,8 @@ namespace dfly {
 
 using facade::RespArray;
 using facade::RespElementsAre;
+using testing::_;
+using testing::AllOf;
 using testing::ElementsAre;
 using testing::HasSubstr;
 
@@ -429,6 +431,10 @@ TEST_F(TopkFamilyTest, QueryMultipleMixed) {
   AddItem("tk", "b");
   auto resp = Run({"topk.query", "tk", "a", "b", "c"});
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(0))));
+
+  // RESP3 answers with booleans.
+  Run({"hello", "3"});
+  EXPECT_THAT(Run({"topk.query", "tk", "a", "c"}), RespElementsAre(BoolArg(true), BoolArg(false)));
 }
 
 // Tests TOPK.QUERY on a just-reserved (empty) top-k.
@@ -623,7 +629,7 @@ TEST_F(TopkFamilyTest, InfoTrailingArgs) {
   EXPECT_THAT(Run({"topk.info", "tk", "extra"}), ErrArg("wrong number of arguments"));
 }
 
-// Tests that TOPK.INFO returns the correct response format (flat array of 8 elements).
+// Tests the TOPK.INFO reply: a flat array of 8 elements in RESP2, a map in RESP3.
 TEST_F(TopkFamilyTest, InfoResponseFormat) {
   ReserveDefault("tk", 5);
   auto resp = Run({"topk.info", "tk"});
@@ -635,6 +641,12 @@ TEST_F(TopkFamilyTest, InfoResponseFormat) {
   EXPECT_EQ(vec[2].GetString(), "width");
   EXPECT_EQ(vec[4].GetString(), "depth");
   EXPECT_EQ(vec[6].GetString(), "decay");
+
+  // RESP3 replies with a map, and decay is a double.
+  Run({"hello", "3"});
+  EXPECT_THAT(Run({"topk.info", "tk"}),
+              AllOf(IsResp3MapKind(), RespElementsAre("k", IntArg(5), "width", _, "depth", _,
+                                                      "decay", ArgType(RespExpr::DOUBLE))));
 }
 
 // =============================================================================

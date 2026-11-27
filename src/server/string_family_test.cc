@@ -11,6 +11,7 @@
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
@@ -271,23 +272,14 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
   StringVec vec = StrArray(resp.GetVec()[1]);
   ASSERT_GE(vec.size(), 10);
 
-  auto get_bump_ups = [](const string& str) -> size_t {
-    const string matcher = "bump_ups:";
-    const auto pos = str.find(matcher) + matcher.size();
-    const auto next_new_line =
-        str.find("\r\n", pos);  // Find the position of the next "\r\n" after the initial position
-    const auto sub = str.substr(pos, next_new_line - pos);
-    return atoi(sub.c_str());
-  };
-
   resp = Run({"info", "stats"});
-  EXPECT_EQ(get_bump_ups(resp.GetString()), 0);
+  EXPECT_EQ(InfoReply(resp.GetString()).GetInt("bump_ups"), 0);
 
   auto mget_resp = StrArray(Run(
       {"mget", vec[0], vec[1], vec[2], vec[3], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9]}));
 
   resp = Run({"info", "stats"});
-  size_t bumps1 = get_bump_ups(resp.GetString());
+  size_t bumps1 = InfoReply(resp.GetString()).GetInt("bump_ups");
 
   EXPECT_GE(bumps1, 0);
   EXPECT_LE(bumps1, 10);
@@ -298,7 +290,7 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
   }
 
   resp = Run({"info", "stats"});
-  size_t bumps2 = get_bump_ups(resp.GetString());
+  size_t bumps2 = InfoReply(resp.GetString()).GetInt("bump_ups");
   EXPECT_GT(bumps2, bumps1);
 }
 
@@ -315,17 +307,8 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   StringVec vec = StrArray(resp.GetVec()[1]);
   ASSERT_GE(vec.size(), 10);
 
-  auto get_bump_ups = [](const string& str) -> size_t {
-    const string matcher = "bump_ups:";
-    const auto pos = str.find(matcher) + matcher.size();
-    const auto next_new_line =
-        str.find("\r\n", pos);  // Find the position of the next "\r\n" after the initial position
-    const auto sub = str.substr(pos, next_new_line - pos);
-    return atoi(sub.c_str());
-  };
-
   resp = Run({"info", "stats"});
-  EXPECT_EQ(get_bump_ups(resp.GetString()), 0);
+  EXPECT_EQ(InfoReply(resp.GetString()).GetInt("bump_ups"), 0);
 
   Run({"del", vec[1]});
   Run({"lpush", vec[1], "a"});
@@ -336,7 +319,7 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   EXPECT_THAT(mget_resp, ElementsAre(val, val, val));
 
   resp = Run({"info", "stats"});
-  size_t bumps = get_bump_ups(resp.GetString());
+  size_t bumps = InfoReply(resp.GetString()).GetInt("bump_ups");
   EXPECT_EQ(bumps, 2);  // one bump for get and one for mget
 }
 
@@ -533,10 +516,59 @@ TEST_F(StringFamilyTest, IncrByFloat) {
   Run({"SET", "nonum", "11 "});
   resp = Run({"INCRBYFLOAT", "nonum", "1.0"});
   EXPECT_THAT(resp, ErrArg("not a valid float"));
+  EXPECT_THAT(Run({"INCRBYFLOAT", "spaced", " 1"}), ErrArg("not a valid float"));
 
   Run({"SET", "num", "2.566"});
   resp = Run({"INCRBYFLOAT", "num", "1.0"});
   EXPECT_EQ(resp, "3.566");
+
+  // Where long double is wider than double, decimal steps stay exact and the text is fixed point.
+  if (numeric_limits<long double>::digits > numeric_limits<double>::digits) {
+    for (int i = 0; i < 3; ++i)
+      resp = Run({"INCRBYFLOAT", "dec", "0.1"});
+    EXPECT_EQ(resp, "0.3");
+    EXPECT_EQ(Run({"GET", "dec"}), "0.3");
+    EXPECT_EQ(Run({"INCRBYFLOAT", "big", "1e21"}), "1000000000000000000000");
+    EXPECT_EQ(Run({"INCRBYFLOAT", "small", "1e-7"}), "0.0000001");
+  }
+  // Large values print every digit, as printf does.
+  if (numeric_limits<long double>::max_exponent10 > 4000) {
+    for (const char* v : {"1e40", "0x1p240", "1e400", "-1e4000", "1.18973149535723176502e+4932"}) {
+      char expected[5000];
+      snprintf(expected, sizeof(expected), "%.0Lf", strtold(v, nullptr));
+      EXPECT_EQ(Run({"INCRBYFLOAT", absl::StrCat("huge", v), v}), expected) << v;
+    }
+
+    // Subnormal values print as zero.
+    EXPECT_EQ(Run({"INCRBYFLOAT", "tiny", "1e-4950"}), "0");
+  }
+  EXPECT_EQ(Run({"INCRBYFLOAT", "hex", "0x10"}), "16");
+  EXPECT_EQ(Run({"EVAL", "return type(redis.call('INCRBYFLOAT', KEYS[1], '1'))", "1", "lua"}),
+            "string");
+
+  // An infinite increment creates nothing.
+  EXPECT_THAT(Run({"INCRBYFLOAT", "newinf", "inf"}),
+              ErrArg("increment would produce NaN or Infinity"));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "newinf"}));
+  EXPECT_THAT(Run({"INCRBYFLOAT", "newinf", "nan"}), ErrArg("not a valid float"));
+
+  // The reply is the stored text in RESP3 too.
+  Run({"HELLO", "3"});
+  EXPECT_EQ(Run({"INCRBYFLOAT", "num", "1"}), "4.566");
+}
+
+// The value is replicated, not the increment: replicas may compute with another long double.
+TEST_F(StringFamilyTest, IncrByFloatJournalsValue) {
+  Run({"SET", "jf", "1", "EX", "100"});
+  const ShardId sid = Shard("jf", shard_set->size());
+  JournalRecorder recorder;
+  const uint32_t id = StartJournalWithConsumer(&recorder, sid);
+  EXPECT_EQ(Run({"INCRBYFLOAT", "jf", "0.25"}), "1.25");
+  auto entries = pp_->at(sid)->Await([&] {
+    journal::UnregisterConsumer(id);
+    return recorder.entries;
+  });
+  EXPECT_THAT(entries, ElementsAre(Pair("SET", AllOf(HasSubstr("1.25"), HasSubstr("PXAT")))));
 }
 
 TEST_F(StringFamilyTest, RestoreHighTTL) {
@@ -1076,24 +1108,8 @@ TEST_F(StringFamilyTest, MSetNxOddArgs) {
 // must clear TryBorrowString's borrow threshold (currently 8 KiB) so
 // TryBorrow actually fires; we test a spread above it.
 TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
-  auto get_info_stat = [this](std::string_view name) -> uint64_t {
-    std::string stats = Run({"info", "stats"}).GetString();
-    std::string needle = absl::StrCat(name, ":");
-    size_t pos = stats.find(needle);
-    EXPECT_NE(pos, std::string::npos) << name;
-    if (pos == std::string::npos)
-      return 0;
-    pos += needle.size();
-    size_t line_end = stats.find("\r\n", pos);
-    EXPECT_NE(line_end, std::string::npos) << name;
-    if (line_end == std::string::npos)
-      return 0;
-    uint64_t value = 0;
-    EXPECT_TRUE(absl::SimpleAtoi(stats.substr(pos, line_end - pos), &value)) << name;
-    return value;
-  };
-
-  uint64_t initial_sent = get_info_stat("borrowed_strings_sent_total");
+  int64_t initial_sent =
+      InfoReply(Run({"info", "stats"}).GetString()).GetInt("borrowed_strings_sent_total");
   std::mt19937 rng{0xDF1FDF1F};
   std::uniform_int_distribution<int> dist(0, 255);
 
@@ -1107,7 +1123,8 @@ TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
     EXPECT_EQ(resp, value) << "size " << sz;
   }
 
-  EXPECT_EQ(get_info_stat("borrowed_strings_sent_total"), initial_sent + 3);
+  EXPECT_EQ(InfoReply(Run({"info", "stats"}).GetString()).GetInt("borrowed_strings_sent_total"),
+            initial_sent + 3);
 }
 
 // Same as GetLargeRawBorrowed, but executes the GETs through MULTI/EXEC so the
@@ -1118,24 +1135,8 @@ TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
 // (borrowed_strings_sent_total advances) and the bytes must round-trip
 // correctly through capture and replay.
 TEST_F(StringFamilyTest, GetLargeRawBorrowedSquashed) {
-  auto get_info_stat = [this](std::string_view name) -> uint64_t {
-    std::string stats = Run({"info", "stats"}).GetString();
-    std::string needle = absl::StrCat(name, ":");
-    size_t pos = stats.find(needle);
-    EXPECT_NE(pos, std::string::npos) << name;
-    if (pos == std::string::npos)
-      return 0;
-    pos += needle.size();
-    size_t line_end = stats.find("\r\n", pos);
-    EXPECT_NE(line_end, std::string::npos) << name;
-    if (line_end == std::string::npos)
-      return 0;
-    uint64_t value = 0;
-    EXPECT_TRUE(absl::SimpleAtoi(stats.substr(pos, line_end - pos), &value)) << name;
-    return value;
-  };
-
-  uint64_t initial_sent = get_info_stat("borrowed_strings_sent_total");
+  int64_t initial_sent =
+      InfoReply(Run({"info", "stats"}).GetString()).GetInt("borrowed_strings_sent_total");
   std::mt19937 rng{0xDF1FDF1F};
   std::uniform_int_distribution<int> dist(0, 255);
 
@@ -1152,16 +1153,33 @@ TEST_F(StringFamilyTest, GetLargeRawBorrowedSquashed) {
   EXPECT_THAT(Run({"set", "k1", values[1]}), "OK");
   EXPECT_THAT(Run({"set", "k2", values[2]}), "OK");
 
+  const std::string ascii_value(16384, 'a');
+  EXPECT_THAT(Run({"set", "k3", ascii_value}), "OK");
+
+  const int k0_bit = values[0][0] & 1;
+
   // GET them inside MULTI/EXEC — this dispatches through MultiCommandSquasher,
   // so each GET reply is first captured then replayed to the real sink.
   EXPECT_EQ(Run({"multi"}), "OK");
   EXPECT_EQ(Run({"get", "k0"}), "QUEUED");
+  EXPECT_EQ(Run({"setbit", "k0", "7", StrCat(1 - k0_bit)}), "QUEUED");
   EXPECT_EQ(Run({"get", "k1"}), "QUEUED");
   EXPECT_EQ(Run({"get", "k2"}), "QUEUED");
+  EXPECT_EQ(Run({"get", "k3"}), "QUEUED");
+  EXPECT_EQ(Run({"setbit", "k3", "7", "0"}), "QUEUED");
   auto resp = Run({"exec"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(values[0], values[1], values[2])));
+  EXPECT_THAT(resp, RespArray(ElementsAre(values[0], IntArg(k0_bit), values[1], values[2],
+                                          ascii_value, IntArg(1))));
 
-  EXPECT_EQ(get_info_stat("borrowed_strings_sent_total"), initial_sent + 3);
+  EXPECT_EQ(InfoReply(Run({"info", "stats"}).GetString()).GetInt("borrowed_strings_sent_total"),
+            initial_sent + 4);
+
+  std::string k0_after = values[0];
+  k0_after[0] ^= 1;
+  std::string k3_after = ascii_value;
+  k3_after[0] = '`';
+  EXPECT_EQ(Run({"get", "k0"}), k0_after);
+  EXPECT_EQ(Run({"get", "k3"}), k3_after);
 }
 
 // Exercises the PendingRead pin/orphan/drain cycle through CompactObj's

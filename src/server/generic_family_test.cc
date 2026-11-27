@@ -5,6 +5,7 @@
 #include "server/generic_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/flags/reflection.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_join.h>
 
@@ -21,6 +22,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/memory_accounting.h"
 #include "core/oah_set.h"
 #include "facade/facade_test.h"
 #include "facade/reply_builder.h"
@@ -38,6 +40,8 @@ extern "C" {
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
+ABSL_DECLARE_FLAG(bool, enable_scope_based_mem_track);
+ABSL_DECLARE_FLAG(bool, use_oah_set);
 ABSL_DECLARE_FLAG(uint32_t, container_iteration_yield_interval_usec);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 
@@ -60,7 +64,16 @@ void RetireExpiredAndEvictForTest(EngineShard* shard) {
   shard->RetireExpiredAndEvict();
 }
 
-class GenericFamilyTest : public BaseFamilyTest {};
+class GenericFamilyTest : public BaseFamilyTest {
+ protected:
+  void SetUp() override {
+    absl::SetFlag(&FLAGS_enable_scope_based_mem_track, true);
+    BaseFamilyTest::SetUp();
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
+};
 
 TEST_F(GenericFamilyTest, TtlOfExpiredKeyDuringPause) {
   // CLIENT PAUSE disables expiry; a key past its deadline is logically gone, not a negative TTL.
@@ -1747,7 +1760,9 @@ TEST_F(GenericFamilyTest, RestoreRejectsDuplicateHashField) {
                            0x00, 0xbd, 0x46, 0xcd, 0x72, 0xc3, 0xf1, 0xd6, 0x32};
   for (auto payload : {ToSV(hash_dup), ToSV(hash_lp_dup)}) {
     Run({"del", "e"});
+    const auto before = GetMetrics().type_attributed_memory_bytes;
     EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+    EXPECT_EQ(GetMetrics().type_attributed_memory_bytes, before);
     EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
   }
 
@@ -1827,77 +1842,61 @@ TEST_F(GenericFamilyTest, RestoreOobStreamListpack) {
 TEST_F(GenericFamilyTest, Info) {
   InitWithDbFilename();  // Needed for `save`
 
-  auto get_rdb_changes_since_last_save = [](const string& str) -> size_t {
-    const string matcher = "rdb_changes_since_last_success_save:";
-    const auto pos = str.find(matcher) + matcher.size();
-    const auto sub = str.substr(pos, 1);
-    return atoi(sub.c_str());
-  };
-
   EXPECT_EQ(Run({"set", "k", "1"}), "OK");
   auto resp = Run({"info", "persistence"});
-  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(1, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"set", "k", "1"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(2, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(2, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"set", "k2", "2"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(3, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(3, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"save"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(0, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(0, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"set", "k2", "2"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(1, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"bgsave"}), "OK");
   bool cond = WaitUntilCondition(
       [&]() {
         resp = Run({"info", "persistence"});
-        return get_rdb_changes_since_last_save(resp.GetString()) == 0;
+        return InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save") == 0;
       },
       500ms);
   EXPECT_TRUE(cond);
   cond = WaitUntilCondition(
       [&]() {
         resp = Run({"info", "persistence"});
-        return resp.GetString().find("rdb_bgsave_in_progress:0") != string::npos;
+        return InfoReply(resp.GetString()).GetInt("rdb_bgsave_in_progress") == 0;
       },
       500ms);
   EXPECT_TRUE(cond) << resp.GetString();
 
   EXPECT_EQ(Run({"set", "k3", "3"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(1, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_THAT(Run({"del", "k3"}), IntArg(1));
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(2, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(2, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 }
 
 TEST_F(GenericFamilyTest, BgSaveSchedule) {
   InitWithDbFilename();
-
-  auto changes_since_save = [](const string& info) -> int {
-    const string m = "rdb_changes_since_last_success_save:";
-    auto pos = info.find(m);
-    if (pos == string::npos)
-      return -1;
-    pos += m.size();
-    auto end = info.find('\r', pos);
-    return atoi(info.substr(pos, end - pos).c_str());
-  };
 
   auto bgsave_and_wait = [&](const std::vector<std::string_view>& cmd) {
     EXPECT_EQ(Run({"set", "k", "1"}), "OK");
     EXPECT_EQ(Run(cmd), "OK");
     EXPECT_TRUE(WaitUntilCondition(
         [&] {
-          return changes_since_save(Run({"info", "persistence"}).GetString()) == 0;
+          return InfoReply(Run({"info", "persistence"}).GetString())
+                     .GetInt("rdb_changes_since_last_success_save") == 0;
         },
         500ms));
   };
@@ -2500,10 +2499,17 @@ TEST_F(GenericFamilyTest, SortGet) {
   resp = Run({"sort", "mylist", "BY", "weight_*", "GET", "#", "GET", "obj_*"});
   ASSERT_THAT(resp, RespElementsAre("3", "third", "2", "second", "1", "first"));
 
-  // Test 6: GET with missing keys (should return empty strings, sorted: 1,2,3)
+  // Test 6: GET of a missing or non-string key returns null, STORE keeps an empty string
   Run({"del", "obj_2"});
   resp = Run({"sort", "mylist", "GET", "obj_*"});
-  ASSERT_THAT(resp, RespElementsAre("first", "", "third"));
+  ASSERT_THAT(resp, RespElementsAre("first", ArgType(RespExpr::NIL), "third"));
+  resp = Run({"sort", "mylist", "BY", "nosort", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("third", ArgType(RespExpr::NIL), "first"));
+  ASSERT_THAT(Run({"sort", "mylist", "GET", "obj_*", "STORE", "result"}), IntArg(3));
+  ASSERT_THAT(Run({"lrange", "result", "0", "-1"}), RespElementsAre("first", "", "third"));
+  Run({"hset", "obj_2", "f", "v"});
+  resp = Run({"sort", "mylist", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("first", ArgType(RespExpr::NIL), "third"));
 
   // Restore obj_2 for further tests
   Run({"set", "obj_2", "second"});
@@ -3180,8 +3186,7 @@ namespace {
 TypeAttributedMemory Snapshot() {
   TypeAttributedMemory total{};
   for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
-    auto local =
-        shard_set->Await(sid, [] { return EngineShard::tlocal()->type_attributed_memory(); });
+    auto local = shard_set->Await(sid, [] { return GetTypeAttributedMemory(); });
     ranges::transform(total, local, total.begin(), plus{});
   }
   return total;
@@ -3264,18 +3269,19 @@ namespace {
 struct MetricCmp {
   TypeAttributedMemory new_metric{};
   TypeAttributedMemory old_metric{};
-  int64_t obj_used = 0, table_used = 0, search_used = 0, interned = 0;
+  int64_t obj_used = 0, table_used = 0, search_used = 0;
 
   MetricCmp() = default;
 
   explicit MetricCmp(const Metrics& m) : new_metric(m.type_attributed_memory_bytes) {
+    // Compare object categories with the legacy object-only metric.
+    new_metric[kUntrackedMemory] = 0;
     for (const auto& db : m.db_stats) {
       ranges::transform(old_metric, db.memory_usage_by_type, old_metric.begin(), plus{});
       obj_used += db.obj_memory_usage;
       table_used += db.table_mem_usage;
     }
     search_used = m.search_stats.used_memory;
-    interned = m.interned_string_stats.pool_bytes + m.interned_string_stats.pool_table_bytes;
   }
 
   MetricCmp operator-(const MetricCmp& o) const {
@@ -3285,7 +3291,6 @@ struct MetricCmp {
     res.obj_used -= o.obj_used;
     res.table_used -= o.table_used;
     res.search_used -= o.search_used;
-    res.interned -= o.interned;
     return res;
   }
 
@@ -3333,7 +3338,7 @@ ostream& operator<<(ostream& os, const MetricCmp& m) {
   print("new", m.new_metric);
   print("old", m.old_metric);
   return os << "obj_used=" << m.obj_used << " table_used=" << m.table_used
-            << " search_used=" << m.search_used << " interned=" << m.interned;
+            << " search_used=" << m.search_used;
 }
 
 // known gap
@@ -3481,14 +3486,16 @@ TEST_F(MemParityTest, AsyncUnlinkLargeHash) {
   EXPECT_TRUE(d.IsClean()) << d;
 }
 
-// Known gaps: scenarios below are not covered by the new metric, all are to do. comparisons pasted
-// above tests as guide of what fails, with table values not denoted where not relevant
-
-// new: {string=-384 } old: {string=896 hash=-1280 } obj_used=-384
 TEST_F(MemParityTest, SetOverwritesHash) {
-  Run({"HSET", key_, "field", val_});
-  auto d = Delta([&] { Run({"SET", key_, val_}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
+  for (const string& value : {val_, string("inline"), string("42")}) {
+    SCOPED_TRACE(StrCat("replacement length=", value.size()));
+    ASSERT_THAT(Run({"HSET", key_, "field", val_}), IntArg(1));
+    auto d = Delta([&] { EXPECT_EQ(Run({"SET", key_, value}), "OK"); });
+    EXPECT_TRUE(d.Match(OBJ_HASH) && d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean()) << d;
+    EXPECT_TRUE(d.Negative(OBJ_HASH)) << d;
+    EXPECT_EQ(Run({"GET", key_}), value);
+    ASSERT_THAT(Run({"DEL", key_}), IntArg(1));
+  }
 }
 
 // Whole table reset bypasses per-key delete scopes
@@ -3502,71 +3509,176 @@ TEST_F(MemParityTest, FlushDbMixedTypes) {
                          d.MatchObj() && d.IsClean());
 }
 
-// new: {string=-896 } old: {key=1152 } obj_used=1152
 TEST_F(MemParityTest, RenameStringAcrossShards) {
   const string dest = OnOtherShard(key_, key2_);
   EXPECT_FALSE(dest.empty()) << "could not find key on another shard after 5k tries";
   Run({"SET", key_, val_});
   auto d = Delta([&] { EXPECT_EQ(Run({"RENAME", key_, dest}), "OK"); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
+  EXPECT_TRUE(d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean()) << d;
 }
 
-// needs fix in the command handler.
-// new: {} old: {string=-896 key=-896 } obj_used=-1792
 TEST_F(MemParityTest, RenameHashOverString) {
   Run({"HSET", key_, "field", val_});
   Run({"SET", key3_, val_});
-  auto d = Delta([&] { Run({"RENAME", key_, key3_}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+  auto d = Delta([&] { EXPECT_EQ(Run({"RENAME", key_, key3_}), "OK"); });
+  EXPECT_TRUE(d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
-// new: {string=-896 } old: {string=-896 hash=1392 } obj_used=496
 TEST_F(MemParityTest, CopyReplace) {
   Run({"HSET", key_, "f", val_});
   Run({"SET", key2_, val_});
   auto d = Delta([&] { Run({"COPY", key_, key2_, "REPLACE"}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+  EXPECT_TRUE(d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
-// interned pool is accounted separately from the JSON objects
-// new: {ReJSON-RL=87104 } old: {key=32768 ReJSON-RL=87104 } obj_used=119872 interned=100
-TEST_F(MemParityTest, JsonSetInternedStrings) {
-  const string shared = StrCat("shared-json-string-", string(1024, 'x'));
-  const string doc = StrCat(R"({"field":")", shared, R"(","nested":{"field":")", shared, R"("}})");
-  auto d = Delta([&] {
-    for (int i = 0; i < 32; ++i)
-      Run({"JSON.SET", StrCat("json-interned-", i, "-", string(1024, 'j')), "$", doc});
+namespace {
+struct JsonMemorySnapshot {
+  int64_t total_used_bytes;
+  int64_t json_type_bytes;
+  size_t pool_bytes;
+  size_t pool_entries;
+
+  bool operator==(const JsonMemorySnapshot&) const = default;
+};
+
+JsonMemorySnapshot SnapshotJsonMemory() {
+  return shard_set->Await(0, [] {
+    const auto* shard = EngineShard::tlocal();
+    const auto pool = GetInternedStringStats();
+    return JsonMemorySnapshot{
+        .total_used_bytes = static_cast<int64_t>(shard->UsedMemoryWithoutSearch()),
+        .json_type_bytes = GetTypeAttributedMemory()[OBJ_JSON],
+        .pool_bytes = pool.pool_bytes,
+        .pool_entries = pool.pool_entries,
+    };
   });
-  METRIC_CMP_TODO(d, d.Match(OBJ_JSON) && d.new_metric[OBJ_JSON] == d.obj_used && d.interned > 0 &&
-                         d.IsClean());
+}
+}  // namespace
+
+TEST_F(MemParityTest, JsonSetInternedStrings) {
+  const string first = kShard0Key, second = kShard0AltKey;
+
+  const string member = StrCat("shared-member-", string(1024, 'x'));
+  const string doc = StrCat("{\"", member, "\":1}");
+
+  ASSERT_EQ(Run({"SET", first, ""}), "OK");
+  ASSERT_EQ(Run({"SET", second, ""}), "OK");
+  ASSERT_THAT(Run({"DEL", first, second}), IntArg(2));
+
+  auto check_delta = [](const JsonMemorySnapshot& before, const JsonMemorySnapshot& after) {
+    EXPECT_EQ(after.json_type_bytes - before.json_type_bytes,
+              after.total_used_bytes - before.total_used_bytes);
+  };
+
+  // Two values are computed here, document bytes = D and blob bytes = B.
+  // D is the size of the JSON object itself.
+  // B is the size of the interned `shared-member-...` json key which will be shared.
+  // The deltas below calculate D and B in sequence
+  for (bool delete_creator_first : {true, false}) {
+    SCOPED_TRACE(StrCat("delete creator first=", delete_creator_first));
+    const auto baseline = SnapshotJsonMemory();
+    ASSERT_EQ(Run({"JSON.SET", first, "$", doc}), "OK");
+    const auto one = SnapshotJsonMemory();
+    check_delta(baseline, one);
+    EXPECT_EQ(one.pool_entries, baseline.pool_entries + 1);
+    ASSERT_GT(one.pool_bytes, baseline.pool_bytes);
+
+    // B = the size of the JSON blob stored in the interned string pool
+    const int64_t blob_bytes = one.pool_bytes - baseline.pool_bytes;
+
+    ASSERT_EQ(Run({"JSON.SET", second, "$", doc}), "OK");
+    const auto two = SnapshotJsonMemory();
+    check_delta(one, two);
+
+    // Since B is shared, pool bytes or pool entries must not grow
+    EXPECT_EQ(two.pool_entries, one.pool_entries);
+    EXPECT_EQ(two.pool_bytes, one.pool_bytes);
+
+    // D = the size of the JSON object. Now all the growth is due to it since B does not grow.
+    const int64_t document_bytes = two.total_used_bytes - one.total_used_bytes;
+    EXPECT_GT(document_bytes, 0);
+
+    // Now we know both D and B, so check if the first creation matched exactly D+B
+    EXPECT_EQ(one.total_used_bytes - baseline.total_used_bytes, document_bytes + blob_bytes);
+
+    const string& deleted = delete_creator_first ? first : second;
+    const string& remaining = delete_creator_first ? second : first;
+    ASSERT_THAT(Run({"DEL", deleted}), IntArg(1));
+
+    // The snapshot is back to step 1 after the intermediate was deleted
+    EXPECT_EQ(SnapshotJsonMemory(), one);
+
+    EXPECT_EQ(Run({"JSON.GET", remaining}), doc);
+
+    ASSERT_THAT(Run({"DEL", remaining}), IntArg(1));
+    EXPECT_EQ(SnapshotJsonMemory(), baseline);
+  }
 }
 
-// value is allocated while payload is decoded, delta should be for hash type
-// new: {} old: {hash=1392 key=1536 } obj_used=2928
 TEST_F(MemParityTest, RestoreHash) {
   Run({"HSET", key_, "f", string(1024, 'x')});
   const string payload = Run({"DUMP", key_}).GetString();
   auto d = Delta([&] { EXPECT_EQ(Run({"RESTORE", key3_, "0", payload}), "OK"); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+  EXPECT_TRUE(d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
-// new: {zset=-1248 } old: {zset=32 hash=-1280 } obj_used=-1248
 TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
   Run({"HSET", key_, "f", val_});
   Run({"ZADD", key2_, "1", "a", "2", "b"});
   Run({"ZADD", key3_, "3", "c", "4", "d"});
-  auto d = Delta([&] { Run({"ZUNIONSTORE", key_, "2", key2_, key3_}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_ZSET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+  auto d = Delta([&] { EXPECT_THAT(Run({"ZUNIONSTORE", key_, "2", key2_, key3_}), IntArg(4)); });
+  EXPECT_TRUE(d.Match(OBJ_ZSET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
+  EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Positive(OBJ_ZSET)) << d;
 }
 
-// new: {set=-992 } old: {set=280 hash=-1280 } obj_used=-1000
-TEST_F(MemParityTest, SUnionStoreOverwritesHash) {
-  Run({"HSET", key_, "f", val_});
-  Run({"SADD", key2_, "1", "a", "2", "b"});
-  Run({"SADD", key3_, "3", "c", "4", "d"});
-  auto d = Delta([&] { Run({"SUNIONSTORE", key_, key2_, key3_}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_SET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+namespace {
+class SetMemParityTest : public MemParityTest, public WithParamInterface<bool> {
+ protected:
+  void SetUp() override {
+    // InitSetFamilyFlags caches this flag during base fixture setup.
+    absl::SetFlag(&FLAGS_use_oah_set, GetParam());
+    MemParityTest::SetUp();
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
+};
+}  // namespace
+
+TEST_P(SetMemParityTest, SetUnionStoreOverwritesHashAccounting) {
+  ASSERT_EQ(g_use_oah_set, GetParam());
+  auto store_union = [&] { EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4)); };
+  bool full_parity = true;
+  MetricCmp parity_gap;
+  for (const string& member : {string("3"), string("a")}) {
+    SCOPED_TRACE(StrCat("replacement member=", member));
+    ASSERT_THAT(Run({"SADD", key2_, "1", "2"}), IntArg(2));
+    ASSERT_THAT(Run({"SADD", key3_, member, "4"}), IntArg(2));
+    auto created = Delta(store_union);
+    ASSERT_THAT(Run({"DEL", key_}), IntArg(1));
+    ASSERT_THAT(Run({"HSET", key_, "f", val_}), IntArg(1));
+    auto d = Delta(store_union);
+    EXPECT_TRUE(d.Match(OBJ_HASH) && d.Match(OBJ_KEY) && d.IsClean()) << d;
+    EXPECT_EQ(d.new_metric[OBJ_SET], created.new_metric[OBJ_SET]) << d;
+    EXPECT_EQ(d.NewTotal(), created.new_metric[OBJ_SET] + d.old_metric[OBJ_HASH]) << d;
+    EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Positive(OBJ_SET)) << d;
+    if (!(d.Match(OBJ_SET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean())) {
+      full_parity = false;
+      parity_gap = d;
+    }
+    ASSERT_THAT(Run({"DEL", key_, key2_, key3_}), IntArg(3));
+  }
+
+  // A known parity gap must not bypass or obscure replacement-accounting failures.
+  if (HasFailure())
+    return;
+  METRIC_CMP_TODO(parity_gap, full_parity);
 }
+
+INSTANTIATE_TEST_SUITE_P(SetImplementations, SetMemParityTest, Bool(),
+                         [](const TestParamInfo<bool>& info) {
+                           return info.param ? "OAHSet" : "StringSet";
+                         });
 
 // Table growth not added to the new metric. Slow (~20 seconds) so disabled by default, but passes
 TEST_F(MemParityTest, DISABLED_TableGrowth) {

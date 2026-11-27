@@ -14,6 +14,8 @@ extern "C" {
 
 namespace dfly {
 
+using testing::_;
+using testing::AllOf;
 using testing::ElementsAre;
 
 class BloomFamilyTest : public BaseFamilyTest {
@@ -44,6 +46,13 @@ TEST_F(BloomFamilyTest, Basic) {
   EXPECT_THAT(Run({"bf.exists", "b2", "b"}), IntArg(1));
   Run({"set", "str", "foo"});
   EXPECT_THAT(Run({"bf.exists", "str", "b"}), IntArg(0));
+
+  // RESP3 answers membership with booleans.
+  Run({"hello", "3"});
+  EXPECT_THAT(Run({"bf.add", "b1", "c"}), BoolArg(true));
+  EXPECT_THAT(Run({"bf.add", "b1", "c"}), BoolArg(false));
+  EXPECT_THAT(Run({"bf.exists", "b1", "c"}), BoolArg(true));
+  EXPECT_THAT(Run({"bf.exists", "b3", "c"}), BoolArg(false));
 }
 
 TEST_F(BloomFamilyTest, Multiple) {
@@ -63,6 +72,10 @@ TEST_F(BloomFamilyTest, Multiple) {
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), IntArg(0), IntArg(0))));
   resp = Run({"bf.mexists", "bf1", "a", "b", "c"});
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+
+  Run({"hello", "3"});
+  EXPECT_THAT(Run({"bf.madd", "bf1", "a", "d"}), RespElementsAre(BoolArg(false), BoolArg(true)));
+  EXPECT_THAT(Run({"bf.mexists", "bf1", "d", "e"}), RespElementsAre(BoolArg(true), BoolArg(false)));
 }
 
 TEST_F(BloomFamilyTest, ScanDump) {
@@ -182,9 +195,19 @@ TEST_F(BloomFamilyTest, Info) {
 
   for (int i = 0; i < 10; ++i)
     Run({"bf.add", "b1", absl::StrCat("item", i)});
-  EXPECT_THAT(Run({"bf.info", "b1", "items"}), IntArg(10));
-  EXPECT_THAT(Run({"bf.info", "b1", "filters"}), IntArg(1));
+  EXPECT_THAT(Run({"bf.info", "b1", "items"}), RespElementsAre(IntArg(10)));
+  EXPECT_THAT(Run({"bf.info", "b1", "filters"}), RespElementsAre(IntArg(1)));
   EXPECT_THAT(Run({"bf.info", "b1", "bogus"}), ErrArg("Invalid info arguments"));
+
+  // RESP3 replies with a map, also for a single field.
+  Run({"hello", "3"});
+  EXPECT_THAT(
+      Run({"bf.info", "b1"}),
+      AllOf(IsResp3MapKind(),
+            RespElementsAre("Capacity", IntArg(1485), "Size", _, "Number of filters", IntArg(1),
+                            "Number of items inserted", IntArg(10), "Expansion rate", IntArg(2))));
+  EXPECT_THAT(Run({"bf.info", "b1", "items"}),
+              AllOf(IsResp3MapKind(), RespElementsAre("Number of items inserted", IntArg(10))));
 
   Run({"set", "str", "foo"});
   EXPECT_THAT(Run({"bf.info", "str"}), ErrArg("WRONG"));

@@ -10,7 +10,6 @@
 #include <atomic>
 #include <limits>
 
-#include "base/cycle_clock.h"
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
 #include "facade/connection_ref.h"
@@ -35,6 +34,10 @@ class SlotSet;
 class BlockingController;
 
 using facade::OpResult;
+
+// Opaque identity for a physical DashTable bucket — its memory address.
+// Unique across all databases/segments for the lifetime of a serialization.
+using BucketIdentity = uintptr_t;
 
 // Applies a delta to the per-db/per-type counters and to the owning slot's memory_bytes.
 // All of them track resident RAM. A set `slot` must equal KeySlot(key) and spares computing it.
@@ -111,6 +114,25 @@ class DbSlice {
 
     // Should wait for IsAnyBucketBlocked to return false
     virtual void WaitForNoBucketBlocked() const {
+    }
+
+    // Should return true if the bucket is mid-serialization or has pending dependencies
+    virtual bool IsBucketBlocked(BucketIdentity bucket) const {
+      return false;
+    }
+
+    // Should wait for IsBucketBlocked(bucket) to return false
+    virtual void WaitForBucketUnblocked(BucketIdentity bucket) const {
+    }
+
+    // Should return true if a journal append would block, regardless of the changed bucket
+    virtual bool IsJournalAppendBlocked() const {
+      return false;
+    }
+
+    // Should return true if the consumer serializes bucket baselines, i.e. stamps bucket versions
+    virtual bool SerializesBaselines() const {
+      return false;
     }
 
     bool eventually_consistent_ = false;
@@ -360,9 +382,10 @@ class DbSlice {
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                                 uint64_t expire_at_ms);
 
-  // Must be called before overwriting a value in place. An offloaded value keeps its data on disk
-  // and reports no heap allocation, so overwriting it drops the only reference to its disk extent.
-  void ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv);
+  // Must be called before overwriting a value in place. Drops an indexed HASH or JSON document from
+  // the search indices. An offloaded value keeps its data on disk and reports no heap allocation,
+  // so overwriting it drops the only reference to its disk extent.
+  void PrepareOverwrite(const Context& cntx, std::string_view key, PrimeValue* pv);
 
   // Update key expiration, clamping TTL to kMaxExpireDeadlineMs. Return the applied absolute
   // deadline in ms, 0 for PERSIST, -1 if deleted, or OUT_OF_RANGE on overflow.
@@ -465,13 +488,15 @@ class DbSlice {
     Valid,         // Not expired, or expired on a replica that does not delete expired keys.
     ExpiryPaused,  // Expired, but expiry is paused. The caller decides whether to hide it.
     Deleted,       // Expired, journaled and deleted. 'it' is invalidated.
+    Deferred,      // Expired, but its bucket is mid-serialization. Left as is; hide it from reads.
   };
 
   // The single expiry primitive: journals and deletes 'it' if its expire time passed at
-  // cntx.time_now_ms. Entries without a TTL are Valid. The journal append may suspend unless the
-  // caller disabled journal flushing (journal::DisableFlushGuard).
-  // Never sends keyspace notifications, so it is safe in atomic sections: when they are enabled,
-  // the expired event is queued for SendQueuedExpiredKeyEvents.
+  // cntx.time_now_ms. Entries without a TTL are Valid. Never suspends before the deletion: it
+  // defers entries it could not journal and delete atomically. Throttles on return unless the
+  // caller disabled journal flushing (journal::DisableFlushGuard). Never sends keyspace
+  // notifications, so it is safe in atomic sections: when they are enabled, the expired event is
+  // queued for SendQueuedExpiredKeyEvents.
   ExpireResult TryExpire(const Context& cntx, PrimeIterator it) const;
 
   // Sends the expired events queued by TryExpire and eviction. OnCbFinishBlocking calls it, so
@@ -482,6 +507,9 @@ class DbSlice {
     if (!pending_expired_events_.empty())
       SendQueuedExpiredKeyEventsSlow();
   }
+
+  // Dispatches the queued tracking invalidations without waiting for their delivery.
+  void SendQueuedInvalidationMessagesAsync();
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -593,6 +621,12 @@ class DbSlice {
     client_tracking_map_[key].insert(conn_ref);
   }
 
+  // Set while a CLIENT TRACKING NOLOOP client runs a command: its own changes do not notify it.
+  void SetTrackingNoLoopClient(uint32_t client_id) {
+    tracking_noloop_client_ = client_id;
+    tracking_noloop_fiber_ = util::fb2::detail::FiberActive();
+  }
+
   bool IsExpiredEventsRecording() const {
     return expired_keys_events_recording_;
   }
@@ -602,12 +636,24 @@ class DbSlice {
     expired_keys_events_recording_ = enable;
   }
 
-  // Returns true if any registered snapshot is blocked on bucket serialiazion (big value, delayed)
-  // and thus might reject the journal change
-  bool WillBlockOnJournalWrite() const;
+  // Returns true if any registered snapshot has a bucket mid-serialization (big value, delayed)
+  bool IsAnyBucketBlocked() const;
 
-  // Block and wait for WillBlockOnJournalWrite to become false
-  void WaitForUnblockedJournalWrites() const;
+  // Block and wait for IsAnyBucketBlocked to become false
+  void WaitForNoBucketBlocked() const;
+
+  // Returns true if a journal append would block, e.g. on a stream mutex held by a serializer
+  bool IsJournalAppendBlocked() const;
+
+  // Returns true if an entry of the bucket can be journaled and deleted without suspending
+  bool CanDeleteWithoutBlocking(BucketIdentity bucket) const;
+
+  // Returns true if every registered snapshot already serialized a bucket with this version.
+  // Consumers that don't serialize baselines (e.g. the FlushSlots callback) are ignored.
+  bool IsBucketSerialized(uint64_t bucket_version) const;
+
+  // Block and wait for no registered snapshot to depend on the bucket
+  void WaitForBucketUnblocked(BucketIdentity bucket) const;
 
   void StartSampleTopK(DbIndex db_ind, uint32_t min_freq);
 
@@ -667,7 +713,6 @@ class DbSlice {
       SendQueuedInvalidationMessagesSlow();
   }
   void SendQueuedInvalidationMessagesSlow();
-  void SendQueuedInvalidationMessagesAsync();
 
   // Queues the expired event of 'key' if keyspace notifications are enabled. Never suspends.
   void QueueExpiredKeyEvent(DbIndex db_index, std::string_view key) const {
@@ -759,9 +804,6 @@ class DbSlice {
   std::list<ChangeConsumerInterface*> change_cb_;
   mutable LocalLatch change_cb_latch_;  // to avoid deletion during traversal
 
-  // Shared by overlapping slot sweeps and their foreground on-change callbacks.
-  base::RealTimeAggregator flush_slots_cpu_aggregator_;
-
   // Cache mode only: <key hash, db> of the entries looked up during the current transaction
   // callback. OnCbFinishBlocking bumps them up after the callback finishes, because a bump moves
   // entries within their segment and would invalidate the iterators the callback holds. Being a
@@ -802,6 +844,8 @@ class DbSlice {
                           absl::container_internal::hash_default_hash<std::string>,
                           absl::container_internal::hash_default_eq<std::string>, AllocatorType>;
   TrackingMap client_tracking_map_, pending_send_map_;
+  uint32_t tracking_noloop_client_ = 0;
+  util::fb2::detail::FiberInterface* tracking_noloop_fiber_ = nullptr;
 
   // Expired events queued by QueueExpiredKeyEvent, sent by SendQueuedExpiredKeyEvents.
   // Consecutive events of the same db share one entry.

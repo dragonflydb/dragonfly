@@ -786,6 +786,24 @@ TEST_F(RedisReplyBuilderTest, Resp3Double) {
   ASSERT_EQ(str(), ",5.5\r\n");
 }
 
+TEST_F(RedisReplyBuilderTest, Bool) {
+  builder_->SendBool(true);
+  builder_->SendBool(false);
+  ASSERT_TRUE(NoErrors());
+  ASSERT_EQ(TakePayload(), ":1\r\n:0\r\n");
+
+  builder_->SetRespVersion(RespVersion::kResp3);
+  builder_->SendBool(true);
+  builder_->SendBool(false);
+  ASSERT_TRUE(NoErrors());
+  ASSERT_EQ(TakePayload(), "#t\r\n#f\r\n");
+
+  // A RESP2 capture keeps the integer.
+  CapturingReplyBuilder crb;
+  crb.SendBool(true);
+  EXPECT_TRUE(holds_alternative<long>(crb.Take()));
+}
+
 TEST_F(RedisReplyBuilderTest, Resp3NullString) {
   builder_->SetRespVersion(RespVersion::kResp3);
   builder_->SendNull();
@@ -825,58 +843,6 @@ TEST_F(RedisReplyBuilderTest, SendStringArrayAsSet) {
       << "SendStringArrayAsSet Resp3 Failed.";
 }
 
-TEST_F(RedisReplyBuilderTest, SendScoredArray) {
-  const std::vector<std::pair<std::string, double>> scored_array{
-      {"e1", 1.1}, {"e2", 2.2}, {"e3", 3.3}};
-
-  builder_->SetRespVersion(RespVersion::kResp2);
-  builder_->SendScoredArray(scored_array, false);
-  ASSERT_TRUE(NoErrors());
-  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
-      << "Resp2 WITHOUT scores failed.";
-
-  builder_->SetRespVersion(RespVersion::kResp3);
-  builder_->SendScoredArray(scored_array, false);
-  ASSERT_TRUE(NoErrors());
-  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
-      << "Resp3 WITHOUT scores failed.";
-
-  builder_->SetRespVersion(RespVersion::kResp2);
-  builder_->SendScoredArray(scored_array, true);
-  ASSERT_TRUE(NoErrors());
-  ASSERT_EQ(TakePayload(),
-            "*6\r\n$2\r\ne1\r\n$3\r\n1.1\r\n$2\r\ne2\r\n$3\r\n2.2\r\n$2\r\ne3\r\n$3\r\n3.3\r\n")
-      << "Resp3 WITHSCORES failed.";
-
-  builder_->SetRespVersion(RespVersion::kResp3);
-  builder_->SendScoredArray(scored_array, true);
-  ASSERT_TRUE(NoErrors());
-  ASSERT_EQ(TakePayload(),
-            "*3\r\n*2\r\n$2\r\ne1\r\n,1.1\r\n*2\r\n$2\r\ne2\r\n,2.2\r\n*2\r\n$2\r\ne3\r\n,3.3\r\n")
-      << "Resp3 WITHSCORES failed.";
-}
-
-TEST_F(RedisReplyBuilderTest, SendLabeledScoredArray) {
-  const std::vector<std::pair<std::string, double>> scored_array{
-      {"e1", 1.1}, {"e2", 2.2}, {"e3", 3.3}};
-
-  builder_->SetRespVersion(RespVersion::kResp2);
-  builder_->SendLabeledScoredArray("foobar", scored_array);
-  ASSERT_TRUE(NoErrors());
-  ASSERT_EQ(TakePayload(),
-            "*2\r\n$6\r\nfoobar\r\n*3\r\n*2\r\n$2\r\ne1\r\n$3\r\n1.1\r\n*2\r\n$2\r\ne2\r\n$3\r\n2."
-            "2\r\n*2\r\n$2\r\ne3\r\n$3\r\n3.3\r\n")
-      << "Resp3 failed.\n";
-
-  builder_->SetRespVersion(RespVersion::kResp3);
-  builder_->SendLabeledScoredArray("foobar", scored_array);
-  ASSERT_TRUE(NoErrors());
-  ASSERT_EQ(TakePayload(),
-            "*2\r\n$6\r\nfoobar\r\n*3\r\n*2\r\n$2\r\ne1\r\n,1.1\r\n*2\r\n$2\r\ne2\r\n,2.2\r\n*"
-            "2\r\n$2\r\ne3\r\n,3.3\r\n")
-      << "Resp3 failed.";
-}
-
 TEST_F(RedisReplyBuilderTest, BasicCapture) {
   using namespace std;
   string_view kTestSws[] = {"a1"sv, "a2"sv, "a3"sv, "a4"sv};
@@ -912,6 +878,8 @@ TEST_F(RedisReplyBuilderTest, BasicCapture) {
       [](RRB* r) { r->SendNull(); },
       [](RRB* r) { r->SendLong(1L); },
       [](RRB* r) { r->SendDouble(6.7); },
+      [](RRB* r) { r->SendBool(true); },
+      [](RRB* r) { r->SendBool(false); },
       [](RRB* r) { r->SendSimpleString("ok"); },
       [](RRB* r) { r->SendVerbatimString("A simple string!", RRB::VerbatimFormat::TXT); },
       [](RRB* r) { r->SendVerbatimString("# Title\nbody", RRB::VerbatimFormat::MARKDOWN); },
@@ -986,6 +954,11 @@ TEST_F(RedisReplyBuilderTest, VerbatimString) {
   builder_->SetRespVersion(RespVersion::kResp3);
   builder_->SendVerbatimString(str, RedisReplyBuilder::VerbatimFormat::TXT);
   ASSERT_TRUE(NoErrors());
+
+  // Tests read the text without its format prefix and compare it.
+  auto parsed = Parse();
+  EXPECT_THAT(parsed.args, ElementsAre(RespMatcher(str, RespExpr::VERB)));
+  EXPECT_THAT(parsed.args, ElementsAre(Not(RespMatcher("A simple", RespExpr::VERB))));
   ASSERT_EQ(TakePayload(), "=20\r\ntxt:A simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
 
   builder_->SetRespVersion(RespVersion::kResp3);

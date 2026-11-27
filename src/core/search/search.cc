@@ -14,6 +14,7 @@
 #include <uni_algo/case.h>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <ranges>
 #include <type_traits>
@@ -85,6 +86,7 @@ struct ProfileBuilder {
         [](const AstAttributeNode& n) { return absl::StrCat("Attribute{w=", n.weight, "}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
         [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
+        [](const AstIsMissingNode& n) { return absl::StrCat("IsMissing{}"); },
         [](const AstGeoNode& n) {
           return absl::StrCat("Geo{", n.lat, " ", n.lon, " ", n.radius, " ", n.unit, "}");
         },
@@ -178,6 +180,24 @@ concept CompositeNode = (requires(const Node& node) { node.node; }) ||
                         (requires(const Node& node) { node.nodes; }) ||
                         (requires(const Node& node) { node.filter; });
 
+// The schema type an index class serves.
+template <typename T>
+constexpr SchemaField::FieldType kFieldTypeOf = [] {
+  using Index = decay_t<T>;
+  if constexpr (is_same_v<Index, TextIndex>)
+    return SchemaField::TEXT;
+  else if constexpr (is_same_v<Index, NumericIndex>)
+    return SchemaField::NUMERIC;
+  else if constexpr (is_same_v<Index, TagIndex>)
+    return SchemaField::TAG;
+  else if constexpr (is_same_v<Index, GeoIndex>)
+    return SchemaField::GEO;
+  else if constexpr (is_same_v<Index, BaseVectorIndex>)
+    return SchemaField::VECTOR;
+  else
+    static_assert(sizeof(Index) == 0, "no schema type for this index");
+}();
+
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
@@ -190,9 +210,16 @@ struct BasicSearch {
     profile_builder_ = ProfileBuilder{};
   }
 
+  // The attribute under `field` if it is NOINDEX: it has no index, so its clauses match nothing
+  // instead of failing.
+  const SchemaField* NoIndexField(string_view field) const {
+    const SchemaField* attribute = indices_->GetSchema().Find(field);
+    return attribute && (attribute->flags & SchemaField::NOINDEX) ? attribute : nullptr;
+  }
+
   BaseIndex* GetBaseIndex(string_view field) {
     auto index = indices_->GetIndex(field);
-    if (!index) {
+    if (!index && !NoIndexField(field)) {
       error_ = absl::StrCat("Invalid field: ", field);
       return nullptr;
     }
@@ -205,6 +232,13 @@ struct BasicSearch {
 
     auto base_index = GetBaseIndex(field);
     if (!base_index) {
+      // A NOINDEX attribute keeps its type, and a vector one has nothing to search at all.
+      if (const auto* noindex = error_.empty() ? NoIndexField(field) : nullptr; noindex) {
+        if (noindex->type != kFieldTypeOf<T>)
+          error_ = absl::StrCat("Wrong access type for field: ", field);
+        else if (noindex->type == SchemaField::VECTOR)
+          error_ = absl::StrCat("Invalid field: ", field);
+      }
       return nullptr;
     }
 
@@ -215,6 +249,15 @@ struct BasicSearch {
     }
 
     return casted_ptr;
+  }
+
+  // A raw "" asks for the empty value, which only INDEXEMPTY attributes keep. Reports that for
+  // `field` unless an error (unknown field, wrong type) is pending already.
+  bool EmptyValueRejected(string_view field) {
+    if (!error_.empty() || (indices_->GetSchema().Find(field)->flags & SchemaField::INDEXEMPTY))
+      return false;
+    error_ = "Use `INDEXEMPTY` in field creation in order to index and query for empty strings";
+    return true;
   }
 
   BaseSortIndex* GetSortIndex(string_view field) {
@@ -284,6 +327,21 @@ struct BasicSearch {
     // If sort index doesn't exist try regular index
     BaseIndex* base_index = GetBaseIndex(active_field);
     return base_index ? IndexResult{base_index->GetAllDocsWithNonNullValues()} : IndexResult{};
+  }
+
+  // Via the schema: HNSW attributes have no index here, and NOINDEX ones must fail.
+  IndexResult Search(const AstIsMissingNode& node, string_view active_field) {
+    const SchemaField* field = indices_->GetSchema().Find(active_field);
+    if (!field) {
+      error_ = absl::StrCat("Invalid field: ", active_field);
+      return IndexResult{};
+    }
+    if (!(field->flags & SchemaField::INDEXMISSING)) {
+      error_ = absl::StrCat("'ismissing' requires defining the field with 'INDEXMISSING': ",
+                            active_field);
+      return IndexResult{};
+    }
+    return IndexResult{indices_->GetMissingDocs(*field)};
   }
 
   template <TagType T> IndexResult Search(const AstAffixNode<T>& node, string_view active_field) {
@@ -483,15 +541,14 @@ struct BasicSearch {
     return matches;
   }
 
-  // Phrase match on a single TEXT index. Sets error_ and returns empty if the index was
-  // created with NOOFFSETS. Stems are never consulted — phrase semantics require the exact
-  // surface form. Stopwords inside the phrase drop without advancing positions, matching the
-  // index-side tokenizer.
+  // Phrase match on a single TEXT index; "" asks for the empty value. Stems are never consulted —
+  // phrase semantics require the exact surface form. Stopwords inside the phrase drop without
+  // advancing positions, matching the index-side tokenizer.
   IndexResult MatchPhraseInIndex(TextIndex* text_index, const AstPhraseNode& node) {
-    if (!text_index->StoresPositions()) {
-      error_ = "phrase queries require offsets; index was created with NOOFFSETS";
-      return IndexResult{};
-    }
+    if (node.raw.empty())
+      return IndexResult{text_index->GetEmptyDocs()};
+    if (!text_index->StoresPositions())
+      return MatchWords(absl::MakeConstSpan(&text_index, 1), node.raw);
 
     auto lists = FetchPhrasePostingLists(text_index, node.raw);
     if (lists.empty())
@@ -504,16 +561,40 @@ struct BasicSearch {
     return IndexResult{IntersectAdjacentDocs(lists, node.slop)};
   }
 
+  // Without positions (NOOFFSETS) a phrase is the AND of its words, each in any of `indices`.
+  IndexResult MatchWords(absl::Span<TextIndex* const> indices, string_view phrase) {
+    absl::InlinedVector<IndexResult, 4> words;
+    for (const string& word : indices.front()->TokenizePhraseQuery(phrase)) {
+      absl::InlinedVector<IndexResult, 4> lists;
+      for (auto* index : indices) {
+        const auto* list = index->MatchingNoStem(word);
+        if (scorer_)
+          AddMatchedTerm(index, word, list);
+        if (list)
+          lists.emplace_back(list);
+      }
+      words.push_back(UnifyResults(std::move(lists), LogicOp::OR));
+    }
+    return UnifyResults(std::move(words), LogicOp::AND);
+  }
+
   // Quoted phrase: dispatches per scoping. `@field:"..."` runs against one index; bare `"..."`
-  // ORs results across all TEXT indices, matching the term-lookup pattern.
+  // ORs the matches of all TEXT indices, except that without positions (NOOFFSETS) its words may
+  // sit in different TEXT indices.
   IndexResult Search(const AstPhraseNode& node, string_view active_field) {
     if (!active_field.empty()) {
       auto* index = GetIndex<TextIndex>(active_field);
+      if (node.raw.empty() && EmptyValueRejected(active_field))
+        return IndexResult{};
       return index ? MatchPhraseInIndex(index, node) : IndexResult{};
     }
 
+    auto indices = indices_->GetAllTextIndices();
+    if (!node.raw.empty() && !indices.empty() && !indices.front()->StoresPositions())
+      return MatchWords(indices, node.raw);
+
     vector<IndexResult> sub_results;
-    for (auto* index : indices_->GetAllTextIndices())
+    for (auto* index : indices)
       sub_results.push_back(MatchPhraseInIndex(index, node));
     return UnifyResults(std::move(sub_results), LogicOp::OR);
   }
@@ -538,6 +619,11 @@ struct BasicSearch {
   // {tags | ...}: Unify results for all tags
   IndexResult Search(const AstTagsNode& node, string_view active_field) {
     auto* tag_index = GetIndex<TagIndex>(active_field);
+
+    // A raw "" asks for the empty tag, which only INDEXEMPTY attributes keep; {" "} is no error.
+    if (rng::any_of(node.tags, [](const auto& t) { return t.affix.empty(); }) &&
+        EmptyValueRejected(active_field))
+      return IndexResult{};
     if (!tag_index)
       return IndexResult{};
 
@@ -756,9 +842,7 @@ struct BasicSearch {
       case AstNode::Type::ATTRIBUTE:
         return std::move(children[0]);  // pass the single child's result through
       case AstNode::Type::OPTIONAL:
-        // ~ never fails outward and never filters: drop the child's error and match all docs.
-        // The node is entered only without a pending error, so there is none to restore.
-        error_ = string{};
+        // ~ never filters: it matches all docs, and an error in its subtree fails the query.
         return IndexResult{&indices_->GetAllDocs()};
       case AstNode::Type::LOGICAL:
         return UnifyResults(children, static_cast<const AstLogicalNode&>(*frame.node).op);
@@ -1178,9 +1262,34 @@ IndicesOptions::IndicesOptions() {
   stopwords = kDefaultStopwords;
 }
 
+DocBitMatrix::DocBitMatrix(size_t rows, PMR_NS::memory_resource* mr) : rows_{rows}, words_{mr} {
+}
+
+void DocBitMatrix::Set(size_t row, DocId doc) {
+  const size_t block = doc / kDocsPerWord * rows_;
+  if (block >= words_.size())
+    words_.resize(block + rows_);
+  words_[block + row] |= Bit(doc);
+}
+
+void DocBitMatrix::Clear(DocId doc) {
+  const size_t block = doc / kDocsPerWord * rows_;
+  for (size_t i = block; i < min(block + rows_, words_.size()); i++)
+    words_[i] &= ~Bit(doc);
+}
+
+vector<DocId> DocBitMatrix::Row(size_t row) const {
+  vector<DocId> docs;
+  for (size_t i = row, first = 0; i < words_.size(); i += rows_, first += kDocsPerWord) {
+    for (uint64_t bits = words_[i]; bits; bits &= bits - 1)
+      docs.push_back(static_cast<DocId>(first + std::countr_zero(bits)));
+  }
+  return docs;
+}
+
 FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
                            PMR_NS::memory_resource* mr, const Synonyms* synonyms)
-    : schema_{schema}, options_{options}, synonyms_{synonyms} {
+    : schema_{schema}, options_{options}, missing_docs_{0, mr}, synonyms_{synonyms} {
   CreateIndices(mr);
   CreateSortIndices();
 }
@@ -1189,11 +1298,14 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
   for (const auto& [alias, field] : schema_.Ordered()) {
     if (field->flags & SchemaField::NOINDEX)
       continue;
+    if (field->flags & SchemaField::INDEXMISSING)
+      missing_fields_.push_back(field);
     if (auto index = CreateIndex(alias, *field, mr); index) {
       add_list_.emplace_back(field->identifier, index.get());
       indices_[alias] = std::move(index);
     }
   }
+  missing_docs_ = DocBitMatrix{missing_fields_.size(), mr};
 }
 
 unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view alias, const SchemaField& field,
@@ -1203,7 +1315,8 @@ unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view alias, const SchemaF
       const auto& tparams = std::get<SchemaField::TextParams>(field.special_params);
       auto idx = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
                                         tparams.no_stem, schema_.default_language,
-                                        schema_.language_field, !options_.no_offsets);
+                                        schema_.language_field, !options_.no_offsets,
+                                        (field.flags & SchemaField::INDEXEMPTY) != 0);
       idx->set_field_ident(alias);  // scoring stats and the schema weight are per attribute
       text_indices_.push_back(idx.get());
       return idx;
@@ -1213,7 +1326,8 @@ unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view alias, const SchemaF
       return make_unique<NumericIndex>(nparams.block_size, mr);
     }
     case SchemaField::TAG:
-      return make_unique<TagIndex>(mr, std::get<SchemaField::TagParams>(field.special_params));
+      return make_unique<TagIndex>(mr, std::get<SchemaField::TagParams>(field.special_params),
+                                   (field.flags & SchemaField::INDEXEMPTY) != 0);
     case SchemaField::VECTOR: {
       const auto& vparams = std::get<SchemaField::VectorParams>(field.special_params);
       if (vparams.use_hnsw)  // served by the global HNSW index
@@ -1265,6 +1379,10 @@ bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
     return false;
   }
 
+  for (size_t row = 0; row < missing_fields_.size(); row++) {
+    if (access.IsFieldMissing(missing_fields_[row]->identifier))
+      missing_docs_.Set(row, doc);
+  }
   all_ids_.insert(rng::upper_bound(all_ids_, doc), doc);
   return true;
 }
@@ -1279,8 +1397,17 @@ void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
 
   for (auto& [identifier, index] : add_list_)
     index->Remove(doc, access, identifier);
+  missing_docs_.Clear(doc);
 
   all_ids_.erase(it);
+}
+
+vector<DocId> FieldIndices::GetMissingDocs(const SchemaField& field) const {
+  const size_t row = rng::find(missing_fields_, &field) - missing_fields_.begin();
+  DCHECK_LT(row, missing_fields_.size());
+  vector<DocId> docs = missing_docs_.Row(row);
+  DCHECK(rng::includes(all_ids_, docs));
+  return docs;
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
@@ -1321,6 +1448,7 @@ size_t FieldIndices::GetNonPmrMemoryUsage() const {
     mem += add_list_.capacity() * sizeof(add_list_[0]);
   if (text_indices_.size() > 16)
     mem += text_indices_.capacity() * sizeof(text_indices_[0]);
+  mem += missing_fields_.capacity() * sizeof(missing_fields_[0]);
   return mem;
 }
 

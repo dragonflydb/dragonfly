@@ -117,6 +117,9 @@ FlowInfo& SetupFlowConnection(CommandContext* cmd_cntx, DflyCmd::ReplicaInfo* re
   conn_cntx->conn()->SetConnectionMemoryAccounting(false);
   flow.conn = cmd_cntx->conn();
   flow.eof_token = *eof_token;
+
+  // A repeated DFLY FLOW must not inherit the partial sync negotiated by an earlier one.
+  flow.start_partial_sync_at.reset();
   return flow;
 }
 
@@ -320,7 +323,7 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
           << " flow: " << flow_id_str << " seq: " << flow_lsn.value_or(-1);
 
-  if (master_id != sf_->master_replid()) {
+  if (master_id != sf_->replica_manager().master_replid()) {
     return cmd_cntx->SendError(kBadMasterId);
   }
 
@@ -358,7 +361,8 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
       flow.journal_held = true;
     }
 
-    std::optional<Replica::LastMasterSyncData> my_last_master = sf_->GetLastMasterData();
+    std::optional<Replica::LastMasterSyncData> my_last_master =
+        sf_->replica_manager().GetLastMasterData();
 
     // Skip full sync if we stem from the same master and this node was promoted (my_last_master)
     const bool failover_match =
@@ -366,7 +370,7 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     // Skip full sync if we have the same parent in a cascaded setup
     const bool cascaded_match = replica_last_master &&
-                                replica_last_master->id == sf_->GetLineageId() &&
+                                replica_last_master->id == sf_->replica_manager().GetLineageId() &&
                                 absl::GetFlag(FLAGS_experimental_cascaded_partial_sync);
 
     // Case for partial sync
@@ -461,17 +465,12 @@ void DflyCmd::StartStable(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
 
   util::fb2::LockGuard lk{replica_ptr->GetMutex()};
-  auto repl_state = replica_ptr->GetReplicaState();
-  if (repl_state != SyncState::FULL_SYNC && repl_state != SyncState::PREPARATION) {
-    cmd_cntx->SendError(kInvalidState);
-    return;
-  }
 
-  // This might happen if a flow abruptly disconnected before sending the SYNC request.
-  if (!replica_ptr->AllFlowsConnected()) {
-    cmd_cntx->SendError(kInvalidState);
+  // DFLY SYNC may be skipped only if every flow syncs partially, as only it starts a full sync.
+  SyncState expected =
+      replica_ptr->AllFlowsPartial() ? SyncState::PREPARATION : SyncState::FULL_SYNC;
+  if (!CheckReplicaStateOrReply(*replica_ptr, expected, cmd_cntx))
     return;
-  }
 
   {
     Transaction::Guard tg{cmd_cntx->tx()};
@@ -689,17 +688,24 @@ void DflyCmd::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
+  if (!ServerState::IsMaster())
+    return cmd_cntx->SendError("Replica cannot load data");
+
+  // Before FlushAll: no other load may run, and no write lands between the flush and the load.
+  auto scope = sf_->service().EnterExclusiveLoading();
+  if (!scope)
+    return cmd_cntx->SendError(kLoadingErr);
+
   if (existing_keys == ServerFamily::LoadExistingKeys::kFail) {
     sf_->FlushAll(cmd_cntx->server_conn_cntx()->ns);
   }
 
-  if (auto fut_ec = sf_->Load(filename, existing_keys); fut_ec) {
-    GenericError ec = fut_ec->Get();
-    if (ec) {
-      string msg = ec.Format();
-      LOG(WARNING) << "Could not load file " << msg;
-      return cmd_cntx->SendError(msg);
-    }
+  GenericError ec = sf_->Load(filename, existing_keys).Get();
+  scope.reset();
+  if (ec) {
+    string msg = ec.Format();
+    LOG(WARNING) << "Could not load file " << msg;
+    return cmd_cntx->SendError(msg);
   }
 
   cmd_cntx->SendOk();
@@ -792,7 +798,7 @@ auto DflyCmd::CreateSyncSession(ConnectionState* state) -> std::pair<uint32_t, u
 
   unsigned flow_count = shard_set->size();
   auto err_handler = [this, sync_id](const GenericError& err) {
-    LOG(INFO) << "Replication error: " << err.Format();
+    LOG_IF(INFO, !err.IsExplicitCancellation()) << "Replication error: " << err.Format();
 
     // Spawn external fiber to allow destructing the context from outside
     // and return from the handler immediately.

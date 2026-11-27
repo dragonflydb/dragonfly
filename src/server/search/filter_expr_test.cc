@@ -264,8 +264,13 @@ TEST(FilterExprTest, UnaryMinus) {
 
 TEST(FilterExprTest, DivisionByZero) {
   DocValues doc{{"val", 1.0}};
-  // Division by zero -> monostate -> falsy
+
+  // Division by zero follows IEEE 754: inf, -inf or nan.
   EXPECT_FALSE(EvalBool("@val / 0 == 1", doc));
+  EXPECT_EQ(Eval("@val / 0", doc), Value{std::numeric_limits<double>::infinity()});
+  EXPECT_EQ(Eval("0 - @val / 0", doc), Value{-std::numeric_limits<double>::infinity()});
+  const Value mod = Eval("@val % 0", doc);
+  EXPECT_TRUE(std::holds_alternative<double>(mod) && std::isnan(std::get<double>(mod)));
 }
 
 TEST(FilterExprTest, NaNBehavior) {
@@ -774,12 +779,12 @@ TEST(FilterExprTest, ReducerMaxSkipsNull) {
 }
 
 TEST(FilterExprTest, ReducerMinAllNull) {
-  // All values null -> MIN returns null (monostate).
+  // All values null -> MIN returns inf.
   std::vector<DocValues> values = {DocValues{}, DocValues{}};
   auto step = MakeGroupStep({}, {Reducer{"val", "r", FindReducerFunc(ReducerFunc::MIN)}});
   auto result = Process(std::move(values), {"r"}, {step});
   ASSERT_EQ(result.values.size(), 1);
-  EXPECT_EQ(result.values[0].at("r"), Value{});
+  EXPECT_EQ(result.values[0].at("r"), Value{std::numeric_limits<double>::infinity()});
 }
 
 TEST(FilterExprTest, ReducerMinMaxSkipNaN) {

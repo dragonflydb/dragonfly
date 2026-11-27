@@ -5,7 +5,7 @@
 #include "server/server_family.h"
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/random/random.h>  // for master_replid_ generation.
+#include <absl/random/random.h>  // for master_replid generation.
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_replace.h>
@@ -30,11 +30,13 @@
 #include "absl/strings/ascii.h"
 #include "core/detail/gen_utils.h"
 #include "facade/error.h"
+#include "facade/facade_types.h"
 #include "server/common.h"
 #include "server/slowlog.h"
 
 extern "C" {
 #include "redis/redis_aux.h"
+#include "redis/util.h"
 }
 
 #include "base/cycle_clock.h"
@@ -69,6 +71,7 @@ extern "C" {
 #include "server/journal/aof_manifest.h"
 #include "server/journal/aof_replay.h"
 #include "server/journal/aof_streamer.h"
+#include "server/journal/executor.h"
 #include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
@@ -114,8 +117,15 @@ struct CronExprFlag {
 static bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err);
 static std::string AbslUnparseFlag(const CronExprFlag& flag);
 
+using facade::operator""_MB;
+
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(bool, aof, false, "If true, each shard logs its writes to an append-only file in --dir");
+ABSL_FLAG(strings::MemoryBytesFlag, aof_rewrite_min_size, 64_MB,
+          "With --aof, the log size below which no automatic checkpoint runs");
+ABSL_FLAG(uint32_t, aof_rewrite_percentage, 100,
+          "With --aof, an automatic checkpoint runs once the log reaches this percentage of the "
+          "base size, and at least --aof_rewrite_min_size. 0 disables automatic checkpoints");
 ABSL_FLAG(string, dbfilename, "dump-{timestamp}",
           "the filename to save/load the DB, instead of/with {timestamp} can be used {Y}, {m}, and "
           "{d} macros");
@@ -145,13 +155,6 @@ ABSL_FLAG(uint32_t, pause_wait_timeout, 1,
           "Timeout in seconds, to set up the pause for all connections for CLIENT PAUSE command "
           "and cluster slot migration finalization procedure.");
 
-ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
-ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
-// Disable EC2 metadata by default, or if a users credentials are invalid the
-// AWS client will spent 30s trying to connect to inaccessable EC2 endpoints
-// to load the credentials.
-ABSL_FLAG(bool, s3_ec2_metadata, false,
-          "whether to load credentials and configuration from EC2 metadata");
 ABSL_RETIRED_FLAG(bool, s3_sign_payload, true,
                   "Deprecated: S3 snapshot uploads always use an unsigned payload.");
 
@@ -165,9 +168,6 @@ ABSL_FLAG(string, availability_zone, "",
           "server availability zone, used by clients to read from local-zone replicas");
 
 ABSL_FLAG(bool, keep_legacy_memory_metrics, false, "legacy metrics format");
-// TODO deprecate when flipped in production
-ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
-          "when set, preserves journal offsets after REPLICAOF NO ONE");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
@@ -179,6 +179,10 @@ ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
+ABSL_DECLARE_FLAG(std::string, tiered_prefix);
+#ifdef WITH_TIERING
+ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
+#endif
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 #define RETURN_ON_ERROR(cond, m)                                           \
@@ -309,62 +313,16 @@ string UnknownCmd(string cmd, facade::ParsedArgs args, size_t num_args) {
                       absl::StrJoin(args.begin(), end, ", ", CmdArgListFormatter()));
 }
 
-// Returns an error instead of terminating the process: this is called at runtime by
-// SAVE/LOAD commands, where a transient failure (e.g. missing credentials) must not kill
-// an already serving instance.
-io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> CreateCloudSnapshotStorage(
-    std::string_view uri) {
-  auto make_err = [](std::error_code ec, std::string_view what) {
-    return nonstd::make_unexpected(GenericError{ec, absl::StrCat("Failed to initialize ", what)});
-  };
-
-  if (detail::IsS3Path(uri)) {
-    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(absl::GetFlag(FLAGS_s3_endpoint),
-                                                              absl::GetFlag(FLAGS_s3_use_https),
-                                                              absl::GetFlag(FLAGS_s3_ec2_metadata));
-    auto ec = shard_set->pool()->GetNextProactor()->Await(
-        [&] { return aws->Init(detail::kBucketConnectMs); });
-    if (ec)
-      return make_err(ec, "AWS S3 snapshot storage");
-    return aws;
-  } else if (detail::IsGCSPath(uri)) {
-#ifdef WITH_GCP
-    auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
-    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
-    if (ec)
-      return make_err(ec, "GCS snapshot storage");
-    return gcs;
-#else
-    return nonstd::make_unexpected(
-        GenericError{make_error_code(errc::not_supported), "Compiled without GCP support"});
-#endif
-  } else if (detail::IsAzurePath(uri)) {
-    auto azure = std::make_shared<detail::AzureSnapshotStorage>();
-    auto ec = shard_set->pool()->GetNextProactor()->Await(
-        [&] { return azure->Init(uri, detail::kBucketConnectMs); });
-    if (ec)
-      return make_err(ec, "Azure snapshot storage");
-    return azure;
-  }
-  return nonstd::make_unexpected(GenericError{make_error_code(errc::invalid_argument),
-                                              absl::StrCat("Unknown cloud storage ", uri)});
-}
-
 // Cloud paths need their own storage, other paths use the server's default storage.
 io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> SelectSnapshotStorage(
     std::string_view path, std::shared_ptr<detail::SnapshotStorage> default_storage) {
   if (detail::IsCloudPath(path))
-    return CreateCloudSnapshotStorage(path);
+    return detail::CreateCloudSnapshotStorage(path);
   return default_storage;
 }
 
 template <typename T> void UpdateMax(T* maxv, T current) {
   *maxv = std::max(*maxv, current);
-}
-
-void SetMasterFlagOnAllThreads(bool is_master) {
-  auto cb = [is_master](unsigned, auto*) { ServerState::tlocal()->is_master = is_master; };
-  shard_set->pool()->AwaitBrief(cb);
 }
 
 std::optional<cron::cronexpr> InferSnapshotCronExpr() {
@@ -410,51 +368,40 @@ void ClientInfo(facade::ParsedArgs args, CommandContext* cmd_cntx) {
   auto* conn = cmd_cntx->conn();
   string info = conn->GetClientInfo();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  return rb->SendBulkString(info);
+  return rb->SendVerbatimString(info);
 }
 
-enum class ClientListType { kNormal, kMaster, kReplica, kPubsub };
+enum class ClientListType { kNormal, kMaster, kReplica, kPubsub, kInternal };
 
 struct ClientListFilter {
   optional<ClientListType> type;
   absl::flat_hash_set<uint32_t> ids;
 };
 
+template <class T> consteval auto ClientTypeRule(optional<ClientListType> T::*field) {
+  return Choice("TYPE", field, FormattableError("Unknown client type '$0'"), "NORMAL",
+                ClientListType::kNormal, "MASTER", ClientListType::kMaster, "REPLICA",
+                ClientListType::kReplica, "SLAVE", ClientListType::kReplica, "PUBSUB",
+                ClientListType::kPubsub);
+}
+
+// ID takes one or more client ids, up to the last argument.
+void ReadClientIds(CmdArgParser* parser, ClientListFilter* filter) {
+  if (!parser->HasNext())
+    parser->Report(CmdArgParser::INVALID_CASES);
+  while (parser->HasNext())
+    filter->ids.insert(parser->Next<uint32_t>("Invalid client ID"));
+}
+
 optional<ClientListFilter> ParseClientListFilter(CmdArgParser parser, CommandContext* cmd_cntx) {
-  ClientListFilter filter;
-  if (!parser.HasNext())
-    return filter;
-
-  if (parser.Check("TYPE")) {
-    if (!parser.HasNext()) {
-      cmd_cntx->SendError(facade::kSyntaxErr);
-      return nullopt;
-    }
-    string_view raw = parser.Peek();
-    auto mapped =
-        parser.TryMapNext("NORMAL", ClientListType::kNormal, "MASTER", ClientListType::kMaster,
-                          "REPLICA", ClientListType::kReplica, "SLAVE", ClientListType::kReplica,
-                          "PUBSUB", ClientListType::kPubsub);
-    if (!mapped) {
-      cmd_cntx->SendError(StrCat("Unknown client type '", raw, "'"));
-      return nullopt;
-    }
-    filter.type = *mapped;
-  } else if (parser.Check("ID")) {
-    if (!parser.HasNext()) {
-      cmd_cntx->SendError(facade::kSyntaxErr);
-      return nullopt;
-    }
-    while (parser.HasNext()) {
-      filter.ids.insert(parser.Next<uint32_t>("Invalid client ID"));
-    }
-  } else {
-    cmd_cntx->SendError(facade::kSyntaxErr);
-    return nullopt;
-  }
-
+  static constexpr auto kGrammar = Compile(Options(
+      OneOf(kSyntaxErr, ClientTypeRule(&ClientListFilter::type), Action("ID", &ReadClientIds))));
+  ClientListFilter filter = kGrammar.Apply(&parser);
   if (!parser.Finalize()) {
-    cmd_cntx->SendError(parser.TakeError().MakeReply());
+    auto err = parser.TakeError();
+
+    // A valid TYPE ends the filters, so an error after it is a syntax error.
+    cmd_cntx->SendError(filter.type ? ErrorReply{kSyntaxErr} : err.MakeReply());
     return nullopt;
   }
   return filter;
@@ -466,9 +413,13 @@ ClientListType ClassifyConnection(facade::Connection* conn) {
     return ClientListType::kNormal;
 
   // Replica takes priority over PUBSUB; kMaster is added separately by
-  // GetMasterLinkClientInfo (not produced here).
+  // ReplicaManager::GetMasterLinkClientInfo (not produced here).
   if (base_cntx->replica_conn)
     return ClientListType::kReplica;
+
+  // Slot migration flows match no TYPE.
+  if (base_cntx->slot_migration_conn)
+    return ClientListType::kInternal;
 
   auto* dfly_cntx = static_cast<const ConnectionContext*>(base_cntx);
   const auto& sub_info = dfly_cntx->conn_state.subscribe_info;
@@ -501,7 +452,7 @@ void ClientList(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
         return;
 
       string info = dcon->GetClientInfo(thread_index);
-      absl::base_internal::SpinLockHolder l(&mu);
+      absl::base_internal::SpinLockHolder l(mu);
       client_info.push_back(std::move(info));
     };
 
@@ -512,9 +463,9 @@ void ClientList(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
 
   bool want_master = !filter->type.has_value() || *filter->type == ClientListType::kMaster;
   if (want_master) {
-    for (auto& entry : server_family->GetMasterLinkClientInfo()) {
-      if (filter->ids.empty() || filter->ids.contains(entry.client_id))
-        client_info.push_back(std::move(entry.info));
+    for (auto& entry : server_family->replica_manager().GetMasterLinkClientInfo()) {
+      if (filter->ids.empty() || filter->ids.contains(entry.id))
+        client_info.push_back(facade::FormatClientInfo(entry));
     }
   }
 
@@ -681,58 +632,128 @@ void ClientId(facade::ParsedArgs args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendLong(cmd_cntx->conn()->GetClientId());
 }
 
+struct ClientKillOpts {
+  optional<int64_t> id, max_age;
+  optional<ClientListType> type;
+  optional<string_view> user, addr, laddr;
+  bool skipme = true;
+  bool legacy = false;  // CLIENT KILL <addr>
+
+  bool Matches(int64_t client_id, ClientListType client_type, optional<string_view> client_user,
+               time_t age, string_view client_addr, string_view client_laddr) const {
+    auto opt_eq = []<typename T>(const optional<T>& opt, const T& v) { return !opt || *opt == v; };
+    return opt_eq(id, client_id) && opt_eq(type, client_type) && (!user || client_user == user) &&
+           opt_eq(addr, client_addr) && opt_eq(laddr, client_laddr) &&
+           (!max_age || age >= *max_age);
+  }
+};
+
+// string2ll rejects '+', spaces and leading zeros, which the parser's integers accept.
+int64_t ParseClientId(string_view val, RuleError& err) {
+  long long num = 0;
+  if (!string2ll(val.data(), val.size(), &num) || num <= 0)
+    err = {true, "client-id should be greater than 0"};
+  return num;
+}
+
+int64_t ParseMaxAge(string_view val, RuleError& err) {
+  long long num = 0;
+  if (!string2ll(val.data(), val.size(), &num))
+    err = {true, "maxage is not an integer or out of range"};
+  else if (num <= 0)
+    err = {true, "maxage should be greater than 0"};
+  return num;
+}
+
+void ReadKillUser(CmdArgParser* parser, ClientKillOpts* filter) {
+  filter->user = parser->Next();
+  if (!ServerState::tlocal()->user_registry->GetRegistryWithLock().registry.contains(*filter->user))
+    parser->ReportCustom(StrCat("No such user '", *filter->user, "'"));
+}
+
+nonstd::expected<ClientKillOpts, ErrorReply> ParseClientKillOpts(facade::ParsedArgs args) {
+  static constexpr auto kGrammar =
+      Compile(Options(Field("ID", &ClientKillOpts::id, &ParseClientId),
+                      ClientTypeRule(&ClientKillOpts::type), Action("USER", &ReadKillUser),
+                      Field("ADDR", &ClientKillOpts::addr), Field("LADDR", &ClientKillOpts::laddr),
+                      Choice("SKIPME", &ClientKillOpts::skipme, "YES", true, "NO", false),
+                      Field("MAXAGE", &ClientKillOpts::max_age, &ParseMaxAge)));
+
+  CmdArgParser parser{args};
+  ClientKillOpts filter;
+  if (args.size() == 1) {
+    filter.addr = parser.Next();
+    filter.skipme = false;
+    filter.legacy = true;
+  } else {
+    kGrammar.Apply(&parser, &filter);
+  }
+  if (!parser.Finalize())
+    return nonstd::make_unexpected(parser.TakeError().MakeReply());
+  return filter;
+}
+
 void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners,
                 ServerFamily* server_family, CommandContext* cmd_cntx) {
-  std::function<bool(facade::Connection * conn)> evaluator;
+  if (args.empty())
+    return cmd_cntx->SendError(WrongNumArgsError("client|kill"), kSyntaxErrType);
 
-  if (args.size() == 1) {
-    string_view ip_port = args[0];
-    if (ip_port.find(':') != ip_port.npos) {
-      evaluator = [ip_port](facade::Connection* conn) {
-        return conn->RemoteEndpointStr() == ip_port;
-      };
-    }
-  } else if (args.size() == 2) {
-    string filter_type = absl::AsciiStrToUpper(args[0]);
-    string_view filter_value = args[1];
-    if (filter_type == "ADDR") {
-      evaluator = [filter_value](facade::Connection* conn) {
-        return conn->RemoteEndpointStr() == filter_value;
-      };
-    } else if (filter_type == "LADDR") {
-      evaluator = [filter_value](facade::Connection* conn) {
-        return conn->LocalBindStr() == filter_value;
-      };
-    } else if (filter_type == "ID") {
-      uint32_t id;
-      if (absl::SimpleAtoi(filter_value, &id)) {
-        if (server_family->IsMasterLinkClientId(id)) {
-          return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
-        }
-        evaluator = [id](facade::Connection* conn) { return conn->GetClientId() == id; };
-      }
-    }
-    // TODO: Add support for KILL USER/TYPE/SKIPME
-  }
+  auto filter = ParseClientKillOpts(args);
+  if (!filter)
+    return cmd_cntx->SendError(filter.error());
 
-  if (!evaluator) {
-    return cmd_cntx->SendError(kSyntaxErr);
+  // The master link is not killable; refuse a TYPE master or ID request that matches it.
+  if (filter->type == ClientListType::kMaster || filter->id) {
+    for (const facade::ClientInfo& link :
+         server_family->replica_manager().GetMasterLinkClientInfo()) {
+      if (filter->Matches(link.id, ClientListType::kMaster, nullopt, link.age, link.addr,
+                          link.laddr))
+        return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
+    }
   }
+  if (filter->type == ClientListType::kMaster)
+    return cmd_cntx->rb()->SendLong(0);
 
   const bool is_admin_request = cmd_cntx->conn()->IsPrivileged();
+  facade::Connection* self = cmd_cntx->conn();
 
+  // Filters that name specific connections report the admin ones they can not kill.
+  const bool targeted =
+      filter->id || filter->addr || filter->laddr || filter->type == ClientListType::kReplica;
+  const time_t now = time(nullptr);
+
+  auto evaluator = [&](facade::Connection* conn) {
+    auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
+
+    // Each address costs a syscall; read it only for an ADDR or LADDR filter.
+    return filter->Matches(conn->GetClientId(), ClassifyConnection(conn),
+                           cntx ? optional<string_view>{cntx->authed_username} : nullopt,
+                           now - conn->creation_time(),
+                           filter->addr ? conn->RemoteEndpointStr() : string{},
+                           filter->laddr ? conn->LocalBindStr() : string{});
+  };
+
+  // HTTP API connections have no close-after-reply path.
+  const bool kill_self = !filter->skipme && !self->IsHttp() && evaluator(self);
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
 
+  // Kill only after every thread has collected: closing a replica's main connection closes its
+  // flows on the other threads.
+  util::fb2::Barrier collected(shard_set->pool()->size());
   auto cb = [&](unsigned idx, ProactorBase* p) mutable {
     // Step 1 aggregate the per thread connections from all listeners
-    std::vector<facade::Connection::WeakRef> connections;
+    std::vector<std::pair<facade::Connection::WeakRef, bool>> connections;
     auto traverse_cb = [&](unsigned idx, util::Connection* conn) {
       facade::Connection* dconn = static_cast<facade::Connection*>(conn);
-      if (evaluator(dconn)) {
+
+      // The caller is closed after the reply; shut down connections were already killed.
+      if (dconn != self && dconn->socket()->IsOpen() && evaluator(dconn)) {
         if (is_admin_request || !dconn->IsPrivileged()) {
-          connections.push_back(dconn->Borrow());
-        } else {
+          if (!dconn->IsMigrating())
+            connections.emplace_back(dconn->Borrow(),
+                                     ClassifyConnection(dconn) == ClientListType::kReplica);
+        } else if (targeted) {
           kill_errors.fetch_add(1);
         }
       }
@@ -740,11 +761,18 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
     for (auto* listener : listeners) {
       listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
     }
+    collected.Wait();
 
     // Step 2 kill the clients
-    for (auto& tcon : connections) {
+    for (auto& [tcon, replica] : connections) {
       facade::Connection* conn = tcon.Get();
-      if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
+
+      // Expired: closed or migrating. Replica connections do not migrate, so theirs closed.
+      if (conn == nullptr) {
+        if (replica)
+          killed_connections.fetch_add(1);
+      } else if (!conn->IsMigrating() &&
+                 conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
         conn->ShutdownSelfBlocking();
         killed_connections.fetch_add(1);
       }
@@ -753,8 +781,17 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
 
   shard_set->pool()->AwaitFiberOnAll(cb);
 
+  if (kill_self) {
+    self->RequestCloseAfterReply();
+    killed_connections.fetch_add(1);
+  }
+
   if (kill_errors.load() == 0) {
-    return cmd_cntx->rb()->SendLong(killed_connections.load());
+    if (!filter->legacy)
+      return cmd_cntx->rb()->SendLong(killed_connections.load());
+    if (killed_connections.load() > 0)
+      return cmd_cntx->rb()->SendOk();
+    return cmd_cntx->SendError(kNoSuchClient);
   } else {
     return cmd_cntx->SendError(absl::StrCat("Killed ", killed_connections.load(),
                                             " client(s), but unable to kill ", kill_errors.load(),
@@ -1005,15 +1042,6 @@ GenericError RewriteConfigFile() {
   return {};
 }
 
-bool IsMaster() {
-  // We call this function on startup where tlocal() == nullptr. We handle
-  // this case below.
-  if (!ServerState::tlocal()) {
-    return true;
-  }
-  return ServerState::tlocal()->is_master;
-}
-
 // Returns {acked, running} for the supplied replica snapshot, reading ACKs on their owning shards.
 pair<uint32_t, uint32_t> CountAckedReplicas(
     const vector<shared_ptr<DflyCmd::ReplicaInfo>>& replicas, const vector<LSN>& target_lsns,
@@ -1022,7 +1050,7 @@ pair<uint32_t, uint32_t> CountAckedReplicas(
   vector<vector<bool>> shard_acked(target_lsns.size(), vector<bool>(n, true));
 
   shard_set->RunBriefInParallel([&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
-    if (!IsMaster()) {
+    if (!ServerState::IsMaster()) {
       role_changed->store(true, std::memory_order_relaxed);
       return;
     }
@@ -1080,6 +1108,39 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
 // Loads a snapshot, blocking until it finishes.
 using AofLoadFn = std::function<GenericError(const string& path)>;
 
+// Why a local save cannot become the AOF checkpoint, or an empty string.
+string AofSaveError(bool dfs_format, string_view basename) {
+  // TODO: RDB bases.
+  if (!dfs_format)
+    return "--aof supports only DFS snapshots.";
+  // TODO(#8410): a save to the same name renames over the current base. A crash before the
+  // manifest commit leaves the old manifest pairing the new dump with the old cuts, so replay
+  // would apply the log twice. Lift this once bases carry their own cuts in aux fields.
+  if (!basename.empty() && !absl::StrContains(basename, "{timestamp}"))
+    return "--aof needs {timestamp} in the snapshot file name, so saves never overwrite the base";
+
+  // The manifest names the base on one line; strftime expands %n into a newline.
+  if (basename.find('\n') != string_view::npos || absl::StrContains(basename, "%n"))
+    return "--aof needs a snapshot file name without newlines";
+
+  // The AOF's own files (manifest, segments, owned bases) start with appendonly.
+  if (filesystem::path(basename).filename().string().starts_with("appendonly"))
+    return "--aof reserves the appendonly prefix for its own files";
+  return {};
+}
+
+// How often the checkpoint fiber checks the log against the threshold.
+constexpr auto kAofCheckpointCheckInterval = 1s;
+
+// The log size at which an automatic checkpoint runs, as in Valkey; never reached if disabled.
+size_t AofRewriteThreshold(size_t base_size) {
+  uint32_t percentage = GetFlag(FLAGS_aof_rewrite_percentage);
+  if (percentage == 0)
+    return SIZE_MAX;
+  size_t min_size = GetFlag(FLAGS_aof_rewrite_min_size).value;
+  return max(min_size, base_size * percentage / 100);
+}
+
 // Why --aof cannot run with this configuration, or an empty string.
 string AofStartupError(string_view dir) {
   if (detail::IsCloudPath(dir))
@@ -1088,10 +1149,78 @@ string AofStartupError(string_view dir) {
     return "--aof needs io_uring";
   if (GetFlag(FLAGS_hz) <= 0)
     return "--aof needs --hz > 0, the heartbeat seals AOF blocks";
+  if (GetFlag(FLAGS_experimental_cascaded_partial_sync))
+    return "--aof does not support --experimental_cascaded_partial_sync, it resets journal LSNs";
+
+  // TODO: a restarting replica full syncs anyway, so it could skip the restore instead.
   if (GetFlag(FLAGS_replicaof).has_value())
-    return "--aof is not supported on replicas";
-  return {};
+    return "--aof does not support --replicaof, send REPLICAOF once the server is up";
+
+  // A cluster node replicates slot ranges, which a full flush on rebase would not preserve.
+  if (IsClusterEnabled())
+    return "--aof does not support --cluster_mode=yes";
+  return AofSaveError(GetFlag(FLAGS_df_snapshot_format), GetFlag(FLAGS_dbfilename));
 }
+
+#ifdef __linux__
+// Bytes of the DFS file set whose summary is base_path: <prefix>summary.dfs and every
+// <prefix>NNNN.dfs, listed like FileSnapshotStorage::ListShardFiles(), since an adopted dump may
+// come from a server with more shards. Exact names, so other dumps sharing the prefix don't count.
+size_t AofBaseSize(string_view dir, string_view base_path) {
+  string_view prefix = base_path;
+  absl::ConsumeSuffix(&prefix, "summary.dfs");
+  size_t size = 0;
+  error_code ec;
+  uintmax_t summary_size = filesystem::file_size(filesystem::path(dir) / base_path, ec);
+  if (!ec)
+    size += summary_size;
+
+  io::Result<io::StatShortVec> files = io::StatFiles(absl::StrCat(dir, "/", prefix, "????.dfs"));
+  if (!files)
+    return size;
+  for (const io::StatShort& file : *files) {
+    string_view name = string_view(file.name).substr(file.name.rfind('/') + 1);
+    if (absl::ConsumePrefix(&name, prefix) && absl::ConsumeSuffix(&name, ".dfs") &&
+        rng::all_of(name, absl::ascii_isdigit)) {
+      size += file.size;
+    }
+  }
+  return size;
+}
+
+// Makes a finished save the AOF base: commits the manifest, then deletes the segments below the
+// cut. The save itself succeeded, so a failure here is only logged. Returns the new base's size if
+// the checkpoint committed.
+optional<size_t> CommitAofCheckpoint(const string& base_file, bool owned,
+                                     const vector<AofManifest::Cut>& cuts) {
+  string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
+  io::Result<AofManifest> manifest = ReadAofManifest(dir);
+  if (!manifest) {
+    LOG(ERROR) << "AOF checkpoint not committed: " << manifest.error().message();
+    return nullopt;
+  }
+  manifest->state = AofManifest::State::kActive;
+  manifest->checkpoint_id++;
+  manifest->base_owned = owned;
+  manifest->base_path = filesystem::path(base_file).filename().string();
+  manifest->cuts = cuts;
+  if (error_code ec = WriteAofManifest(dir, *manifest); ec) {
+    LOG(ERROR) << "AOF checkpoint not committed: " << ec.message();
+    return nullopt;
+  }
+  LOG(INFO) << "AOF checkpoint " << manifest->checkpoint_id << " committed, base "
+            << manifest->base_path;
+
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    if (AofStreamer* streamer = shard->aof_streamer(); streamer)
+      streamer->OnCheckpoint(cuts[shard->shard_id()].lsn);
+  });
+  // Also deletes the previous base if the AOF owned it.
+  if (error_code ec = CollectAofGarbage(dir, *manifest, /*remove_discarded=*/true); ec)
+    LOG(WARNING) << "Failed to remove AOF segments below the cut: " << ec.message();
+  return AofBaseSize(dir, manifest->base_path);
+}
+#endif
 
 // Starts every shard's AofStreamer where its log resumes. False if any failed.
 bool StartStreamers(string_view dir, const vector<AofResume>& resume) {
@@ -1099,7 +1228,8 @@ bool StartStreamers(string_view dir, const vector<AofResume>& resume) {
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     ShardId sid = shard->shard_id();
     auto streamer = make_unique<AofStreamer>(string(dir), sid, shard_set->size());
-    if (error_code ec = streamer->Start(resume[sid].seq, resume[sid].next_lsn); ec) {
+    const AofResume& r = resume[sid];
+    if (error_code ec = streamer->Start(r.seq, r.next_lsn, r.log_size); ec) {
       LOG(ERROR) << "Failed to start AOF on shard " << sid << ": " << ec.message();
       failed = true;
       return;
@@ -1117,19 +1247,40 @@ void AllowExpiryOnAllShards(bool allowed) {
 }
 
 #ifdef __linux__
-// Loads the base named by the manifest, or exits.
-void LoadAofBase(string_view dir, const string& base_path, const AofLoadFn& load) {
+// Loads the base named by the manifest, or exits. False if a shutdown stopped it.
+bool LoadAofBase(string_view dir, const string& base_path, const AofLoadFn& load) {
   string path = absl::StrCat(dir, "/", base_path);
 
   // The user may have deleted or moved a dump that is the base.
   if (access(path.c_str(), F_OK) != 0)
     ErrorAndExit(absl::StrCat("the AOF base ", path, " is missing"));
-  if (GenericError ec = load(path); ec)
+  if (GenericError ec = load(path); ec) {
+    // A shutdown rejects the load's commands: it stops the restore, it is no failure.
+    if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
+      return false;
     ErrorAndExit(absl::StrCat("failed to load the AOF base ", path, ": ", ec.Format()));
+  }
+  return true;
+}
+
+// The --dbfilename dump a first start adopts as its base, empty if none. Exits if it cannot tell.
+string FindDumpToAdopt(string_view dir, detail::SnapshotStorage* storage) {
+  auto dump = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename));
+  if (!dump && error_code(dump.error()) != errc::no_such_file_or_directory)
+    ErrorAndExit(absl::StrCat("failed to find the dump to adopt: ", dump.error().Format()));
+  if (!dump || dump->empty())
+    return {};
+
+  // TODO: adopt RDB dumps too.
+  if (!absl::EndsWith(*dump, "summary.dfs"))
+    ErrorAndExit(absl::StrCat("--aof adopts only DFS dumps for now, found ", *dump));
+  return *dump;
 }
 
 // First start: adopts the --dbfilename dump, if any, as the base instead of taking a snapshot.
-void BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const AofLoadFn& load) {
+// Returns the base, empty if none, or nullopt if a shutdown stopped it: the manifest stays
+// bootstrapping, so the next start redoes it.
+optional<string> BootstrapAof(string_view dir, const string& adopt_path, const AofLoadFn& load) {
   AofManifest manifest;
 
   // Nothing is logged before the load finishes, so every shard's cut is the journal's first lsn.
@@ -1137,19 +1288,16 @@ void BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const AofLo
   if (error_code ec = WriteAofManifest(dir, manifest); ec)
     ErrorAndExit(absl::StrCat("failed to write the AOF manifest: ", ec.message()));
 
-  auto dump = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename));
-  if (!dump && error_code(dump.error()) != errc::no_such_file_or_directory)
-    ErrorAndExit(absl::StrCat("failed to find the dump to adopt: ", dump.error().Format()));
-  if (dump && !dump->empty()) {
-    // TODO: adopt RDB dumps too.
-    if (!absl::EndsWith(*dump, "summary.dfs"))
-      ErrorAndExit(absl::StrCat("--aof adopts only DFS dumps for now, found ", *dump));
-
+  if (!adopt_path.empty()) {
     // TODO: record the dump's identity, in case it is replaced before the next start.
-    manifest.base_path = filesystem::path(*dump).filename().string();
-    LoadAofBase(dir, manifest.base_path, load);
+    manifest.base_path = filesystem::path(adopt_path).filename().string();
+    if (!LoadAofBase(dir, manifest.base_path, load))
+      return nullopt;
   }
 
+  // A shutdown that came after the load: no streamers; the next start redoes the bootstrap.
+  if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
+    return nullopt;
   if (!StartStreamers(dir, vector<AofResume>(shard_set->size())))
     ErrorAndExit("failed to open AOF segments");
 
@@ -1157,49 +1305,135 @@ void BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const AofLo
   manifest.state = AofManifest::State::kActive;
   if (error_code ec = WriteAofManifest(dir, manifest); ec)
     ErrorAndExit(absl::StrCat("failed to write the AOF manifest: ", ec.message()));
+  return manifest.base_path;
 }
 
-// Loads the manifest's base, replays the log on top and resumes it.
-void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
-               const AofLoadFn& load) {
+// Starts the streamers paused, in new segments past the existing ones, so every file stays until a
+// new base commits.
+void StartPausedStreamers(string_view dir, const AofManifest& manifest) {
+  io::Result<vector<string>> files = ListAofFiles(dir);
+  if (!files)
+    ErrorAndExit(absl::StrCat("failed to list AOF files: ", files.error().message()));
+  vector<AofResume> resume(shard_set->size());
+  for (ShardId sid = 0; sid < resume.size() && sid < manifest.cuts.size(); ++sid)
+    resume[sid].seq = manifest.cuts[sid].seq;
+  for (const string& path : *files) {
+    string_view name = string_view(path).substr(path.rfind('/') + 1);
+    if (!absl::ConsumeSuffix(&name, ".tmp"))
+      absl::ConsumeSuffix(&name, ".discarded");
+    uint32_t sid;
+    uint64_t seq;
+    if (AofSegmentWriter::ParseSegmentName(name, &sid, &seq) && sid < resume.size())
+      resume[sid].seq = max(resume[sid].seq, seq + 1);
+  }
+  if (!StartStreamers(dir, resume))
+    ErrorAndExit("failed to open AOF segments");
+  shard_set->RunBriefInParallel([](EngineShard* shard) { shard->aof_streamer()->Pause(); });
+}
+
+void ResumeRebasing(string_view dir, const AofManifest& manifest) {
+  LOG(WARNING) << "AOF manifest is rebasing: a full sync was interrupted. Starting empty; the old "
+                  "AOF files stay until a new base commits";
+  StartPausedStreamers(dir, manifest);
+}
+
+// A REPLICAOF cancelled the restore: its full sync replaces the data. The manifest is marked
+// rebasing, every file stays until a new base commits, and appending is paused.
+void CancelAofRestore(string_view dir, const AofManifest& manifest) {
+  LOG(INFO) << "AOF restore cancelled by REPLICAOF: a full sync replaces the data";
+  AofManifest rebasing = manifest;
+  rebasing.state = AofManifest::State::kRebasing;
+  if (error_code ec = WriteAofManifest(dir, rebasing); ec)
+    ErrorAndExit(absl::StrCat("failed to mark the AOF manifest rebasing: ", ec.message()));
+  StartPausedStreamers(dir, manifest);
+  AllowExpiryOnAllShards(true);
+}
+
+enum class AofResumeResult : uint8_t {
+  kResumed,
+
+  // A shutdown stopped it: nothing was appended, so the next start replays again.
+  kStopped,
+
+  // A REPLICAOF cancelled it, see CancelAofRestore().
+  kCancelled,
+};
+
+// Loads the manifest's base, replays the log on top and resumes it. The caller holds LOADING.
+AofResumeResult ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
+                          const AofRestoreState* restore, const AofLoadFn& load) {
   if (error_code ec = CollectAofGarbage(dir, manifest); ec)
     ErrorAndExit(absl::StrCat("failed to remove stale AOF files: ", ec.message()));
-  if (!manifest.base_path.empty())
-    LoadAofBase(dir, manifest.base_path, load);
 
-  // Load() already left LOADING; harmless, no connections are accepted yet.
-  if (service->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) != GlobalState::ACTIVE)
-    ErrorAndExit("--aof cannot replay: the server is not active");
-
-  // No expiry or eviction during replay: a key may pass its deadline before a later record, such as
-  // PERSIST, changes it. Resumed once the streamers run, so every expiry is logged.
+  // No expiry or eviction from the base load until the streamers run: a key may pass its deadline
+  // before a later record, such as PERSIST, changes it, and commands allowed while LOADING (SCAN)
+  // would expire it. Resumed once the streamers run, so every expiry is logged.
   AllowExpiryOnAllShards(false);
 
+  // TODO(#8410): RdbLoader still drops keys whose TTL passed (ShouldDiscardKey), so a key the log
+  // later PERSISTs is lost. The base must load as it was, as Valkey does for AOF preambles.
+  if (!manifest.base_path.empty() && !LoadAofBase(dir, manifest.base_path, load))
+    return AofResumeResult::kStopped;
+
+  // A shutdown that came after the base loaded: nothing to replay or append.
+  if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
+    return AofResumeResult::kStopped;
   vector<AofResume> resume;
-  if (error_code ec = ReplayAof(dir, manifest, service, &resume); ec)
-    ErrorAndExit(absl::StrCat("AOF replay failed: ", ec.message()));
+  if (error_code ec = ReplayAof(dir, manifest, service, &restore->cancel, &resume); ec) {
+    if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
+      return AofResumeResult::kStopped;
+    if (ec != errc::operation_canceled)
+      ErrorAndExit(absl::StrCat("AOF replay failed: ", ec.message()));
+    CancelAofRestore(dir, manifest);
+    return AofResumeResult::kCancelled;
+  }
+
+  // A replay that ended without noticing a shutdown, e.g. an empty log.
+  if (ServerState::tlocal()->gstate() == GlobalState::SHUTTING_DOWN)
+    return AofResumeResult::kStopped;
   if (!StartStreamers(dir, resume))
     ErrorAndExit("failed to open AOF segments");
 
   AllowExpiryOnAllShards(true);
-  service->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+  return AofResumeResult::kResumed;
 }
 #endif
 
-// Restores the data from the AOF, or bootstraps it, then starts logging. Exits if it cannot.
-void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service,
-              const AofLoadFn& load) {
-  string dir = flag_dir.empty() ? "." : flag_dir;
+// The AOF base the server started from.
+struct AofBase {
+  // Summary file name, empty without a base.
+  string file;
+
+  // Bytes on disk of the base: the summary plus every shard file.
+  size_t size = 0;
+
+  // The manifest was rebasing: nothing was loaded and appending is paused.
+  bool rebasing = false;
+
+  // A shutdown stopped the restore: nothing was appended and no streamer runs.
+  bool cancelled = false;
+};
+
+// How startup restores the AOF, decided before the server listens.
+struct AofStartPlan {
+  enum class Kind : uint8_t { kBootstrap, kResume, kRebasing };
+  Kind kind = Kind::kBootstrap;
+
+  // kResume and kRebasing.
+  AofManifest manifest;
+
+  // kBootstrap: the --dbfilename dump to adopt, empty if none.
+  string adopt_path;
+};
+
+// Checks the configuration and the AOF files, so a misconfiguration or a missing file fails before
+// the server listens. Exits if startup cannot proceed.
+AofStartPlan PrepareAof(const string& dir, detail::SnapshotStorage* storage) {
   if (string reason = AofStartupError(dir); !reason.empty())
     ErrorAndExit(reason);
 
 #ifdef __linux__
-  // TODO: run this in a background fiber, like LoadFromSnapshot(), so the server accepts
-  // connections and answers -LOADING meanwhile; today Init() blocks and the port is closed until
-  // replay ends. Load() switches LOADING -> ACTIVE when the base is loaded, so first keep the
-  // server LOADING until the streamers run: otherwise writes between the base load and the replay
-  // never reach the AOF. Also join the fiber on shutdown, and check that no command allowed during
-  // LOADING changes data.
+  AofStartPlan plan;
   shard_set->pool()->GetNextProactor()->Await([&] {
     io::Result<AofManifest> manifest = ReadAofManifest(dir);
     if (!manifest && manifest.error() != errc::no_such_file_or_directory)
@@ -1210,10 +1444,22 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service*
       LOG(WARNING) << "Redoing an interrupted AOF bootstrap";
       if (error_code ec = RemoveAofFilesExceptManifest(dir); ec)
         ErrorAndExit(absl::StrCat("failed to remove AOF files: ", ec.message()));
-      return BootstrapAof(dir, storage, load);
+      plan.adopt_path = FindDumpToAdopt(dir, storage);
+      return;
     }
-    if (manifest)
-      return ResumeAof(dir, *manifest, service, load);
+    if (manifest) {
+      plan.kind = manifest->state == AofManifest::State::kRebasing ? AofStartPlan::Kind::kRebasing
+                                                                   : AofStartPlan::Kind::kResume;
+
+      // The user may have deleted or moved a dump that is the base.
+      string base = absl::StrCat(dir, "/", manifest->base_path);
+      if (plan.kind == AofStartPlan::Kind::kResume && !manifest->base_path.empty() &&
+          access(base.c_str(), F_OK) != 0) {
+        ErrorAndExit(absl::StrCat("the AOF base ", base, " is missing"));
+      }
+      plan.manifest = std::move(*manifest);
+      return;
+    }
 
     io::Result<vector<string>> files = ListAofFiles(dir);
     if (!files)
@@ -1226,10 +1472,55 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service*
     // A lost manifest: loading --dbfilename could silently replace a newer AOF.
     if (!files->empty())
       ErrorAndExit(absl::StrCat("AOF files in ", dir, " but no manifest, e.g. ", files->front()));
-    BootstrapAof(dir, storage, load);
+    plan.adopt_path = FindDumpToAdopt(dir, storage);
   });
+  return plan;
 #else
   ErrorAndExit("--aof is supported only on Linux");
+#endif
+}
+
+// Restores the data the plan describes, then starts logging. Runs in a fiber while the server is
+// LOADING, held by the caller. Exits if it cannot.
+AofBase RunAof(const string& dir, const AofStartPlan& plan, Service* service,
+               const AofRestoreState* restore, const AofLoadFn& load) {
+#ifdef __linux__
+  string base_path;
+  AofBase base;
+  switch (plan.kind) {
+    case AofStartPlan::Kind::kBootstrap:
+      if (optional<string> path = BootstrapAof(dir, plan.adopt_path, load); path)
+        base_path = std::move(*path);
+      else
+        base.cancelled = true;
+      break;
+    case AofStartPlan::Kind::kRebasing:
+      ResumeRebasing(dir, plan.manifest);
+      base.rebasing = true;
+      break;
+    case AofStartPlan::Kind::kResume:
+      switch (ResumeAof(dir, plan.manifest, service, restore, load)) {
+        case AofResumeResult::kResumed:
+          base_path = plan.manifest.base_path;
+          break;
+        case AofResumeResult::kStopped:
+          base.cancelled = true;
+          break;
+        case AofResumeResult::kCancelled:
+          base.rebasing = true;
+          break;
+      }
+      break;
+  }
+  if (base.cancelled) {
+    LOG(INFO) << "AOF restore stopped by shutdown";
+    return base;
+  }
+  base.file = base_path;
+  base.size = base_path.empty() ? 0 : AofBaseSize(dir, base_path);
+  return base;
+#else
+  return {};
 #endif
 }
 
@@ -1243,6 +1534,59 @@ void StopAof() {
       shard->set_aof_streamer(nullptr);
     }
   });
+}
+
+// Appends the AOF fields of INFO persistence.
+void AppendAofInfo(const SaveInfoData& save_info, const Metrics& m, string* info) {
+  auto append = [info](const absl::AlphaNum& key, const absl::AlphaNum& val) {
+    absl::StrAppend(info, key, ":", val, "\r\n");
+  };
+
+  // Like Valkey: aof_enabled always, the rest only with --aof.
+  bool aof_enabled = GetFlag(FLAGS_aof);
+  append("aof_enabled", aof_enabled);
+  if (!aof_enabled)
+    return;
+
+  // Collected by GetMetrics() in its pass over the shards, sorted by shard id.
+  vector<AofStats> per_shard;
+  for (const auto& [sid, st] : m.aof_stats)
+    per_shard.push_back(st);
+
+  // The log size is summed; the write status is ok only if every shard's is.
+  bool write_ok = true;
+  uint64_t log_size = 0;
+  for (const AofStats& st : per_shard) {
+    write_ok &= st.write_ok;
+    log_size += st.log_size;
+  }
+
+  // Listed in shard order, so a shard that falls behind can be found.
+  auto per_shard_list = [&](auto get) {
+    return absl::StrJoin(per_shard, ",",
+                         [get](string* out, const AofStats& st) { absl::StrAppend(out, get(st)); });
+  };
+
+  // rebasing: no committed base covers the data in memory yet (a replica's full sync).
+  append("aof_state", save_info.aof_rebase == AofRebase::kNone ? "active" : "rebasing");
+  append("aof_rewrite_in_progress", static_cast<int>(save_info.aof_checkpoint_in_progress));
+  append("aof_last_bgrewrite_status", save_info.aof_last_checkpoint_ok ? "ok" : "err");
+  append("aof_last_write_status", write_ok ? "ok" : "err");
+  append("aof_current_size", log_size);
+  append("aof_base_size", save_info.aof_base_size);
+  append("aof_base_file", save_info.aof_base_file);
+  append("aof_rewrite_trigger_size", AofRewriteThreshold(save_info.aof_base_size));
+  append("aof_checkpoint_failures", save_info.aof_checkpoint_failures);
+  append("aof_buffered_bytes",
+         per_shard_list([](const AofStats& st) { return st.buffered_bytes; }));
+  append("aof_unsynced_bytes",
+         per_shard_list([](const AofStats& st) { return st.unsynced_bytes; }));
+  append("aof_throttle_usec", per_shard_list([](const AofStats& st) { return st.throttle_usec; }));
+
+  // Cumulative, so a scraper sees every sync: rate(usec) / rate(count) is the mean latency.
+  append("aof_fsync_count", per_shard_list([](const AofStats& st) { return st.fsync.count; }));
+  append("aof_fsync_usec_total", per_shard_list([](const AofStats& st) { return st.fsync.usec; }));
+  append("aof_delayed_fsync", per_shard_list([](const AofStats& st) { return st.fsync.delayed; }));
 }
 
 }  // namespace
@@ -1267,7 +1611,7 @@ bool ValidateServerTlsFlags() {
     has_auth = true;
   }
 
-  if (acl::JwtValidator::IsEnabled()) {
+  if (acl::AuthValidator::IsEnabled()) {
     has_auth = true;
   }
 
@@ -1284,10 +1628,33 @@ bool ValidateServerTlsFlags() {
   return true;
 }
 
+namespace {
+
+// Saving a list reads its offloaded nodes from disk in the middle of the entry, which suspends.
+// Concurrent writes may serialize other keys into the same buffer meanwhile. The DF format keeps
+// them out of the entry with tagged chunks or the stream mutex; the RDB format has neither.
+// Disabling the flag at runtime leaves already offloaded nodes on disk, which this does not catch.
+bool TieredListNodesEnabled() {
+#ifdef WITH_TIERING
+  return !GetFlag(FLAGS_tiered_prefix).empty() && GetFlag(FLAGS_tiered_experimental_list_support);
+#else
+  return false;
+#endif
+}
+
+constexpr string_view kRdbWithTieredListsErr =
+    "RDB format is not supported with --tiered_experimental_list_support, use the DF format";
+
+}  // namespace
+
 bool ValidateSnapshotFilenameFlags() {
   auto ec = detail::ValidateFilename(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
   if (ec) {
     LOG(ERROR) << ec.Format();
+    return false;
+  }
+  if (!GetFlag(FLAGS_df_snapshot_format) && TieredListNodesEnabled()) {
+    LOG(ERROR) << kRdbWithTieredListsErr;
     return false;
   }
   return true;
@@ -1431,8 +1798,10 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 
   {
     absl::InsecureBitGen eng;
-    master_replid_ = GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
-    DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_replid_.size());
+    string master_replid = GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
+    DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_replid.size());
+    replica_manager_ = make_unique<ReplicaManager>(service, std::move(master_replid),
+                                                   [this] { UnblockAllClients(); });
   }
 
   // Note: startup flag validation (TLS + snapshot filename) runs in main() before the proactor
@@ -1533,30 +1902,49 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   string flag_dir = GetFlag(FLAGS_dir);
 
   if (detail::IsCloudPath(flag_dir)) {
-    auto res = CreateCloudSnapshotStorage(flag_dir);
+    auto res = detail::CreateCloudSnapshotStorage(flag_dir);
     if (!res) {
       LOG(ERROR) << res.error().Format();
       exit(1);
     }
     snapshot_storage_ = std::move(*res);
-  } else if (fq_threadpool_) {
-    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
-    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
+    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   }
 
   if (GetFlag(FLAGS_aof)) {
-    StartAof(flag_dir, snapshot_storage_.get(), &service_, [this](const string& path) {
-      auto future = Load(path, LoadExistingKeys::kFail);
-      return future ? future->Get() : GenericError("the server is not active");
-    });
-  }
+    string dir = flag_dir.empty() ? "." : flag_dir;
+    AofStartPlan plan = PrepareAof(dir, snapshot_storage_.get());
 
-  // check for '--replicaof' before loading anything
-  if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
+    // Clients get -LOADING until the base is loaded, the log replayed and the streamers run. Held
+    // for the whole restore, so no client write lands between the base load and the replay.
+    CHECK(service_.RequestLoadingState());
+    aof_restore_.done.Start(1);
+    load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+        "aof_load", [this, dir, plan = std::move(plan)] {
+          AofBase base = RunAof(dir, plan, &service_, &aof_restore_, [this](const string& path) {
+            return Load(path, LoadExistingKeys::kFail).Get();
+          });
+          if (base.cancelled) {
+            service_.RemoveLoadingState();
+            aof_restore_.done.Dec();
+            return;
+          }
+          thread_safe_save_info_.Update([&base](SaveInfoData* data) {
+            data->aof_base_file = base.file;
+            data->aof_base_size = base.size;
+            data->aof_rebase = base.rebasing ? AofRebase::kSyncing : AofRebase::kNone;
+          });
+          aof_checkpoint_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+              "aof_checkpoint", [this] { AofCheckpointScheduling(); });
+          service_.RemoveLoadingState();
+          aof_restore_.done.Dec();
+        });
+  } else if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
+    // check for '--replicaof' before loading anything
     service_.proactor_pool().GetNextProactor()->Await(
         [this, &flag]() { this->Replicate(flag.host, flag.port); });
-  } else if (!GetFlag(FLAGS_aof)) {  // With --aof, the manifest names the base.
+  } else {
     LoadFromSnapshot();
   }
 
@@ -1585,12 +1973,16 @@ void ServerFamily::LoadFromSnapshot() {
   if (load_path_result) {
     const std::string& load_path = *load_path_result;
     if (!load_path.empty()) {
+      auto scope = service_.EnterExclusiveLoading();
+      if (!scope)
+        ErrorAndExit("Failed to load snapshot: the server is not active");
       auto future = Load(load_path, LoadExistingKeys::kFail);
-      load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([future]() mutable {
-        // Wait for load to finish in a dedicated fiber.
-        if (!future.has_value() || future->Get())
-          ErrorAndExit("Failed to load snapshot");
-      });
+      load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+          [future, scope = std::move(*scope)]() mutable {
+            // Wait for load to finish in a dedicated fiber; the scope ends with it.
+            if (future.Get())
+              ErrorAndExit("Failed to load snapshot");
+          });
     }
   } else {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
@@ -1618,6 +2010,11 @@ void ServerFamily::Shutdown() {
 
   JoinSnapshotSchedule();
 
+  // Before StopAof(): an automatic checkpoint needs the streamers.
+  aof_checkpoint_stop_.store(true, memory_order_release);
+  aof_checkpoint_wake_.Notify();
+  aof_checkpoint_fb_.JoinIfNeeded();
+
   bg_save_fb_.JoinIfNeeded();
 
   // With --aof, the log already holds the data, and a save could overwrite the base.
@@ -1644,11 +2041,7 @@ void ServerFamily::Shutdown() {
     auto ec = journal::Close();
     LOG_IF(ERROR, ec) << "Error closing journal " << ec;
 
-    util::fb2::LockGuard lk(replicaof_mu_);
-    if (replica_) {
-      replica_->Stop();
-    }
-    StopAllClusterReplicas();
+    replica_manager_->Shutdown();
 
     dfly_cmd_->CancelReplicas();
     DebugCmd::Shutdown();
@@ -1710,7 +2103,7 @@ void ServerFamily::FlushAll(Namespace* ns) {
 }
 
 GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
-  if (!IsMaster())
+  if (!ServerState::IsMaster())
     return {std::make_error_code(std::errc::operation_not_permitted), "replica cannot load data"};
   if (path.empty())
     return {std::make_error_code(std::errc::invalid_argument), "no snapshot found to load"};
@@ -1725,8 +2118,8 @@ GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occurred) with a future.
-std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& path,
-                                                            LoadExistingKeys existing_keys) {
+fb2::Future<GenericError> ServerFamily::Load(const std::string& path,
+                                             LoadExistingKeys existing_keys) {
   DCHECK(!path.empty());
   DCHECK_GT(shard_count(), 0u);
 
@@ -1736,10 +2129,6 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     future.Resolve(std::move(val));
     return future;
   };
-
-  if (!IsMaster()) {
-    return immediate(string("Replica cannot load data"));
-  }
 
   // Select the right storage based on the path: cloud paths need their own storage,
   // mirroring what DoSaveCheckAndStart does for saves.
@@ -1756,16 +2145,6 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
     return immediate(expand_result.error());
   }
-
-  auto prev_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (prev_state != GlobalState::ACTIVE) {
-    LOG(WARNING) << prev_state << " in progress, ignored";
-    return {};
-  }
-
-  // Reset state on error
-  absl::Cleanup reset_state{
-      [this]() { service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE); }};
 
   auto& pool = service_.proactor_pool();
 
@@ -1828,7 +2207,10 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
     if (aggregated_result->first_error) {
       load_context->PerformPostLoad(&service_, true);
-      LOG(ERROR) << "Rdb load failed: " << (*aggregated_result->first_error).message();
+
+      // A load stopped by shutdown is no failure.
+      std::error_code ec = *aggregated_result->first_error;
+      LOG_IF(ERROR, ec != errc::operation_canceled) << "Rdb load failed: " << ec.message();
     } else {
       load_context->PerformPostLoad(&service_);
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
@@ -1837,12 +2219,9 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       ForceReplicasToFullSync();
     }
 
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     future.Resolve(*(aggregated_result->first_error));
   };
   pool.GetNextProactor()->Dispatch(std::move(load_join_func));
-
-  std::move(reset_state).Cancel();  // load_join_func resets state after loading
   return future;
 }
 
@@ -1879,6 +2258,147 @@ void ServerFamily::SnapshotScheduling() {
   }
 }
 
+void ServerFamily::AofCheckpointScheduling() {
+  // A failed checkpoint is simply retried by the next wake.
+  // TODO(#8410): back off after failures (1s doubling up to a few minutes, reset on success), so a
+  // persistent failure does not run full snapshots back to back and starve the AOF's own writes.
+  while (true) {
+    // Reset before reading the state, so a request made after it wakes the next wait.
+    aof_checkpoint_wake_.WaitFor(kAofCheckpointCheckInterval);
+    aof_checkpoint_wake_.Reset();
+    if (aof_checkpoint_stop_.load(memory_order_acquire))
+      return;
+
+    // A running save becomes the checkpoint anyway.
+    SaveInfoData save_info = GetLastSaveInfo();
+    if (save_info.save_in_progress)
+      continue;
+
+    // After a full sync, at stable sync or promotion: the first base covers the loaded data.
+    if (save_info.aof_rebase == AofRebase::kCheckpoint) {
+      LOG(INFO) << "Taking the AOF checkpoint after the full sync";
+      if (GenericError ec = DoAofCheckpoint(); ec) {
+        LOG(WARNING) << "AOF checkpoint after the full sync failed: " << ec.Format();
+        continue;
+      }
+
+      // A full sync that started meanwhile needs its own checkpoint.
+      thread_safe_save_info_.Update([epoch = save_info.aof_rebase_epoch](SaveInfoData* data) {
+        if (data->aof_rebase_epoch == epoch)
+          data->aof_rebase = AofRebase::kNone;
+      });
+      continue;
+    }
+
+    // Appending is paused until the rebase, so the log does not grow meanwhile.
+    if (save_info.aof_rebase == AofRebase::kSyncing)
+      continue;
+
+    atomic_size_t total_log_size = 0;
+    shard_set->RunBriefInParallel([&](EngineShard* shard) {
+      if (AofStreamer* streamer = shard->aof_streamer(); streamer)
+        total_log_size.fetch_add(streamer->GetStats().log_size);
+    });
+    size_t log_size = total_log_size.load();
+    size_t trigger_size = AofRewriteThreshold(save_info.aof_base_size);
+    if (log_size < trigger_size)
+      continue;
+
+    LOG(INFO) << "AOF log reached " << log_size << " bytes, trigger " << trigger_size
+              << ": taking a checkpoint";
+    if (GenericError ec = DoAofCheckpoint(); ec)
+      LOG(WARNING) << "AOF checkpoint failed: " << ec.Format();
+  }
+}
+
+GenericError ServerFamily::PauseAofAndEnterRebasing() {
+#ifdef __linux__
+  if (!GetFlag(FLAGS_aof))
+    return {};
+
+  // The full sync replaces the data an AOF restore is still loading: stop it, then rebase as usual.
+  if (!aof_restore_.done.IsCompleted()) {
+    aof_restore_.cancel = true;
+    aof_restore_.done.Wait();
+  }
+
+  thread_safe_save_info_.Update([](SaveInfoData* data) {
+    data->aof_rebase_epoch++;
+    data->aof_rebase = AofRebase::kSyncing;
+  });
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    if (AofStreamer* streamer = shard->aof_streamer(); streamer)
+      streamer->Pause();
+  });
+
+  // A crash before the new base commits must not load the data this sync replaces. The files stay
+  // until that commit.
+  string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
+  io::Result<AofManifest> manifest = ReadAofManifest(dir);
+  if (!manifest)
+    return GenericError(manifest.error(), "Failed to read the AOF manifest");
+  if (manifest->state != AofManifest::State::kRebasing) {
+    manifest->state = AofManifest::State::kRebasing;
+    if (error_code ec = WriteAofManifest(dir, *manifest); ec)
+      return GenericError(ec, "Failed to mark the AOF manifest rebasing");
+  }
+#endif
+  return {};
+}
+
+void ServerFamily::StartAofRebaseCheckpoint() {
+  bool requested = false;
+  thread_safe_save_info_.Update([&requested](SaveInfoData* data) {
+    if (data->aof_rebase == AofRebase::kSyncing) {
+      data->aof_rebase = AofRebase::kCheckpoint;
+      requested = true;
+    }
+  });
+  if (requested)
+    aof_checkpoint_wake_.Notify();
+}
+
+GenericError ServerFamily::DoAofCheckpoint() {
+#ifdef __linux__
+  // A failure before the save starts is a failed checkpoint too; the save records its own.
+  auto fail = [this](GenericError ec) {
+    thread_safe_save_info_.Update([](SaveInfoData* data) {
+      data->aof_last_checkpoint_ok = false;
+      data->aof_checkpoint_failures++;
+    });
+    return ec;
+  };
+
+  string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
+  io::Result<AofManifest> manifest = ReadAofManifest(dir);
+  if (!manifest)
+    return fail(GenericError(manifest.error(), "Failed to read the AOF manifest"));
+
+  // The name of the checkpoint it commits as; only one save runs at a time.
+  uint64_t checkpoint_id = manifest->checkpoint_id + 1;
+  string basename = AofOwnedBaseName(checkpoint_id);
+
+  // An earlier attempt whose manifest commit failed may have left a base under this name. Only its
+  // files go: a concurrent save, a spare being prepared or a manifest being committed write other
+  // AOF files right now.
+  if (error_code ec = RemoveAofOwnedBase(dir, checkpoint_id); ec)
+    return fail(GenericError(ec, "Failed to remove a stale AOF base"));
+
+  const CommandId* cid = service().FindCmd("SAVE");
+  CHECK_NOTNULL(cid);
+  boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
+  trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+  DoSaveCheckAndStartOpts opts{.aof_owned_base = true};
+  if (GenericError ec = DoSaveCheckAndStart(SaveCmdOptions{true, {}, basename}, trans.get(), opts);
+      ec) {
+    return ec;
+  }
+  return WaitUntilSaveFinished(trans.get());
+#else
+  return GenericError(make_error_code(errc::not_supported), "--aof is supported only on Linux");
+#endif
+}
+
 std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
                                       LoadOptions* load_opts, RdbLoadContext* load_context,
                                       detail::SnapshotStorage* storage) {
@@ -1901,6 +2421,7 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
 
     RdbLoader loader{&service_, load_context, filt_snapshot_id};
     loader.SetShardCount(load_opts->shard_count);
+    loader.set_source_size_provider([file = res.value()] { return file->Size(); });
     if (existing_keys == LoadExistingKeys::kOverride) {
       loader.SetOverrideExistingKeys(true);
     }
@@ -1940,40 +2461,6 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
   http_base->RegisterCb("/metrics", cb);
 }
 
-void ServerFamily::PauseReplication(bool pause) {
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  // Switch to primary mode.
-  if (!IsMaster()) {
-    auto repl_ptr = replica_;
-    CHECK(repl_ptr);
-    repl_ptr->Pause(pause);
-  }
-}
-
-std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  // Switch to primary mode.
-  if (!IsMaster()) {
-    auto repl_ptr = replica_;
-    CHECK(repl_ptr);
-    return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
-  }
-  return nullopt;
-}
-
-std::optional<int> ServerFamily::GetReplicaMasterSocketUnreadBytes() {
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  if (!IsMaster()) {
-    auto repl_ptr = replica_;
-    CHECK(repl_ptr);
-    return repl_ptr->GetMasterSocketUnreadBytes();
-  }
-  return nullopt;
-}
-
 vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
   std::vector<facade::Listener*> listeners;
   listeners.reserve(listeners.size());
@@ -1992,44 +2479,6 @@ bool ServerFamily::AreAllReplicasInStableSync() const {
   }
   auto match = SyncStateName(DflyCmd::SyncState::STABLE_SYNC);
   return rng::all_of(roles, [&match](auto& elem) { return elem.state == match; });
-}
-
-optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  if (replica_ == nullptr) {
-    return nullopt;
-  }
-
-  Metrics::ReplicaInfo info;
-  info.summary = replica_->GetSummary();
-  for (const auto& cl_repl : cluster_replicas_) {
-    info.cl_repl_summary.push_back(cl_repl->GetSummary());
-  }
-
-  return info;
-}
-
-vector<ServerFamily::MasterLinkClientInfo> ServerFamily::GetMasterLinkClientInfo() const {
-  vector<MasterLinkClientInfo> out;
-  util::fb2::LockGuard lk(replicaof_mu_);
-  if (replica_ == nullptr)
-    return out;
-  out.push_back({replica_->GetClientId(), replica_->GetClientInfo()});
-  for (const auto& cl_repl : cluster_replicas_) {
-    out.push_back({cl_repl->GetClientId(), cl_repl->GetClientInfo()});
-  }
-  return out;
-}
-
-bool ServerFamily::IsMasterLinkClientId(uint32_t id) const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  if (replica_ && replica_->GetClientId() == id)
-    return true;
-  for (const auto& cl_repl : cluster_replicas_) {
-    if (cl_repl->GetClientId() == id)
-      return true;
-  }
-  return false;
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
@@ -2104,8 +2553,20 @@ void ServerFamily::CancelSave() {
 
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
                                                Transaction* trans, DoSaveCheckAndStartOpts opts) {
-  // TODO(#8410): with --aof, a save to the base's name overwrites the base.
-  auto [ignore_state, bg_save] = opts;
+  auto [ignore_state, bg_save, aof_owned_base] = opts;
+
+  if (!save_cmd_opts.new_version && TieredListNodesEnabled())
+    return GenericError{make_error_code(errc::operation_not_supported),
+                        string{kRdbWithTieredListsErr}};
+
+  // Cloud saves stay plain saves. An owned base has a fresh name of its own.
+  bool aof_checkpoint = GetFlag(FLAGS_aof) && save_cmd_opts.cloud_uri.empty();
+  if (aof_checkpoint && !aof_owned_base) {
+    string dbfilename = GetFlag(FLAGS_dbfilename);
+    string_view basename = save_cmd_opts.basename.empty() ? dbfilename : save_cmd_opts.basename;
+    if (string err = AofSaveError(save_cmd_opts.new_version, basename); !err.empty())
+      return GenericError{make_error_code(errc::operation_not_supported), err};
+  }
 
   std::shared_ptr<SaveStagesController> controller;
   {
@@ -2124,19 +2585,15 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
                           "SAVING - can not save database"};
     }
 
-    std::shared_ptr<detail::SnapshotStorage> snapshot_storage = snapshot_storage_;
-    if (!save_cmd_opts.cloud_uri.empty()) {
-      auto res = CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
-      if (!res) {
-        LOG(ERROR) << res.error().Format();
-        return res.error();
-      }
-      snapshot_storage = std::move(*res);
+    auto snapshot_storage = SelectSnapshotStorage(save_cmd_opts.cloud_uri, snapshot_storage_);
+    if (!snapshot_storage) {
+      LOG(ERROR) << snapshot_storage.error().Format();
+      return snapshot_storage.error();
     }
 
     controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, snapshot_storage, opts.bg_save});
+        &service_, std::move(*snapshot_storage), opts.bg_save, aof_checkpoint, aof_owned_base});
     save_controller_ = controller;
   }
 
@@ -2151,6 +2608,10 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       if (bg_save) {
         data->last_bgsave_status = false;
       }
+      if (aof_checkpoint) {
+        data->aof_last_checkpoint_ok = false;
+        data->aof_checkpoint_failures++;
+      }
     });
 
     // Reset the controller under lock if initialization failed.
@@ -2163,9 +2624,10 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
   // Success - update state
   controller->Start();
-  thread_safe_save_info_.Update([bg_save](SaveInfoData* data) {
+  thread_safe_save_info_.Update([bg_save, aof_checkpoint](SaveInfoData* data) {
     data->bgsave_in_progress = bg_save;
     data->save_in_progress = true;
+    data->aof_checkpoint_in_progress = aof_checkpoint;
   });
 
   return {};
@@ -2187,12 +2649,21 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
   VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
   bool is_bg_save;
+  bool aof_checkpoint = false;
+  optional<size_t> aof_base_size;
   util::fb2::LockGuard lk(save_mu_);
   // It's possible that another save was initiated and the controller has changed.
   // We only finalize and reset if it's still the same one we were waiting for.
   if (save_controller_ == controller) {
     save_info = save_controller_->Finalize();
     is_bg_save = save_controller_->IsBgSave();
+    aof_checkpoint = save_controller_->aof_checkpoint_;
+#ifdef __linux__
+    // Under save_mu_, so checkpoints commit in order.
+    if (aof_checkpoint && !save_info.error)
+      aof_base_size = CommitAofCheckpoint(save_info.file_name, save_controller_->aof_owned_base_,
+                                          save_controller_->aof_cuts());
+#endif
     save_controller_.reset();
   } else {
     // Another save has started. The old one is already finalized by the new one.
@@ -2203,6 +2674,15 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   // Still under save_mu_, so the next save cannot start before its predecessor's state is stored.
   thread_safe_save_info_.Update([&](SaveInfoData* data) {
     data->save_in_progress = false;
+    data->aof_checkpoint_in_progress = false;
+    if (aof_checkpoint) {
+      data->aof_last_checkpoint_ok = aof_base_size.has_value();
+      data->aof_checkpoint_failures = aof_base_size ? 0 : data->aof_checkpoint_failures + 1;
+    }
+    if (aof_base_size) {
+      data->aof_base_file = filesystem::path(save_info.file_name).filename().string();
+      data->aof_base_size = *aof_base_size;
+    }
     if (is_bg_save) {
       data->bgsave_in_progress = false;
       data->last_bgsave_status = !save_info.error;
@@ -2220,6 +2700,9 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
     }
   });
 
+  // The dump is written, but the manifest still names the old base.
+  if (aof_checkpoint && !save_info.error && !aof_base_size)
+    return GenericError("Failed to commit the AOF checkpoint");
   return save_info.error;
 }
 
@@ -2356,14 +2839,13 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
   CHECK(registry);
 
   bool is_authorized = false;
-  std::string jwt_username;
+  std::string external_username;
   auto auth_expires_at = std::chrono::steady_clock::time_point::max();
-  if (acl::JwtValidator::IsEnabled()) {
-    acl::JwtValidator jwt;
-    auto claims = jwt.Validate(password);
+  if (acl::AuthValidator::IsEnabled()) {
+    auto claims = acl::AuthValidator{}.Validate(username, password);
     if (claims) {
-      jwt_username = std::move(claims->username);
-      username = jwt_username;
+      external_username = std::move(claims->username);
+      username = external_username;
       is_authorized = registry->IsUserActive(username);
       auth_expires_at = claims->expires_at;
     }
@@ -2467,8 +2949,16 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "      Kill connections made from the specified address",
       "    * LADDR (<ip:port>|<unixsocket>:0)",
       "      Kill connections made to specified local address",
+      "    * TYPE (NORMAL|MASTER|REPLICA|PUBSUB)",
+      "      Kill connections by type.",
+      "    * USER <username>",
+      "      Kill connections authenticated by <username>.",
+      "    * SKIPME (YES|NO)",
+      "      Skip killing current connection (default: yes).",
       "    * ID <client-id>",
       "      Kill connections by client id.",
+      "    * MAXAGE <maxage>",
+      "      Kill connections older than the specified age.",
       "INFO",
       "    Return information about the current client connection.",
       "LIST",
@@ -2777,9 +3267,7 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(facade::ParsedArgs ar
   }
 
   if (args.size() >= 2) {
-    if (detail::IsS3Path(args[1])) {
-      save_cmd_opts.cloud_uri = args[1];
-    } else if (detail::IsGCSPath(args[1]) || detail::IsAzurePath(args[1])) {
+    if (detail::IsCloudPath(args[1])) {
       save_cmd_opts.cloud_uri = args[1];
     } else {
       // no cloud_uri get basename and return
@@ -2888,6 +3376,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
   // Fold per-thread partials into the aggregate result on this thread.
   for (const Metrics& partial : partials)
     result.Merge(partial);
+  rng::sort(result.aof_stats, {}, &pair<ShardId, AofStats>::first);
 
   // The per-thread deltas are read at slightly different moments, so the sum can transiently
   // dip below zero; a large negative value however means an accounting leak.
@@ -2914,8 +3403,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
-  if (!IsMaster()) {
-    result.replica_side_info = GetReplicaSummary();
+  if (!ServerState::IsMaster()) {
+    result.replica_side_info = replica_manager_->GetSummary();
   }
 
   {
@@ -3305,6 +3794,8 @@ string ServerFamily::FormatInfoMetrics(
     append("last_failed_save", save_info.last_error_time);
     append("last_error", save_info.last_error.Format());
     append("last_failed_save_duration_sec", save_info.failed_duration_sec);
+
+    AppendAofInfo(save_info, m, &info);
   };
 
   auto add_tx_info = [&] {
@@ -3339,7 +3830,7 @@ string ServerFamily::FormatInfoMetrics(
                                             ",state=", r.state, ",lag=", r.lsn_lag));
         }
       }
-      append("master_replid", master_replid_);
+      append("master_replid", replica_manager_->master_replid());
     } else {
       append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
@@ -3560,8 +4051,8 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
       opts.cmd_latency = true;
     }
     metrics = GetMetrics(cmd_cntx->server_conn_cntx()->ns, opts);
-  } else if (!IsMaster()) {
-    metrics.replica_side_info = GetReplicaSummary();
+  } else if (!ServerState::IsMaster()) {
+    metrics.replica_side_info = replica_manager_->GetSummary();
   }
 
   std::string info;
@@ -3594,15 +4085,16 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
   facade::ParsedArgs args = parser.UnparsedArgs();
-  // If no arguments are provided default to RESP2.
-  bool is_resp3 = false;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  // Without arguments HELLO keeps the current protocol.
+  bool is_resp3 = rb->IsResp3();
   bool has_auth = false;
   bool has_setname = false;
   string_view username;
   string_view password;
   string_view clientname;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!args.empty()) {
     string_view proto_version = args[0];
     is_resp3 = proto_version == "3";
@@ -3678,7 +4170,7 @@ void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->SendBulkString("mode");
   rb->SendBulkString(GetRedisMode());
   rb->SendBulkString("role");
-  rb->SendBulkString(IsMaster() ? "master" : "slave");
+  rb->SendBulkString(ServerState::IsMaster() ? "master" : "slave");
 
   // Add availability_zone to the response if flag is explicitly set and not empty
   if (!az.empty()) {
@@ -3688,16 +4180,16 @@ void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void ServerFamily::AddReplicaOf(CmdArgParser parser, CommandContext* cmd_cntx) {
-  facade::ParsedArgs args = parser.UnparsedArgs();
-  util::fb2::LockGuard lk(replicaof_mu_);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (IsMaster()) {
+  if (!replica_manager_->IsReplica()) {
     return cmd_cntx->SendError(
         "Calling ADDREPLICAOFF allowed only after server is already a replica");
   }
-  CHECK(replica_);
 
-  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args);
+  // Each source's full sync would rebase the AOF at the same time.
+  if (GetFlag(FLAGS_aof))
+    return cmd_cntx->SendError("ADDREPLICAOF is not supported with --aof");
+
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(parser.UnparsedArgs());
   if (!replicaof_args.has_value()) {
     return cmd_cntx->SendError(replicaof_args.error());
   }
@@ -3706,28 +4198,16 @@ void ServerFamily::AddReplicaOf(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
   LOG(INFO) << "Add Replica " << *replicaof_args;
 
-  auto add_replica = make_unique<Replica>(replicaof_args->host, replicaof_args->port, &service_,
-                                          master_replid(), replicaof_args->slot_range);
-  GenericError ec = add_replica->Start();
+  GenericError ec = replica_manager_->AddClusterReplica(replicaof_args->host, replicaof_args->port,
+                                                        replicaof_args->slot_range);
   if (ec) {
     return cmd_cntx->SendError(ec.Format());
   }
-  add_replica->StartMainReplicationFiber(nullopt);
-  cluster_replicas_.push_back(std::move(add_replica));
-  rb->SendOk();
-}
-
-void ServerFamily::StopAllClusterReplicas() {
-  // Stop all cluster replication.
-  for (auto& replica : cluster_replicas_) {
-    replica->Stop();
-    replica.reset();
-  }
-  cluster_replicas_.clear();
+  cmd_cntx->rb()->SendOk();
 }
 
 void ServerFamily::ReplicaOf(CmdArgParser parser, CommandContext* cmd_cntx) {
-  ReplicaOfInternal(parser.UnparsedArgs(), cmd_cntx, ActionOnConnectionFail::kReturnOnError);
+  ReplicaOfInternal(parser.UnparsedArgs(), cmd_cntx, ReplicaManager::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string_view host, string_view port) {
@@ -3742,7 +4222,7 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   sock.set_null(true);
   facade::RedisReplyBuilder rb(&sock);
   CommandContext cmd_cntx{&rb, nullptr};
-  ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
+  ReplicaOfInternal(args_list, &cmd_cntx, ReplicaManager::kContinueReplication);
 }
 
 void ServerFamily::ForceReplicasToFullSync() {
@@ -3753,34 +4233,8 @@ void ServerFamily::ForceReplicasToFullSync() {
   });
 }
 
-void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  if (!IsMaster()) {
-    CHECK(replica_);
-
-    auto repl_ptr = replica_;
-    if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
-      // Start journal and keep offsets.
-      repl_ptr->StartJournalAtOwnLSN();
-    }
-    // flip flag before clearing replica_
-    SetMasterFlagOnAllThreads(true);
-
-    last_master_data_ = replica_->Stop();
-    replica_.reset();
-    StopAllClusterReplicas();
-  }
-
-  // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
-  service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-
-  return builder->SendOk();
-}
-
 void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmd_cntx,
-                                     ActionOnConnectionFail on_error)
-    ABSL_LOCKS_EXCLUDED(replicaof_mu_) {
+                                     ReplicaManager::ActionOnConnectionFail on_error) {
   auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args);
   if (!replicaof_args.has_value()) {
     return cmd_cntx->SendError(replicaof_args.error());
@@ -3790,7 +4244,7 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   // This is a "weak" check. For example, if the node is already a replica,
   // it could be the case that one of the flows disconnects. The MainReplicationFiber
   // will then loop and if it can't partial sync it will enter LOADING state because of
-  // full sync. Note that the fiber is not aware of the replicaof_mu_ so even
+  // full sync. Note that the fiber is not aware of the replica manager mutex so even
   // if that mutex is locked below before any state check we can't really enforce
   // that the old replication fiber won't try to full sync and update the state to LOADING.
   // What is more here is that we always call `replica->Stop()`. So even if we end up in the
@@ -3800,58 +4254,26 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   // well defined semantics.
   ServerState* ss = ServerState::tlocal();
 
-  if (IsMaster() && ss->gstate() == GlobalState::LOADING) {
+  // During an AOF restore, whatever the role (an accepted REPLICAOF already made the node a
+  // replica), only REPLICAOF <host> may start: its full sync cancels the restore. NO ONE would end
+  // LOADING mid-restore, and a slot range would flush the other slots.
+  if (!aof_restore_.done.IsCompleted()) {
+    if (replicaof_args->IsReplicaOfNoOne() || replicaof_args->slot_range)
+      return cmd_cntx->SendError(kLoadingErr);
+  } else if (ServerState::IsMaster() && ss->gstate() == GlobalState::LOADING) {
     return cmd_cntx->SendError(kLoadingErr);
   }
 
   // replicaof no one
   if (replicaof_args->IsReplicaOfNoOne()) {
-    return ReplicaOfNoOne(cmd_cntx->rb());
+    replica_manager_->PromoteToMaster();
+    return cmd_cntx->rb()->SendOk();
   }
 
-  // A full sync loads data bypassing the journal, so the AOF would miss it.
-  if (GetFlag(FLAGS_aof))
-    return cmd_cntx->SendError("REPLICAOF is not supported with --aof");
-
-  auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
-                                          master_replid(), replicaof_args->slot_range);
-  GenericError ec;
-  switch (on_error) {
-    case ActionOnConnectionFail::kReturnOnError:
-      ec = new_replica->Start();
-      break;
-    case ActionOnConnectionFail::kContinueReplication:
-      new_replica->EnableReplication();
-      break;
-  };
-
-  if (ec || new_replica->IsContextCancelled()) {
-    return cmd_cntx->SendError(ec ? ec.Format() : "replication cancelled");
-  }
-
-  // Critical section.
-  // 1. Stop the old replica_ if it exists
-  // 2. Update all the pointers to the new replica and update master flag
-  // 3. Start the main replication fiber
-  // 4. Send OK
-  util::fb2::LockGuard lk(replicaof_mu_);
-  std::optional<Replica::LastMasterSyncData> last_master_data;
-  if (replica_)
-    last_master_data = replica_->Stop();
-
-  StopAllClusterReplicas();
-
-  if (ServerState::tlocal()->gstate() == GlobalState::TAKEN_OVER)
-    service_.SwitchState(GlobalState::TAKEN_OVER, GlobalState::LOADING);
-
-  // TODO Update thread locals. That way INFO never blocks
-  replica_ = new_replica;
-  SetMasterFlagOnAllThreads(false);
-  // Blocked writers would otherwise consume elements applied from the replication stream.
-  UnblockAllClients();
-
-  if (on_error == ActionOnConnectionFail::kReturnOnError) {
-    replica_->StartMainReplicationFiber(last_master_data);
+  GenericError ec = replica_manager_->StartReplication(replicaof_args->host, replicaof_args->port,
+                                                       replicaof_args->slot_range, on_error);
+  if (ec) {
+    return cmd_cntx->SendError(ec.Format());
   }
 
   cmd_cntx->rb()->SendOk();
@@ -3876,47 +4298,11 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
     return cmd_cntx->SendError("timeout is negative");
   }
 
-  // The LockGuard must precede the master check to ensure atomicity for the subsequent repl_ptr
-  // check
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  // We return OK, to support idempotency semantics.
-  if (IsMaster())
-    return builder->SendOk();
-
-  auto repl_ptr = replica_;
-  CHECK(repl_ptr);
-
-  // Start journal to allow partial sync from same source master
-  repl_ptr->StartJournalAtOwnLSN();
-
-  auto info = replica_->GetSummary();
-  if (!info.full_sync_done) {
-    return cmd_cntx->SendError("Full sync not done");
+  GenericError ec = replica_manager_->TakeOver(timeout_sec, save_flag);
+  if (ec) {
+    return cmd_cntx->SendError(ec.Format());
   }
-
-  std::error_code res = replica_->TakeOver(timeout_sec, save_flag);
-  if (res) {
-    LOG(WARNING) << "Takeover failed with error: " << res << " - " << res.message();
-    return cmd_cntx->SendError(absl::StrCat("Couldn't execute takeover: ", res.message()));
-  }
-
-  LOG(INFO) << "Takeover successful, promoting this instance to master.";
-
-  if (IsClusterEnabled()) {
-    service().cluster_family().ReconcileReplicaSlots();
-  }
-
-  last_master_data_ = replica_->Stop();
-  replica_.reset();
-
-  SetMasterFlagOnAllThreads(true);
   return builder->SendOk();
-}
-
-std::string ServerFamily::GetLineageId() const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  return replica_ ? replica_->GetLineageId() : master_replid_;
 }
 
 void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -3925,8 +4311,7 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Replicating a replica (cascaded replication) is only supported behind the experimental flag.
   if (!absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
-    util::fb2::LockGuard lk(replicaof_mu_);
-    if (!IsMaster()) {
+    if (replica_manager_->IsReplica()) {
       return cmd_cntx->SendError("Replicating a replica is unsupported");
     }
   }
@@ -3958,12 +4343,12 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
         // The response for 'capa dragonfly' is <master_repl_id> <syncid> <num_shards> <version>
         // <lineage_id> <announced_ip> <announced_port>. It may only grow at the end, and the ip
         // is a bulk string because it is operator-supplied.
-        std::string lineage_id = GetLineageId();
+        std::string lineage_id = replica_manager_->GetLineageId();
         auto announced = cluster::ClusterFamily::AnnouncedNodeInfo(cntx->conn());
 
         auto* rb = static_cast<RedisReplyBuilder*>(builder);
         rb->StartArray(7);
-        rb->SendSimpleString(master_replid_);
+        rb->SendSimpleString(replica_manager_->master_replid());
         rb->SendSimpleString(sync_id);
         rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
@@ -4028,7 +4413,7 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   const auto start = chrono::steady_clock::now();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (!IsMaster()) {
+  if (!ServerState::IsMaster()) {
     return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
   }
 
@@ -4062,7 +4447,7 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Global shard LSNs cover at least this connection's writes without per-write bookkeeping.
   // Role changes update threads independently, so check the role on each shard before access.
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    if (!IsMaster()) {
+    if (!ServerState::IsMaster()) {
       role_changed.store(true, std::memory_order_relaxed);
       return;
     }
@@ -4084,7 +4469,7 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
       // PING accelerates ACKs. Try to expedite the acknowledgment from replicas.
       // If the queue is full, then we rely on periodic replica ACKs to eventually catch up.
       shard->GetSecondaryQueue()->TryAdd([] {
-        if (IsMaster() && EngineShard::tlocal()->journal())
+        if (ServerState::IsMaster() && EngineShard::tlocal()->journal())
           journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
       });
     }
@@ -4104,7 +4489,7 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
       return rb->SendLong(count);
 
     // Do not hold up takeover/shutdown, including demotion through a partial sync.
-    if (!IsMaster() || ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
+    if (!ServerState::IsMaster() || ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
       return rb->SendLong(count);
 
     ThisFiber::SleepUntil(min(deadline, now + 100ms));
@@ -4113,12 +4498,10 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void ServerFamily::Role(facade::CmdArgParser /*parser*/, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  util::fb2::LockGuard lk(replicaof_mu_);
-  // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
-  // ensuring eventual consistency of is_master. When determining if the server is a replica and
-  // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
-  // insufficient in this scenario.
-  if (!replica_) {
+
+  // is_master alone is insufficient here: the summary is taken under the replica manager lock.
+  auto replica_info = replica_manager_->GetSummary();
+  if (!replica_info) {
     rb->StartArray(2);
     rb->SendBulkString("master");
     auto vec = dfly_cmd_->GetReplicasRoleInfo();
@@ -4131,7 +4514,7 @@ void ServerFamily::Role(facade::CmdArgParser /*parser*/, CommandContext* cmd_cnt
     }
 
   } else {
-    rb->StartArray(4 + cluster_replicas_.size() * 3);
+    rb->StartArray(4 + replica_info->cl_repl_summary.size() * 3);
     rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
     auto send_replica_info = [rb](const Replica::Summary& rinfo) {
@@ -4148,9 +4531,9 @@ void ServerFamily::Role(facade::CmdArgParser /*parser*/, CommandContext* cmd_cnt
         rb->SendBulkString("connecting");
       }
     };
-    send_replica_info(replica_->GetSummary());
-    for (const auto& replica : cluster_replicas_) {
-      send_replica_info(replica->GetSummary());
+    send_replica_info(replica_info->summary);
+    for (const auto& summary : replica_info->cl_repl_summary) {
+      send_replica_info(summary);
     }
   }
 }
@@ -4299,6 +4682,10 @@ void ServerFamily::Module(facade::CmdArgParser parser, CommandContext* cmd_cntx)
 }
 
 void ServerFamily::ClientPauseCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Its end turns expiry back on, which an AOF replay must keep off.
+  if (GetFlag(FLAGS_aof) && ServerState::tlocal()->gstate() == GlobalState::LOADING)
+    return cmd_cntx->SendError(kLoadingErr);
+
   auto listeners = GetNonPriviligedListeners();
 
   auto timeout = parser.Next<uint64_t>();

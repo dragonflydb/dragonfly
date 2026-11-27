@@ -9,6 +9,7 @@
 #include <absl/strings/str_join.h>
 
 #include <chrono>
+#include <optional>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -129,10 +130,13 @@ void DelayedEntryHandler::DiscardDelayedEntries() {
   delayed_entries_.clear();
 }
 
-SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
+SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx,
+                               base::CycleBucketAggregator* cpu_aggregator)
     : DelayedEntryHandler(static_cast<BucketDependencies&>(*this)),
       db_slice_(slice),
       base_cntx_(cntx),
+      cpu_aggregator_(cpu_aggregator),
+
       // Enable stream mutex if tagged chunks are disabled
       stream_mu_(!absl::GetFlag(FLAGS_serialization_tagged_chunks)) {
   DCHECK(base_cntx_);
@@ -150,8 +154,9 @@ void SerializerBase::SerializeEntry(BucketIdentity bucket, DbIndex db_index, con
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_index, pk) : 0;
 
   if (pv.IsExternal()) {
-    // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    EnqueueOffloaded(bucket, db_index, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+    PrimeKey delayed_key{pk.ToString()};
+    delayed_key.SetSticky(pk.IsSticky());
+    EnqueueOffloaded(bucket, db_index, std::move(delayed_key), pv, expire_time, mc_flags);
   } else {
     std::lock_guard lk{stream_mu_};
     SerializeEntryLocked(db_index, pk, pv, expire_time, mc_flags);
@@ -286,7 +291,9 @@ bool SerializerBase::TraverseAllBuckets() {
 
 unsigned SerializerBase::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) {
-  base::CpuTimeGuard guard(&cpu_aggregator_);
+  std::optional<base::CpuTimeGuard> guard;
+  if (cpu_aggregator_)
+    guard.emplace(cpu_aggregator_);
 
   unsigned serialized = 0;
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {

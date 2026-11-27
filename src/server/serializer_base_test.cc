@@ -620,9 +620,8 @@ TEST_F(SerializerBaseTest, DelayedEvicted) {
   for (unsigned i = 0; i < 10; i++)
     util::ThisFiber::Yield();
 
-  // Tiered entries blocked all evictions
-  unsigned evicted = GetMetrics().db_stats.front().events.evicted_keys;
-  EXPECT_EQ(evicted, 0u);
+  // Evictions skip only the buckets with pending delayed entries. RecordSerialized CHECKs that no
+  // evicted key was journaled before its baseline.
 
   // Reallow delayed entry resolution
   Change([](TestDriver& d) { d.delay_driver_.Resume(); });
@@ -633,7 +632,7 @@ TEST_F(SerializerBaseTest, DelayedEvicted) {
          absl::StrCat("more some data some data some data some long data @ ", i)});
 
   // Now we have evictions
-  evicted = GetMetrics().db_stats.front().events.evicted_keys;
+  unsigned evicted = GetMetrics().db_stats.front().events.evicted_keys;
   EXPECT_GT(evicted, 0u);
 
   auto [_1, baselines, _2] = Finish();

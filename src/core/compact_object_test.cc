@@ -3,6 +3,7 @@
 //
 #include "core/compact_object.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/functional/overload.h>
 #include <absl/strings/str_cat.h>
 #include <gtest/gtest.h>
@@ -17,6 +18,7 @@
 #include "base/logging.h"
 #include "core/cuckoo.h"
 #include "core/detail/bitpacking.h"
+#include "core/memory_accounting.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/string_map.h"
@@ -460,8 +462,8 @@ TEST_F(CompactObjectTest, AsciiUtil) {
   uint8_t buf[32];
 
   char outbuf[32] = "xxxxxxxxxxxxxx";
-  detail::ascii_pack_simd(data.data(), 7, buf);
-  detail::ascii_unpack_simd(buf, 7, outbuf);
+  detail::ascii_try_pack(data.data(), 7, buf);
+  detail::ascii_unpack_fast(buf, 7, outbuf);
 
   ASSERT_EQ('x', outbuf[7]) << outbuf;
   std::string_view actual{outbuf, 7};
@@ -473,8 +475,8 @@ TEST_F(CompactObjectTest, AsciiUtil) {
   }
   string act_str(data3.size(), 'y');
   std::vector<uint8_t> binvec(detail::binpacked_len(data3.size()));
-  detail::ascii_pack_simd2(data3.data(), data3.size(), binvec.data());
-  detail::ascii_unpack_simd(binvec.data(), data3.size(), act_str.data());
+  detail::ascii_try_pack(data3.data(), data3.size(), binvec.data());
+  detail::ascii_unpack_fast(binvec.data(), data3.size(), act_str.data());
 
   ASSERT_EQ(data3, act_str);
 }
@@ -493,16 +495,20 @@ struct AsciiCodec {
 const AsciiCodec kAsciiCodecs[] = {
     {"Dispatch", detail::ascii_try_pack, detail::ascii_unpack_fast},
     {"Scalar", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_scalar},
-#ifdef DFLY_ASCII_TRY_PACK_HAS_SIMD
-    {"SimdPack", detail::impl::ascii_try_pack_simd, detail::impl::ascii_unpack_fast_scalar},
+#if defined(ASCII_SSSE3)
+    {"SsePack", detail::impl::ascii_try_pack_sse, detail::impl::ascii_unpack_fast_scalar},
+#elif defined(ASCII_NEON)
+    {"NeonPack", detail::impl::ascii_try_pack_neon, detail::impl::ascii_unpack_fast_scalar},
 #endif
-#ifdef DFLY_ASCII_TRY_PACK_HAS_AVX2
+#if defined(ASCII_AVX2)
     {"Avx2Pack", detail::impl::ascii_try_pack_avx2, detail::impl::ascii_unpack_fast_scalar},
 #endif
-#ifdef DFLY_ASCII_UNPACK_FAST_HAS_AVX2
-    {"Avx2Unpack", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_avx2},
+#if defined(ASCII_SSE4_1)
+    {"SseUnpack", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_sse},
 #endif
-#ifdef DFLY_ASCII_UNPACK_FAST_HAS_NEON
+#if defined(ASCII_AVX2)
+    {"Avx2Unpack", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_avx2},
+#elif defined(ASCII_NEON)
     {"NeonUnpack", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_neon},
 #endif
 };
@@ -532,7 +538,8 @@ vector<size_t> NonAsciiPositions(size_t len) {
     for (size_t i = 0; i < len; ++i)
       positions.push_back(i);
   } else {
-    for (size_t i : {size_t{0}, size_t{7}, size_t{8}, size_t{15}, size_t{16}, len / 2, len - 1}) {
+    for (size_t i : {size_t{0}, size_t{7}, size_t{8}, size_t{15}, size_t{16}, size_t{31},
+                     size_t{32}, size_t{63}, size_t{64}, len / 2, len - 1}) {
       if (i < len && find(positions.begin(), positions.end(), i) == positions.end())
         positions.push_back(i);
     }
@@ -599,18 +606,166 @@ TEST_P(AsciiCodecTest, UnpacksInPlace) {
 // A single byte with the high bit set has to be rejected, wherever it sits in the input.
 TEST_P(AsciiCodecTest, RejectsNonAscii) {
   const AsciiCodec& codec = GetParam();
+  const string guard(16, static_cast<char>(0xA5));
 
   for (size_t len : AsciiCodecLengths()) {
     string ascii = MakeAscii(len);
-    string packed(detail::binpacked_len(len), '\0');
+    const size_t packed_len = detail::binpacked_len(len);
+    string packed = guard + string(packed_len, '\0') + guard;
 
     for (size_t pos : NonAsciiPositions(len)) {
       ascii[pos] = static_cast<char>(ascii[pos] | 0x80);
-      EXPECT_EQ(codec.pack(ascii.data(), len, reinterpret_cast<uint8_t*>(packed.data())), 0u)
+      EXPECT_EQ(
+          codec.pack(ascii.data(), len, reinterpret_cast<uint8_t*>(packed.data() + guard.size())),
+          0u)
           << "len=" << len << " pos=" << pos;
+      EXPECT_EQ(packed.substr(0, guard.size()) + packed.substr(guard.size() + packed_len),
+                guard + guard)
+          << "packed guard, len=" << len << " pos=" << pos;
       ascii[pos] = static_cast<char>(ascii[pos] & 0x7F);
     }
   }
+}
+
+// Like the codecs above, ascii_compare_packed() has a kernel per instruction set, and each one is
+// tested on its own.
+struct AsciiCompare {
+  const char* name;
+  bool (*compare)(const uint8_t* bin, size_t ascii_len, const char* ascii);
+};
+
+const AsciiCompare kAsciiCompares[] = {
+    {"Dispatch", detail::ascii_compare_packed},
+    {"Scalar", detail::impl::ascii_compare_packed_scalar},
+#if defined(ASCII_SSE4_1)
+    {"Sse", detail::impl::ascii_compare_packed_sse},
+#endif
+#if defined(ASCII_AVX2)
+    {"Avx2", detail::impl::ascii_compare_packed_avx2},
+#elif defined(ASCII_NEON)
+    {"Neon", detail::impl::ascii_compare_packed_neon},
+#endif
+};
+
+class AsciiCompareTest : public ::testing::TestWithParam<AsciiCompare> {};
+
+INSTANTIATE_TEST_SUITE_P(Kernel, AsciiCompareTest, testing::ValuesIn(kAsciiCompares),
+                         [](const testing::TestParamInfo<AsciiCompare>& info) {
+                           return string(info.param.name);
+                         });
+
+// A string has to match its packed form, and changing any single byte has to break the match. That
+// includes setting just the high bit, which packing would drop. Both buffers have their exact size,
+// so ASAN catches a kernel that reads past either of them.
+TEST_P(AsciiCompareTest, ComparesWithPacked) {
+  const AsciiCompare& kernel = GetParam();
+
+  for (size_t len : AsciiCodecLengths()) {
+    const string ascii = MakeAscii(len);
+    const size_t packed_len = detail::binpacked_len(len);
+    auto packed = make_unique<uint8_t[]>(packed_len);
+    ASSERT_EQ(detail::impl::ascii_try_pack_scalar(ascii.data(), len, packed.get()), packed_len)
+        << "len=" << len;
+
+    auto str = make_unique<char[]>(len);
+    memcpy(str.get(), ascii.data(), len);
+    EXPECT_TRUE(kernel.compare(packed.get(), len, str.get())) << "len=" << len;
+
+    for (size_t pos : NonAsciiPositions(len)) {
+      for (char flip : {'\x80', '\x01'}) {
+        str[pos] ^= flip;
+        EXPECT_FALSE(kernel.compare(packed.get(), len, str.get()))
+            << "len=" << len << " pos=" << pos << " flip=" << int(flip);
+        str[pos] ^= flip;
+      }
+    }
+  }
+}
+
+// Strings of 8n - 1 and 8n bytes both pack into 7n bytes, so their packed lengths alone cannot tell
+// them apart. Here the two keys are built to collide: the shorter one ends in the packed form of
+// the longer one's last group, so one's verbatim tail is the other's packed group.
+TEST_F(CompactObjectTest, AsciiKeyLengthCollision) {
+  for (size_t groups : {3, 37}) {  // SMALL_TAG and LARGE_STR_TAG
+    // Every packed byte of this group is ascii, so it can double as a verbatim tail.
+    const string longer = string(8 * groups - 8, 'k') + "@@@@@@@ ";
+    const size_t last_group = longer.size() - 8;
+    string shorter = longer.substr(0, longer.size() - 1);
+    uint8_t* shorter_tail = reinterpret_cast<uint8_t*>(shorter.data() + last_group);
+    ASSERT_EQ(detail::ascii_try_pack(longer.data() + last_group, 8, shorter_tail), 7u);
+
+    for (bool expire : {false, true}) {
+      CompactKey long_key(longer);
+      CompactKey short_key(shorter);
+      if (expire) {
+        long_key.SetExpireTime(1000);
+        short_key.SetExpireTime(1000);
+      }
+
+      ASSERT_EQ(long_key.GetRawString(), short_key.GetRawString())
+          << "groups=" << groups << " expire=" << expire;
+      EXPECT_TRUE(long_key == longer) << "groups=" << groups << " expire=" << expire;
+      EXPECT_TRUE(short_key == shorter) << "groups=" << groups << " expire=" << expire;
+      EXPECT_FALSE(long_key == shorter) << "groups=" << groups << " expire=" << expire;
+      EXPECT_FALSE(short_key == longer) << "groups=" << groups << " expire=" << expire;
+    }
+  }
+}
+
+// SetString packs long ascii strings into a new LargeString, whose allocation it must reuse or free
+// when one turns out to be binary past its first chars. Overwriting every value with every other
+// goes through all transitions, including the reuse of a SMALL_TAG allocation, and checks that
+// nothing leaks.
+TEST_F(CompactObjectTest, EncodeStringOverwrites) {
+  vector<string> values;
+
+  // Packed, these lengths are kept inline (17, 18), in a SmallString (up to 291) or a LargeString.
+  // mimalloc rounds the 263 bytes that 300 chars pack into up to 320, which also fit them raw.
+  for (size_t len : {17, 18, 19, 100, 255, 256, 291, 292, 300, 1000}) {
+    string ascii(len, ' ');
+    for (size_t i = 0; i < len; i++)
+      ascii[i] = 'a' + i % 26;
+    values.push_back(ascii);
+
+    // Not ascii at the start, in the middle and at the very end.
+    for (size_t pos : {size_t{0}, len / 2, len - 1}) {
+      values.push_back(ascii);
+      values.back()[pos] = char(200);
+    }
+  }
+
+  auto* mr = static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  const size_t mr_used = mr->used();
+  const size_t small_used = SmallString::UsedThreadLocal();
+  const size_t small_bytes = CompactObj::GetStatsThreadLocal().small_string_bytes;
+
+  CompactKey key;
+  for (size_t i = 0; i < values.size(); i++) {
+    for (size_t j = 0; j < values.size(); j++) {
+      SCOPED_TRACE(absl::StrCat(i, " -> ", j));
+      const string& val = values[j];
+      key.SetString(values[i]);
+      key.SetString(val);
+      ASSERT_EQ(key.ToString(), val);
+      ASSERT_TRUE(key == val);
+
+      // ascii is stored packed, the rest verbatim, and only a SmallString counts as small bytes.
+      const bool ascii = val.find(char(200)) == string::npos;
+      const size_t stored = ascii ? detail::binpacked_len(val.size()) : val.size();
+      if (stored > 16) {
+        auto raw = key.GetRawString();
+        ASSERT_EQ(raw[0].size() + raw[1].size(), stored);
+      }
+      const bool is_small = stored > 16 && stored <= SmallString::kMaxSize;
+      ASSERT_EQ(CompactObj::GetStatsThreadLocal().small_string_bytes - small_bytes,
+                is_small ? key.MallocUsed() : 0);
+    }
+  }
+
+  key.Reset();
+  EXPECT_EQ(mr->used(), mr_used);
+  EXPECT_EQ(SmallString::UsedThreadLocal(), small_used);
+  EXPECT_EQ(CompactObj::GetStatsThreadLocal().small_string_bytes, small_bytes);
 }
 
 TEST_F(CompactObjectTest, AsciiPackByte) {
@@ -622,7 +777,7 @@ TEST_F(CompactObjectTest, AsciiPackByte) {
 
     size_t packed_len = detail::binpacked_len(len);
     vector<uint8_t> packed(packed_len);
-    detail::ascii_pack(original.data(), len, packed.data());
+    detail::ascii_try_pack(original.data(), len, packed.data());
 
     // Verify initial pack/unpack round-trip at byte level.
     for (size_t i = 0; i < len; ++i) {
@@ -1087,7 +1242,15 @@ TEST_F(CompactObjectTest, ExternalRepresentation) {
 TEST_F(CompactObjectTest, AsanTriggerReadOverflow) {
   cobj_.SetString(string(32, 'a'));
   auto dest = make_unique<char[]>(32);
-  cobj_.GetString(dest.get());
+  cobj_.GetString(absl::MakeSpan(dest.get(), 32));
+}
+
+TEST_F(CompactObjectTest, GetStringChecksDestSize) {
+  cobj_.SetString(string(32, 'a'));
+
+  // One byte more than the span, so that release builds, which skip the check, stay in bounds.
+  char dest[32];
+  EXPECT_DEBUG_DEATH(cobj_.GetString(absl::MakeSpan(dest, 31)), "dest.size");
 }
 
 TEST_F(CompactObjectTest, lpGetInteger) {
@@ -1142,8 +1305,8 @@ TEST_F(CompactObjectTest, GetByteAtOffset) {
   }
 
   //  ASCII string with SMALL_TAG
-  {
-    string s(64, 'x');
+  for (size_t len : {64, 291}) {  // 291 is the longest one
+    string s(len, 'x');
     for (size_t i = 0; i < s.size(); ++i)
       s[i] = 'a' + (i % 26);
     cobj_.SetString(s);
@@ -1388,8 +1551,8 @@ TEST_F(CompactObjectTest, TryBorrow_AsciiLargeString) {
 
     // Verify the packed bytes decode back to the original string.
     string decoded(str_enc.DecodedSize(borrow->view()), '\0');
-    detail::ascii_unpack(reinterpret_cast<const uint8_t*>(borrow->view().data()),
-                         str_enc.DecodedSize(borrow->view()), decoded.data());
+    detail::ascii_unpack_fast(reinterpret_cast<const uint8_t*>(borrow->view().data()),
+                              str_enc.DecodedSize(borrow->view()), decoded.data());
     EXPECT_EQ(decoded, val);
   }
 
@@ -1444,6 +1607,37 @@ TEST_F(CompactObjectTest, TryBorrow_CowOnMutation) {
   cobj_.Reset();
 }
 
+// #8628 check both encoded and non encoded paths
+TEST_F(CompactObjectTest, TryBorrow_CowOnSetByteAtIndex) {
+  auto check = [this](char fill, char new_byte, bool encoded) {
+    const string val(3000, fill);
+    cobj_.SetString(val);
+
+    {
+      const auto borrow = cobj_.TryBorrow();
+      ASSERT_TRUE(borrow.has_value());
+      ASSERT_EQ(borrow->IsEncoded(), encoded);
+
+      EXPECT_EQ(cobj_.SetByteAtIndex(0, new_byte), make_pair(true, false));
+
+      EXPECT_TRUE(CompactObj::TEST_PinOrphaned(*borrow));
+      EXPECT_EQ(cmn::DecodeToString(*borrow), val);
+
+      uint8_t byte = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(0, &byte));
+      EXPECT_EQ(byte, static_cast<uint8_t>(new_byte));
+    }
+
+    // The new buffer is not pinned, so the next write is in place again.
+    CompactObj::DrainPendingReads();
+    EXPECT_EQ(cobj_.SetByteAtIndex(1, new_byte), make_pair(true, true));
+    cobj_.Reset();
+  };
+
+  check('\x80', '\x81', false);
+  check('a', '`', true);
+}
+
 TEST_F(CompactObjectTest, TryBorrow_DefragSkipsWhenPinned) {
   string val(300, '\x80');
   cobj_.SetString(val);
@@ -1467,6 +1661,160 @@ TEST_F(CompactObjectTest, StreamSizeDoesNotWrap) {
   cobj_.AddStreamSize(-static_cast<int64_t>(initial) - 1);
   EXPECT_EQ(cobj_.MallocUsed(), cobj_.MallocUsed(true));
   EXPECT_GT(cobj_.MallocUsed(), 0);
+}
+
+TEST_F(CompactObjectTest, TypeReplacementAccounting) {
+  auto& resource = *static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  InitMemoryAccounting(resource);
+  absl::Cleanup shutdown = [] { ShutdownMemoryAccounting(); };
+
+  auto attributed = [] { return GetTypeAttributedMemory(); };
+
+  for (size_t size : {32u, 4096u}) {
+    SCOPED_TRACE(size);
+    cobj_.SetString(string(size, '\x80'));
+    int64_t string_bytes = cobj_.MallocUsed();
+    auto before = attributed();
+    int64_t set_bytes;
+    {
+      AtomicMemoryScope scope(OBJ_SET);
+      intset* is = intsetNew();
+      set_bytes = zmalloc_usable_size(is);
+      cobj_.InitRobj(OBJ_SET, kEncodingIntSet, is);
+    }
+    auto expected = before;
+    expected[OBJ_STRING] -= string_bytes;
+    expected[OBJ_SET] += set_bytes;
+    EXPECT_EQ(attributed(), expected);
+
+    before = attributed();
+    cobj_.SetString("42");
+    EXPECT_EQ(attributed()[OBJ_SET] - before[OBJ_SET], -set_bytes);
+  }
+
+  // Same-type replacement is accounted for by the enclosing scope.
+  cobj_.SetString(string(32, '\x80'));
+  auto expected = attributed();
+  int64_t old_bytes = cobj_.MallocUsed();
+  {
+    AtomicMemoryScope scope(OBJ_STRING);
+    cobj_.SetString(string(4096, '\x80'));
+  }
+  expected[OBJ_STRING] += static_cast<int64_t>(cobj_.MallocUsed()) - old_bytes;
+  EXPECT_EQ(attributed(), expected);
+
+  // Key accounting is separate.
+  CompactKey key(string(4096, '\x80'));
+  key.SetString("inline");
+  EXPECT_EQ(attributed(), expected);
+
+  int64_t string_bytes = cobj_.MallocUsed();
+  const auto before_move = attributed();
+  CompactValue external_hash;
+  external_hash.SetExternal(4096, 128, CompactObj::ExternalRep::SERIALIZED_MAP);
+  cobj_ = std::move(external_hash);
+  EXPECT_EQ(attributed()[OBJ_STRING] - before_move[OBJ_STRING], -string_bytes);
+  EXPECT_EQ(cobj_.ObjType(), OBJ_HASH);
+  EXPECT_TRUE(cobj_.IsExternal());
+
+  // Same-type offloading leaves accounting to the caller.
+  cobj_.Reset();
+  cobj_.SetString(string(4096, '\x80'));
+  const auto before_offload = attributed();
+  cobj_.SetExternal(4096, 4096, CompactObj::ExternalRep::STRING);
+  EXPECT_EQ(attributed(), before_offload);
+}
+
+TEST_F(CompactObjectTest, MemoryAccountingScopesAndCharges) {
+  auto& resource = *static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  InitMemoryAccounting(resource);
+  absl::Cleanup shutdown = [] { ShutdownMemoryAccounting(); };
+
+  void* outer = nullptr;
+  void* middle = nullptr;
+  void* inner = nullptr;
+  void* direct = nullptr;
+  void* untracked = nullptr;
+  {
+    AtomicMemoryScope string_scope{OBJ_STRING};
+    outer = resource.allocate(64);
+    {
+      AtomicMemoryScope nested_string_scope{OBJ_STRING};
+      middle = resource.allocate(32);
+      {
+        AtomicMemoryScope hash_scope{OBJ_HASH};
+        inner = resource.allocate(16);
+        direct = resource.allocate(64);
+        ChargeMemory(OBJ_KEY, mi_usable_size(direct));
+        untracked = resource.allocate(64);
+        ChargeMemory(kUntrackedMemory, mi_usable_size(untracked));
+      }
+    }
+  }
+
+  TypeAttributedMemory expected{};
+  expected[OBJ_STRING] = mi_usable_size(outer) + mi_usable_size(middle);
+  expected[OBJ_HASH] = mi_usable_size(inner);
+  expected[OBJ_KEY] = mi_usable_size(direct);
+  expected[kUntrackedMemory] = mi_usable_size(untracked);
+  EXPECT_EQ(GetTypeAttributedMemory(), expected);
+
+  resource.deallocate(direct, 64);
+  resource.deallocate(untracked, 64);
+  resource.deallocate(outer, 64);
+  resource.deallocate(middle, 32);
+  resource.deallocate(inner, 16);
+}
+
+TEST_F(CompactObjectTest, MemoryAccountingUntrackedAndLifecycle) {
+  auto& resource = *static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  EXPECT_FALSE(MemoryAccountingEnabled());
+  {
+    AtomicMemoryScope disabled{OBJ_STRING};
+    ChargeMemory(OBJ_STRING, 64);
+  }
+  EXPECT_EQ(GetTypeAttributedMemory(), TypeAttributedMemory{});
+
+  InitMemoryAccounting(resource);
+  absl::Cleanup shutdown = [] { ShutdownMemoryAccounting(); };
+  void* metadata = nullptr;
+  {
+    AtomicMemoryScope outer{OBJ_STRING};
+    AtomicMemoryScope untracked{kUntrackedMemory};
+    metadata = resource.allocate(64);
+  }
+  TypeAttributedMemory expected{};
+  expected[kUntrackedMemory] = mi_usable_size(metadata);
+  EXPECT_EQ(GetTypeAttributedMemory(), expected);
+  {
+    AtomicMemoryScope outer{OBJ_HASH};
+    AtomicMemoryScope untracked{kUntrackedMemory};
+    resource.deallocate(metadata, 64);
+  }
+  EXPECT_EQ(GetTypeAttributedMemory(), TypeAttributedMemory{});
+
+  // An excluded allocation freed outside all scopes leaves a harmless historical offset.
+  {
+    AtomicMemoryScope untracked{kUntrackedMemory};
+    metadata = resource.allocate(64);
+  }
+  expected[kUntrackedMemory] = mi_usable_size(metadata);
+  resource.deallocate(metadata, 64);
+  void* value = nullptr;
+  {
+    AtomicMemoryScope scope{OBJ_STRING};
+    value = resource.allocate(32);
+  }
+  expected[OBJ_STRING] = mi_usable_size(value);
+  EXPECT_EQ(GetTypeAttributedMemory(), expected);
+
+  ShutdownMemoryAccounting();
+  EXPECT_FALSE(MemoryAccountingEnabled());
+  InitMemoryAccounting(resource);
+  EXPECT_TRUE(MemoryAccountingEnabled());
+  EXPECT_EQ(GetTypeAttributedMemory(), TypeAttributedMemory{});
+  EXPECT_EQ(UnattributedMemory(), static_cast<int64_t>(UsedMemoryThreadLocal(resource)));
+  resource.deallocate(value, 32);
 }
 
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
@@ -1497,41 +1845,43 @@ static void BM_PackNaive(benchmark::State& state) {
 }
 BENCHMARK(BM_PackNaive);
 
-static void ValidateAndPack2(const char* ascii, size_t len, uint8_t* bin) {
-  if (detail::validate_ascii_fast(ascii, len))
-    detail::ascii_pack2(ascii, len, bin);
-}
-
-static void ValidateAndPackSimd2(const char* ascii, size_t len, uint8_t* bin) {
-  if (detail::validate_ascii_fast(ascii, len))
-    detail::ascii_pack_simd2(ascii, len, bin);
-}
-
-using AsciiPackFunction = void (*)(const char*, size_t, uint8_t*);
 using AsciiTryPackFunction = size_t (*)(const char*, size_t, uint8_t*);
 using AsciiUnpackFunction = void (*)(const uint8_t*, size_t, char*);
+using AsciiCompareFunction = bool (*)(const uint8_t*, size_t, const char*);
 
 template <auto operation> static void BM_AsciiCodec(benchmark::State& state) {
-  constexpr bool kPack = is_same_v<decltype(operation), AsciiPackFunction>;
   constexpr bool kTryPack = is_same_v<decltype(operation), AsciiTryPackFunction>;
   constexpr bool kUnpack = is_same_v<decltype(operation), AsciiUnpackFunction>;
-  static_assert(kPack || kTryPack || kUnpack);
+  constexpr bool kCompare = is_same_v<decltype(operation), AsciiCompareFunction>;
+  static_assert(kTryPack || kUnpack || kCompare);
 
   string val(state.range(0), 'a');
   vector<uint8_t> buf(max<size_t>(detail::binpacked_len(val.size()), 1));
-  if constexpr (kUnpack)
-    detail::ascii_pack(val.data(), val.size(), buf.data());
+  if constexpr (!kTryPack)
+    detail::ascii_try_pack(val.data(), val.size(), buf.data());
 
   while (state.KeepRunning()) {
     if constexpr (kTryPack)
       benchmark::DoNotOptimize(operation(val.data(), val.size(), buf.data()));
-    else if constexpr (kUnpack)
-      operation(buf.data(), val.size(), val.data());
+    else if constexpr (kCompare)
+      benchmark::DoNotOptimize(operation(buf.data(), val.size(), val.data()));
     else
-      operation(val.data(), val.size(), buf.data());
+      operation(buf.data(), val.size(), val.data());
     benchmark::ClobberMemory();
   }
   state.SetBytesProcessed(state.iterations() * val.size());
+}
+
+// Non-ascii byte at the very start, measures how early a kernel gives up.
+template <auto operation> static void BM_AsciiTryPackReject(benchmark::State& state) {
+  string val(state.range(0), 'a');
+  val[0] = '\xC3';
+  vector<uint8_t> buf(detail::binpacked_len(val.size()));
+
+  while (state.KeepRunning()) {
+    benchmark::DoNotOptimize(operation(val.data(), val.size(), buf.data()));
+    benchmark::ClobberMemory();
+  }
 }
 
 static void AsciiCodecArgs(benchmark::Benchmark* benchmark) {
@@ -1541,22 +1891,30 @@ static void AsciiCodecArgs(benchmark::Benchmark* benchmark) {
     benchmark->Arg(len);
 }
 
-static void AsciiSimdPackArgs(benchmark::Benchmark* benchmark) {
+// Covers the boundaries between the short, 128-bit and 256-bit paths.
+static void AsciiTryPackRejectArgs(benchmark::Benchmark* benchmark) {
   benchmark->ArgName("len");
-  for (int len : {32, 33, 61, 64, 100, 128, 256, 1024, 4096, 65536})
+  for (int len : {16, 32, 34, 48, 64, 80, 95, 96, 128, 256, 4096, 65536})
     benchmark->Arg(len);
 }
 
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_pack)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_pack2)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_pack_simd)->Apply(AsciiSimdPackArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_pack_simd2)->Apply(AsciiSimdPackArgs);
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_try_pack)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, ValidateAndPack2)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, ValidateAndPackSimd2)->Apply(AsciiSimdPackArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_unpack)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_unpack_simd)->Apply(AsciiCodecArgs);
+#if defined(ASCII_SSSE3)
+BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_try_pack_sse)->Apply(AsciiCodecArgs);
+#endif
+#if defined(ASCII_SSE4_1)
+BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_unpack_fast_sse)->Apply(AsciiCodecArgs);
+#endif
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_unpack_fast)->Apply(AsciiCodecArgs);
+#if defined(ASCII_SSE4_1)
+BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_compare_packed_sse)->Apply(AsciiCodecArgs);
+#endif
+BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_compare_packed)->Apply(AsciiCodecArgs);
+BENCHMARK_TEMPLATE(BM_AsciiTryPackReject, detail::ascii_try_pack)->Apply(AsciiTryPackRejectArgs);
+#if defined(ASCII_SSSE3)
+BENCHMARK_TEMPLATE(BM_AsciiTryPackReject, detail::impl::ascii_try_pack_sse)
+    ->Apply(AsciiTryPackRejectArgs);
+#endif
 
 static void BM_LpCompare(benchmark::State& state) {
   std::mt19937_64 rd;

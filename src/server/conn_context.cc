@@ -336,12 +336,6 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
     return false;
   }
 
-  if (noloop_ == true) {
-    // Once we implement REDIRECT this should return true since noloop
-    // without it only affects the current connection
-    return false;
-  }
-
   if (option_ == NONE) {
     return true;
   }

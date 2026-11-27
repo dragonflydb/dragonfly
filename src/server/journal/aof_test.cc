@@ -28,6 +28,7 @@
 #include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 
 ABSL_DECLARE_FLAG(bool, aof);
@@ -344,6 +345,10 @@ TEST_F(AofManifestTest, CollectGarbage) {
                                   "appendonly-0-4.aof.discarded", "appendonly-1-0.aof",
                                   "appendonly-x.tmp", "appendonly.aof", "appendonlydir",
                                   "dump-summary.dfs"}));
+
+  // A checkpoint also removes *.discarded.
+  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m, /*remove_discarded=*/true)); });
+  EXPECT_FALSE(filesystem::exists(absl::StrCat(dir_, "/appendonly-0-4.aof.discarded")));
 }
 
 class AofStreamerTest : public BaseFamilyTest {
@@ -357,6 +362,14 @@ class AofStreamerTest : public BaseFamilyTest {
     absl::SetFlag(&FLAGS_aof, true);
     absl::SetFlag(&FLAGS_dir, dir_);
     BaseFamilyTest::SetUp();
+
+    // The AOF is restored in the background; the server stays LOADING until the streamers run.
+    ASSERT_TRUE(WaitUntilCondition(
+        [&] {
+          return pp_->at(0)->Await(
+              [] { return ServerState::tlocal()->gstate() == GlobalState::ACTIVE; });
+        },
+        10s));
   }
 
   void TearDown() override {

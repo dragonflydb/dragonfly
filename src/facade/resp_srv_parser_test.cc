@@ -220,6 +220,12 @@ TEST_F(RespSrvParserTest, HugeBulkNoEagerAlloc) {
   EXPECT_LT(args_.HeapMemory() + parser_.UsedMemory(), 64u * 1024);
 }
 
+TEST_F(RespSrvParserTest, PendingBulkNoEagerAlloc) {
+  // A bulk of any size is not allocated before its data arrives.
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse("*2\r\n$1048576\r\n"));
+  EXPECT_LT(args_.HeapMemory() + parser_.UsedMemory(), 64u * 1024);
+}
+
 TEST_F(RespSrvParserTest, BulkOverEagerLimitAssembled) {
   const size_t kLen = 2'000'000;
   ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(absl::StrCat("*1\r\n$", kLen, "\r\n")));

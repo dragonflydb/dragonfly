@@ -9,7 +9,7 @@
 
 다른 언어 번역본:  [English](README.md) [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [Português](README.pt-BR.md) [ภาษาไทย](README.th-TH.md)
 
-[Website](https://www.dragonflydb.io/) • [Docs](https://dragonflydb.io/docs) • [Quick Start](https://www.dragonflydb.io/docs/getting-started) • [Community Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly Forum](https://dragonfly.discourse.group/) • [Join the Dragonfly Community](https://www.dragonflydb.io/community)
+[Website](https://www.dragonflydb.io/) • [Docs](https://dragonflydb.io/docs) • [Quick Start](https://www.dragonflydb.io/docs/getting-started) • [Community Slack](https://join.slack.com/t/dragonflycommunityhq/shared_invite/zt-4ftpylx50-SQZ0g0CD2lJMvi0EsqPNbQ) • [Dragonfly Forum](https://dragonfly.discourse.group/) • [Join the Dragonfly Community](https://www.dragonflydb.io/community)
 
 [GitHub Discussions](https://github.com/dragonflydb/dragonfly/discussions) • [GitHub Issues](https://github.com/dragonflydb/dragonfly/issues) • [Contributing](https://github.com/dragonflydb/dragonfly/blob/main/CONTRIBUTING.md) • [Dragonfly Cloud](https://www.dragonflydb.io/cloud)
 

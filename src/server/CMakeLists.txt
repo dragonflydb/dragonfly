@@ -87,9 +87,10 @@ add_library(dragonfly_lib
             debugcmd.cc dflycmd.cc error.cc family_utils.cc metrics.cc string_stats.cc ${DF_SEARCH_SRCS}
             server_family.cc string_family.cc list_family.cc generic_family.cc
             ${DF_FAMILY_SRCS}
-            main_service.cc memory_cmd.cc rdb_load.cc rdb_load_context.cc rdb_save.cc replica.cc http_api.cc
+            main_service.cc memory_cmd.cc rdb_load.cc rdb_load_context.cc rdb_save.cc replica.cc
+            replica_manager.cc http_api.cc
             protocol_client.cc serializer_base.cc snapshot.cc script_mgr.cc
-            detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc detail/egress_throttle.cc
+            detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc detail/egress_throttle.cc detail/queued_sink_writer.cc
             version.cc container_utils.cc
             multi_command_squasher.cc
             ${DF_TIERING_SRCS}
@@ -124,7 +125,6 @@ cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_tiering
          TRDP::croncpp TRDP::flatbuffers)
 
 if (DF_USE_SSL)
-  set(TLS_LIB tls_lib)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_USE_SSL)
 endif()
 
@@ -146,7 +146,7 @@ helio_cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_sm
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
          testdata/redis_json.rdb testdata/RDB_TYPE_STREAM_LISTPACKS_2.rdb
          testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb testdata/ignore_expiry.rdb
-         testdata/valkey9_hash_expiry.rdb LABELS DFLY)
+         testdata/valkey9_hash_expiry.rdb testdata/redis7_hash_expiry.rdb LABELS DFLY)
 helio_cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
@@ -168,6 +168,7 @@ helio_cxx_test(acl/jwt_validator_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(serializer_base_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(detail/egress_throttle_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(detail/queued_sink_writer_test dfly_test_lib LABELS DFLY)
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test aof_test

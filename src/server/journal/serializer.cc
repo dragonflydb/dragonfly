@@ -175,10 +175,15 @@ std::error_code JournalReader::ReadString(io::MutableBytes buffer) {
 
 std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) {
   size_t num_strings = 0;
-  SET_OR_RETURN(ReadUInt<uint64_t>(), num_strings);
+  SET_OR_RETURN(ReadUInt<uint32_t>(), num_strings);
 
   size_t cmd_size = 0;
-  SET_OR_RETURN(ReadUInt<uint64_t>(), cmd_size);
+  SET_OR_RETURN(ReadUInt<uint32_t>(), cmd_size);
+
+  // A command has at least its name, and its strings, each followed by '\0', must fit the uint32_t
+  // offsets of BackedArguments. The loop bounds each string by the remaining cmd_size.
+  if (num_strings == 0 || cmd_size > UINT32_MAX - num_strings)
+    return make_error_code(errc::bad_message);
 
   data->Reserve(num_strings, cmd_size + num_strings /* +\0 char*/);
 
@@ -223,6 +228,10 @@ std::error_code JournalReader::ReadEntry(journal::ParsedEntry* dest) {
     SET_OR_RETURN(ReadUInt<uint64_t>(), dest->lsn);
     return {};
   }
+
+  // Only command entries are left. Consumers would apply an unknown opcode as an empty command.
+  if (opcode != journal::Op::COMMAND && opcode != journal::Op::EXPIRED)
+    return make_error_code(errc::bad_message);
 
   SET_OR_RETURN(ReadUInt<uint64_t>(), dest->txid);
   [[maybe_unused]] uint32_t unused;

@@ -45,6 +45,15 @@ void CapturingReplyBuilder::SendDouble(double val) {
   Capture(val);
 }
 
+void CapturingReplyBuilder::SendBool(bool val) {
+  // RESP2 has no booleans, so keep the integer that a RESP2 reply would carry.
+  if (!IsResp3())
+    return SendLong(val);
+
+  SKIP_LESS(ReplyMode::FULL);
+  Capture(Bool{val});
+}
+
 void CapturingReplyBuilder::SendSimpleString(std::string_view str) {
   SKIP_LESS(ReplyMode::FULL);
   Capture(SimpleString{string{str}});
@@ -131,6 +140,10 @@ struct CaptureVisitor {
 
   void operator()(double v) {
     static_cast<RedisReplyBuilder*>(rb)->SendDouble(v);
+  }
+
+  void operator()(payload::Bool b) {
+    static_cast<RedisReplyBuilder*>(rb)->SendBool(b.val);
   }
 
   void operator()(const payload::SimpleString& ss) {

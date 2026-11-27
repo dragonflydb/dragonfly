@@ -90,7 +90,7 @@ ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(serve
 
   id_ = absl::GetFlag(FLAGS_cluster_node_id);
   if (id_.empty()) {
-    id_ = server_family_->master_replid();
+    id_ = server_family_->replica_manager().master_replid();
   } else if (IsClusterEmulated()) {
     LOG(ERROR) << "Setting --cluster_node_id in emulated mode is unsupported";
     exit(1);
@@ -148,7 +148,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
                         .replicas = {},
                         .migrations = {}};
 
-  optional<Metrics::ReplicaInfo> repl_info = server_family_->GetReplicaSummary();
+  optional<Metrics::ReplicaInfo> repl_info = server_family_->replica_manager().GetSummary();
   ServerState& etl = *ServerState::tlocal();
   if (!repl_info) {
     DCHECK(etl.is_master);
@@ -1059,6 +1059,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgParser parser, CommandContext* cmd_cnt
   }
 
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
+  conn_cntx->slot_migration_conn = true;
   DCHECK(conn_cntx->sync_dispatch);
   // we do this to be ignored by the dispatch tracker
   // TODO provide a more clear approach

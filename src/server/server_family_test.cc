@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/match.h>
+#include <gtest/gtest-spi.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -16,9 +17,12 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "common/heap_size.h"
+#include "core/json/json_object.h"
 #include "facade/facade_test.h"
 #include "facade/socket_utils.h"
 #include "server/test_utils.h"
+#include "util/accept_server.h"
+#include "util/http/http_handler.h"
 
 using namespace testing;
 using namespace std;
@@ -30,14 +34,50 @@ ABSL_DECLARE_FLAG(string, requirepass);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
-ABSL_DECLARE_FLAG(bool, jwt_validate);
-ABSL_DECLARE_FLAG(string, jwt_validate_url);
+ABSL_DECLARE_FLAG(bool, auth_validate);
+ABSL_DECLARE_FLAG(string, auth_validate_url);
 
 namespace dfly {
 
-class ServerFamilyTest : public BaseFamilyTest {
- protected:
-};
+TEST(InfoReplyTest, FieldsAndSubfields) {
+  const InfoReply info(
+      string{"# Stats\r\n\r\nprefixed_count:99\r\ncount:12\r\n"
+             "negative:-2\r\nzero:0\r\nempty:\r\naddress:host:6379\r\n"
+             "cmdstat_getex:calls=99\r\n"
+             "cmdstat_get:failed_calls=8,calls=17,usec=2\r\n"
+             "module:name=search\r\nmodule:name=json\r\nlast:42"});
+  EXPECT_EQ(info.GetInt("count"), 12);
+  EXPECT_EQ(info.GetInt("negative"), -2);
+  EXPECT_EQ(info.GetInt("zero"), 0);
+  EXPECT_EQ(info.GetInt("last"), 42);
+  EXPECT_EQ(info.Find("empty"), "");
+  EXPECT_EQ(info.Find("address"), "host:6379");
+  EXPECT_FALSE(info.Find("missing"));
+  EXPECT_FALSE(info.Find("ount"));
+  EXPECT_EQ(info.GetInt("cmdstat_get", "calls"), 17);
+}
+
+TEST(InfoReplyTest, ReportsInvalidInput) {
+  EXPECT_NONFATAL_FAILURE(InfoReply("broken\r\n"), "Malformed INFO field");
+  EXPECT_NONFATAL_FAILURE(InfoReply(":12\r\n"), "Malformed INFO field");
+  const InfoReply repeated("count:1\r\ncount:2\r\n");
+  EXPECT_NONFATAL_FAILURE(repeated.GetInt("count"), "Ambiguous INFO field");
+
+  const InfoReply info(
+      "count:12oops\r\nempty:\r\noverflow:9223372036854775808\r\n"
+      "cmdstat_get:failed_calls=8\r\ncmdstat_set:calls=17\r\n"
+      "duplicate:calls=1,calls=2\r\n");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("missing"), "Missing INFO field");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("count"), "Invalid INFO integer");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("empty"), "Invalid INFO integer");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("overflow"), "Invalid INFO integer");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("cmdstat_get", "calls"), "Missing INFO subfield");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("duplicate", "calls"), "Duplicate INFO subfield");
+}
+
+namespace {
+class ServerFamilyTest : public BaseFamilyTest {};
+}  // namespace
 
 #ifdef __linux__
 TEST_F(ServerFamilyTest, ReadTcpInfo) {
@@ -337,11 +377,93 @@ TEST_F(ServerFamilyTest, ClientListRejected) {
       {{"CLIENT", "LIST", "ID"}, "syntax error"},
       {{"CLIENT", "LIST", "ID", "abc"}, "Invalid client ID"},
       {{"CLIENT", "LIST", "TYPE", "normal", "ID", "1"}, "syntax error"},
+      {{"CLIENT", "LIST", "TYPE", "normal", "ID", "abc"}, "syntax error"},
       {{"CLIENT", "LIST", "FOO"}, "syntax error"},
   };
   for (const auto& [args, msg] : bad) {
     EXPECT_THAT(Run(args), ErrArg(msg)) << absl::StrJoin(args, " ");
   }
+}
+
+TEST_F(ServerFamilyTest, ClientKillRejected) {
+  const std::vector<std::pair<std::vector<std::string>, std::string>> bad = {
+      {{"CLIENT", "KILL"}, "wrong number of arguments for 'client|kill' command"},
+      {{"CLIENT", "KILL", "1.2.3.4:5"}, "No such client"},
+      {{"CLIENT", "KILL", "TYPE"}, "No such client"},
+      {{"CLIENT", "KILL", "FOO", "bar"}, "syntax error"},
+      {{"CLIENT", "KILL", "TYPE", "normal", "USER"}, "syntax error"},
+      {{"CLIENT", "KILL", "SKIPME", "maybe"}, "syntax error"},
+      {{"CLIENT", "KILL", "ID", "0"}, "client-id should be greater than 0"},
+      {{"CLIENT", "KILL", "ID", "-1"}, "client-id should be greater than 0"},
+      {{"CLIENT", "KILL", "ID", "+5"}, "client-id should be greater than 0"},
+      {{"CLIENT", "KILL", "TYPE", "bogus", "TYPE", "normal"}, "Unknown client type 'bogus'"},
+      {{"CLIENT", "KILL", "USER", "nosuchuser", "MAXAGE", "0"}, "No such user 'nosuchuser'"},
+      {{"CLIENT", "KILL", "MAXAGE", "-1"}, "maxage should be greater than 0"},
+      {{"CLIENT", "KILL", "MAXAGE", "abc"}, "maxage is not an integer or out of range"},
+  };
+  for (const auto& [args, msg] : bad) {
+    EXPECT_THAT(Run(args), ErrArg(msg)) << absl::StrJoin(args, " ");
+  }
+
+  // Error stats keys must not grow with user input.
+  const string errorstats = Run({"INFO", "ERRORSTATS"}).GetString();
+  EXPECT_THAT(errorstats, Not(HasSubstr("nosuchuser")));
+  EXPECT_THAT(errorstats, Not(HasSubstr("bogus")));
+}
+
+// The fixture has no listeners, so only the caller itself can match.
+TEST_F(ServerFamilyTest, ClientKillSelf) {
+  TestInitAclFam();
+  const string id = absl::StrCat(*Run({"CLIENT", "ID"}).GetInt());
+  auto kill = [&](std::vector<std::string> args) {
+    args.insert(args.begin(), {"CLIENT", "KILL"});
+    return Run(args);
+  };
+
+  EXPECT_THAT(kill({"ID", id}), IntArg(0));
+  EXPECT_THAT(kill({"SKIPME", "yes"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", absl::StrCat(stoll(id) + (int64_t{1} << 32)), "SKIPME", "no"}),
+              IntArg(0));
+  const std::vector<std::vector<std::string>> mismatches = {
+      {"MAXAGE", "100000"},
+      {"TYPE", "normal", "USER", "default", "ADDR", "", "LADDR", "1.2.3.4:5"},
+  };
+  for (const auto& mismatch : mismatches) {
+    std::vector<std::string> args = {"ID", id, "SKIPME", "no"};
+    args.insert(args.end(), mismatch.begin(), mismatch.end());
+    EXPECT_THAT(kill(args), IntArg(0)) << absl::StrJoin(args, " ");
+  }
+  EXPECT_THAT(kill({"TYPE", "normal", "USER", "default", "ADDR", "", "SKIPME", "no", "ID", id}),
+              IntArg(1));
+  EXPECT_THAT(kill({"ID", "999999", "ID", id, "SKIPME", "no"}), IntArg(1));
+}
+
+TEST_F(ServerFamilyTest, ClientKillMasterLink) {
+  TestInitAclFam();
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "master"}), IntArg(0));
+
+  // Unlike REPLICAOF, Replicate keeps the link to an unreachable master; .onion is never resolved.
+  pp_->at(0)->Await([&] { service_->server_family().Replicate("x.onion", "1"); });
+  const string row = Run({"CLIENT", "LIST", "TYPE", "master"}).GetString();
+  ASSERT_THAT(row, StartsWith("id="));
+  const string id = row.substr(3, row.find(' ') - 3);
+  EXPECT_EQ(Run({"CLIENT", "LIST", "ID", "999999"}).GetString(), "");
+  auto kill = [&](std::vector<std::string> args) {
+    args.insert(args.begin(), {"CLIENT", "KILL"});
+    return Run(args);
+  };
+
+  EXPECT_THAT(kill({"TYPE", "master"}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
+  EXPECT_THAT(kill({"ID", id}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
+  EXPECT_THAT(kill({"TYPE", "master", "ADDR", "x.onion:1"}), ErrArg("Cannot kill master link"));
+  EXPECT_THAT(kill({"ADDR", "x.onion:1"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "USER", "default"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "ID", "999999"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "ADDR", "1.2.3.4:5"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "MAXAGE", "9223372036854775807"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", id, "LADDR", "1.2.3.4:5"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", id, "TYPE", "normal"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", absl::StrCat(stoll(id) + (int64_t{1} << 32))}), IntArg(0));
 }
 
 TEST_F(ServerFamilyTest, ClientInfoSingleDbField) {
@@ -353,6 +475,16 @@ TEST_F(ServerFamilyTest, ClientInfoSingleDbField) {
   EXPECT_EQ(count, 1u) << info;
   // CLIENT INFO returns a single line with no trailing newline (unlike CLIENT LIST).
   EXPECT_FALSE(absl::EndsWith(info, "\r\n")) << info;
+
+  // A connection without flags shows N.
+  EXPECT_THAT(info, HasSubstr(" flags=N "));
+
+  // RESP3 sends a verbatim string, and t marks a tracking connection.
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+  auto resp = Run({"CLIENT", "INFO"});
+  EXPECT_THAT(resp, ArgType(RespExpr::VERB));
+  EXPECT_THAT(resp.GetString(), HasSubstr(" flags=t "));
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
@@ -469,13 +601,27 @@ TEST_F(ServerFamilyTest, ClientTrackingExpiredKey) {
   Run({"HELLO", "3"});
   Run({"CLIENT", "TRACKING", "ON"});
 
+  // Counted on IO0's thread, after an invalidation the heartbeat may have dispatched there.
+  auto received = [&] { return pp_->at(0)->Await([&] { return InvalidationMessagesLen("IO0"); }); };
+
   Run({"SET", "FOO", "10", "PX", "10"});
   Run({"GET", "FOO"});
   AdvanceTime(20);
 
   EXPECT_THAT(Run({"GET", "FOO"}), ArgType(RespExpr::NIL));
-  ASSERT_EQ(InvalidationMessagesLen("IO0"), 1);
+  ASSERT_EQ(received(), 1u);
   EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "FOO");
+
+  // Active expiry sends the invalidation too, with no later command on the key.
+  Run({"SET", "BAR", "10", "PX", "10"});
+  Run({"GET", "BAR"});
+  AdvanceTime(20);
+
+  // Up to ~100 heartbeats at the default hz=100.
+  for (unsigned i = 0; i < 100 && received() < 2; ++i)
+    ThisFiber::SleepFor(chrono::milliseconds(10));
+  ASSERT_EQ(received(), 2u);
+  EXPECT_EQ(GetInvalidationMessage("IO0", 1).key, "BAR");
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingOptin) {
@@ -686,6 +832,27 @@ TEST_F(ServerFamilyTest, ClientTrackingUpdateKey) {
   Run({"FLUSHDB"});
 }
 
+TEST_F(ServerFamilyTest, ClientTrackingNoLoop) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON", "NOLOOP"});
+
+  // The connection's own writes, also from a script, send it nothing and stop tracking the key.
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "1"});
+  Run({"GET", "FOO"});
+  Run({"EVAL", "return redis.call('set', KEYS[1], '2')", "1", "FOO"});
+  pp_->at(1)->Await([&] { return Run({"SET", "FOO", "3"}); });
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+
+  // A write from another connection to a key read again does.
+  Run({"GET", "FOO"});
+  pp_->at(1)->Await([&] { return Run({"SET", "FOO", "4"}); });
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  ASSERT_EQ(InvalidationMessagesLen("IO0"), 1);
+  EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "FOO");
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingDeleteKey) {
   Run({"HELLO", "3"});
   Run({"CLIENT", "TRACKING", "ON"});
@@ -752,6 +919,11 @@ TEST_F(ServerFamilyTest, ClientTrackingLuaBug) {
   Run({"EVAL", eval, "2", "foo", "oof"});
   Run({"PING"});
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 3);
+
+  // EVAL_RO tracks the keys its commands read, not the script itself.
+  EXPECT_EQ(Run({"EVAL_RO", "return redis.call('get', KEYS[1])", "1", "foo"}), "bar");
+  Run({"SET", "foo", "baz"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 4);
 }
 
 TEST_F(ServerFamilyTest, ConfigNormalization) {
@@ -1197,42 +1369,76 @@ TEST_F(ServerFamilyTest, InfoCommandStatsAggregation) {
     Run({"get", "nonexistent"});
   }
 
-  auto extract_calls = [](std::string_view info, std::string_view stat) -> int {
-    // looks for "<stat>:calls=<n>,..."
-    size_t pos = info.find(stat);
-    if (pos == std::string_view::npos)
-      return -1;
-    std::string_view rest = info.substr(pos);
-    const string needle = "calls=";
-    size_t cpos = rest.find(needle);
-    if (cpos == std::string_view::npos)
-      return -1;
-    rest = rest.substr(cpos + needle.size());
-    int value = 0;
-    for (char c : rest) {
-      if (c < '0' || c > '9')
-        break;
-      value = value * 10 + (c - '0');
-    }
-    return value;
-  };
-
   const string cmdstats = Run({"INFO", "COMMANDSTATS"}).GetString();
-  EXPECT_EQ(extract_calls(cmdstats, "cmdstat_get:"), kGets);
+  EXPECT_EQ(InfoReply(cmdstats).GetInt("cmdstat_get", "calls"), kGets);
 
   // A command never invoked must not appear at all (zero-call commands are skipped).
   EXPECT_THAT(cmdstats, Not(HasSubstr("cmdstat_getex:")));
 
   // The aggregated value is also visible in INFO ALL.
   const string all = Run({"INFO", "ALL"}).GetString();
-  EXPECT_GE(extract_calls(all, "cmdstat_get:"), kGets);
+  EXPECT_GE(InfoReply(all).GetInt("cmdstat_get", "calls"), kGets);
 }
 
 TEST_F(ServerFamilyTest, InfoClusterMigrationErrors) {
   EXPECT_THAT(Run({"INFO", "CLUSTER"}).GetString(), HasSubstr("migration_errors_total:0"));
 }
 
-TEST_F(ServerFamilyTest, TlsAcceptsConfiguredJwtValidation) {
+TEST_F(ServerFamilyTest, ExternalAuth) {
+  absl::FlagSaver flag_saver;
+  EXPECT_THAT(Run({"ACL", "SETUSER", "alice", "on", ">local", "+@all", "~*"}), "OK");
+  EXPECT_THAT(Run({"ACL", "SETUSER", "directory-user", "on", ">local"}), "OK");
+  AcceptServer server{pp_.get(), false};
+  auto* listener = new HttpListener<>;
+  const string password = "pass\"\\word";
+  const string token = "eyJ.mock.token";
+  listener->RegisterCb("/validate", [&](const http::QueryArgs&, HttpListenerBase::RequestType&& req,
+                                        HttpContext* ctx) {
+    EXPECT_EQ(req.method(), beast::http::verb::post);
+    auto body = JsonFromString(req.body());
+    ASSERT_TRUE(body);
+    EXPECT_EQ(body->size(), 2);
+    const string credential = body->at("password").as_string();
+    EXPECT_EQ(body->at("username").as_string(), credential == token ? "default" : "directory-user");
+    auto response = http::MakeStringResponse(beast::http::status::ok);
+    response.body() = credential == password || credential == token
+                          ? R"({"valid":true,"username":"alice"})"
+                          : R"({"valid":false})";
+    ctx->Invoke(std::move(response));
+  });
+  const auto port = server.AddListener(0, listener);
+  server.Run();
+  absl::Cleanup stop_server = [&] { server.Stop(true); };
+  const string url = absl::StrCat("http://localhost:", port, "/validate");
+  absl::SetFlag(&FLAGS_auth_validate, true);
+  absl::SetFlag(&FLAGS_auth_validate_url, url);
+
+  pp_->at(0)->Await([&] {
+    AddFindConn(Protocol::REDIS, "ldap");
+    auto* connection = GetConnection("ldap");
+    ASSERT_FALSE(connection->socket()->Create());
+    absl::Cleanup close_socket = [&] { EXPECT_FALSE(connection->socket()->Close()); };
+    unique_ptr<facade::ConnectionContext> context{service_->CreateContext(connection)};
+    EXPECT_TRUE(context->req_auth);
+    connection->cntx()->req_auth = context->req_auth;
+  });
+  EXPECT_THAT(Run("ldap", {"PING"}), ErrArg("NOAUTH Authentication required."));
+  EXPECT_THAT(Run("ldap", {"AUTH", "directory-user", "local"}),
+              ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
+  EXPECT_THAT(Run("ldap", {"AUTH", "directory-user", password}), "OK");
+  EXPECT_THAT(Run("ldap", {"ACL", "WHOAMI"}), "alice");
+  EXPECT_THAT(Run("token", {"AUTH", token}), "OK");
+  EXPECT_THAT(Run("token", {"ACL", "WHOAMI"}), "alice");
+  absl::SetFlag(&FLAGS_auth_validate_url, "");
+  EXPECT_THAT(Run("ldap", {"AUTH", "directory-user", "local"}),
+              ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
+  absl::SetFlag(&FLAGS_auth_validate_url, url);
+  EXPECT_THAT(Run({"ACL", "SETUSER", "alice", "off"}), "OK");
+  EXPECT_THAT(Run("disabled", {"AUTH", "directory-user", password}),
+              ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
+}
+
+TEST_F(ServerFamilyTest, TlsAcceptsConfiguredExternalValidation) {
   absl::FlagSaver flag_saver;
   const char* password_env = getenv("DFLY_PASSWORD");
   const bool had_password_env = password_env != nullptr;
@@ -1249,12 +1455,11 @@ TEST_F(ServerFamilyTest, TlsAcceptsConfiguredJwtValidation) {
   absl::SetFlag(&FLAGS_tls_ca_cert_file, "");
   absl::SetFlag(&FLAGS_tls_ca_cert_dir, "");
   unsetenv("DFLY_PASSWORD");
-  absl::SetFlag(&FLAGS_jwt_validate, false);
-  absl::SetFlag(&FLAGS_jwt_validate_url, "");
+  absl::SetFlag(&FLAGS_auth_validate, false);
   EXPECT_FALSE(ValidateServerTlsFlags());
 
-  absl::SetFlag(&FLAGS_jwt_validate, true);
-  absl::SetFlag(&FLAGS_jwt_validate_url, "http://localhost:8080/validate");
+  absl::SetFlag(&FLAGS_auth_validate, true);
+  absl::SetFlag(&FLAGS_auth_validate_url, "http://localhost:8080/validate");
   EXPECT_TRUE(ValidateServerTlsFlags());
 }
 

@@ -44,7 +44,15 @@ namespace {
 constexpr string_view kMagic = "dfaof-manifest";
 
 string_view FormatState(AofManifest::State state) {
-  return state == AofManifest::State::kActive ? "active" : "bootstrapping";
+  switch (state) {
+    case AofManifest::State::kBootstrapping:
+      return "bootstrapping";
+    case AofManifest::State::kActive:
+      return "active";
+    case AofManifest::State::kRebasing:
+      return "rebasing";
+  }
+  return "";
 }
 
 // The value of a "<key> <value>" line, or nullopt if the line has another key.
@@ -64,6 +72,8 @@ bool ParseState(string_view val, AofManifest::State* state) {
     *state = AofManifest::State::kActive;
   else if (val == "bootstrapping")
     *state = AofManifest::State::kBootstrapping;
+  else if (val == "rebasing")
+    *state = AofManifest::State::kRebasing;
   else
     return false;
   return true;
@@ -106,13 +116,40 @@ string_view GetBaseName(string_view path) {
   return path.substr(path.rfind('/') + 1);
 }
 
+constexpr string_view kOwnedBasePrefix = "appendonly-base-";
+
+// An owned base's summary or shard file: appendonly-base-<ckpt>-summary.dfs or -NNNN.dfs.
+bool IsOwnedBaseFileName(string_view name) {
+  if (!absl::ConsumePrefix(&name, kOwnedBasePrefix))
+    return false;
+  size_t dash = name.find('-');
+  uint64_t ckpt;
+  if (dash == string_view::npos || !absl::SimpleAtoi(name.substr(0, dash), &ckpt))
+    return false;
+  name.remove_prefix(dash + 1);
+  if (name == "summary.dfs")
+    return true;
+  uint32_t sid;
+  return name.size() == 8 && absl::ConsumeSuffix(&name, ".dfs") && absl::SimpleAtoi(name, &sid);
+}
+
 // Only our names: other tools' files may share the appendonly prefix in --dir.
 bool IsAofFileName(string_view name) {
   if (!absl::ConsumeSuffix(&name, ".tmp"))
     absl::ConsumeSuffix(&name, ".discarded");
   uint32_t sid;
   uint64_t seq;
-  return name == kAofManifestName || AofSegmentWriter::ParseSegmentName(name, &sid, &seq);
+  return name == kAofManifestName || AofSegmentWriter::ParseSegmentName(name, &sid, &seq) ||
+         IsOwnedBaseFileName(name);
+}
+
+// A file of the base the manifest names, owned or not: GC never deletes it.
+bool IsCurrentBaseFile(string_view name, const AofManifest& manifest) {
+  if (manifest.base_path.empty())
+    return false;
+  string_view prefix = manifest.base_path;
+  absl::ConsumeSuffix(&prefix, "summary.dfs");
+  return name.starts_with(prefix);
 }
 
 // Deletes the files and makes the deletions durable.
@@ -126,6 +163,10 @@ error_code RemoveFiles(string_view dir, const vector<string>& paths) {
 }
 
 }  // namespace
+
+string AofOwnedBaseName(uint64_t checkpoint_id) {
+  return absl::StrCat(kOwnedBasePrefix, checkpoint_id);
+}
 
 string EncodeAofManifest(const AofManifest& m) {
   DCHECK_EQ(m.base_path.find('\n'), string::npos);
@@ -235,7 +276,19 @@ error_code RemoveAofFilesExceptManifest(string_view dir) {
   return RemoveFiles(dir, *files);
 }
 
-error_code CollectAofGarbage(string_view dir, const AofManifest& manifest) {
+error_code RemoveAofOwnedBase(string_view dir, uint64_t checkpoint_id) {
+  io::Result<vector<string>> files = ListAofFiles(dir);
+  if (!files)
+    return files.error();
+  string prefix = absl::StrCat(AofOwnedBaseName(checkpoint_id), "-");
+  erase_if(*files, [&prefix](const string& path) {
+    string_view name = GetBaseName(path);
+    return !name.starts_with(prefix) || !IsOwnedBaseFileName(name);
+  });
+  return RemoveFiles(dir, *files);
+}
+
+error_code CollectAofGarbage(string_view dir, const AofManifest& manifest, bool remove_discarded) {
   io::Result<vector<string>> files = ListAofFiles(dir);
   if (!files)
     return files.error();
@@ -244,8 +297,10 @@ error_code CollectAofGarbage(string_view dir, const AofManifest& manifest) {
     string_view name = GetBaseName(path);
     uint32_t sid;
     uint64_t seq;
-    if (name.ends_with(".tmp") || (AofSegmentWriter::ParseSegmentName(name, &sid, &seq) &&
-                                   sid < manifest.cuts.size() && seq < manifest.cuts[sid].seq)) {
+    if (name.ends_with(".tmp") || (remove_discarded && name.ends_with(".discarded")) ||
+        (AofSegmentWriter::ParseSegmentName(name, &sid, &seq) && sid < manifest.cuts.size() &&
+         seq < manifest.cuts[sid].seq) ||
+        (IsOwnedBaseFileName(name) && !IsCurrentBaseFile(name, manifest))) {
       garbage.push_back(path);
     }
   }

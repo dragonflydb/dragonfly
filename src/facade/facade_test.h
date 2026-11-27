@@ -69,6 +69,10 @@ inline ::testing::PolymorphicMatcher<RespMatcher> DoubleArg(double_t dval) {
   return ::testing::MakePolymorphicMatcher(RespMatcher(dval));
 }
 
+inline ::testing::PolymorphicMatcher<RespMatcher> BoolArg(bool val) {
+  return ::testing::MakePolymorphicMatcher(RespMatcher(int64_t{val}, RespExpr::BOOL));
+}
+
 inline ::testing::PolymorphicMatcher<RespMatcher> ArrLen(size_t len) {
   return ::testing::MakePolymorphicMatcher(RespMatcher((int64_t)len, RespExpr::ARRAY));
 }
@@ -85,6 +89,19 @@ MATCHER_P(RespArray, value, "") {
 
 template <typename... Args> auto RespElementsAre(const Args&... matchers) {
   return RespArray(::testing::ElementsAre(matchers...));
+}
+
+// RESP3 arrays, maps and sets all arrive as ARRAY; these check which one was sent.
+MATCHER(IsResp3ArrayKind, "is a RESP3 array") {
+  return arg.type == RespExpr::ARRAY && arg.agg == RespExpr::Agg::kArray;
+}
+
+MATCHER(IsResp3MapKind, "is a RESP3 map") {
+  return arg.type == RespExpr::ARRAY && arg.agg == RespExpr::Agg::kMap;
+}
+
+MATCHER(IsResp3SetKind, "is a RESP3 set") {
+  return arg.type == RespExpr::ARRAY && arg.agg == RespExpr::Agg::kSet;
 }
 
 inline bool operator==(const RespExpr& left, std::string_view s) {

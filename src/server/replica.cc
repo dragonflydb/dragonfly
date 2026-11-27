@@ -149,7 +149,7 @@ GenericError Replica::Start() {
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
   error_code ec = ResolveHostDns();
-  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not resolve master dns"));
+  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not resolve master dns: "));
 
   // 2. Connect socket.
   VLOG(1) << "Connecting to master";
@@ -160,7 +160,7 @@ GenericError Replica::Start() {
   VLOG(1) << "Greeting";
   state_mask_ = R_ENABLED | R_TCP_CONNECTED;
   ec = Greet();
-  RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
+  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not greet master: "));
 
   return {};
 }
@@ -310,9 +310,9 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
           exec_st_.ReportError(ec);
           break;
         }
-        LOG(WARNING) << "Error syncing with " << server().Description()
-                     << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
-                     << ", socket state: " + SockInfo();
+        LOG_IF(WARNING, state_mask_ & R_ENABLED)
+            << "Error syncing with " << server().Description() << " (phase: " << GetCurrentPhase()
+            << "): " << ec << " " << ec.message() << ", socket state: " + SockInfo();
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }
@@ -502,10 +502,10 @@ error_code Replica::InitiatePSync() {
 
   RETURN_ON_ERR(ParseReplicationHeader(&io_buf, &repl_header));
 
-  string* token = absl::get_if<string>(&repl_header.fullsync);
+  string* token = std::get_if<string>(&repl_header.fullsync);
   size_t snapshot_size = SIZE_MAX;
   if (!token) {
-    snapshot_size = absl::get<size_t>(repl_header.fullsync);
+    snapshot_size = std::get<size_t>(repl_header.fullsync);
   }
   TouchIoTime();
 
@@ -526,6 +526,10 @@ error_code Replica::InitiatePSync() {
 
     absl::Cleanup cleanup = [this]() { service_.RemoveLoadingState(); };
 
+    // The loaded data bypasses the journal: the AOF stops appending until its next base.
+    if (GenericError ec = service_.server_family().PauseAofAndEnterRebasing(); ec)
+      return exec_st_.ReportError(std::move(ec));
+
     FlushData();
 
     RdbLoadContext load_context;
@@ -541,24 +545,32 @@ error_code Replica::InitiatePSync() {
     }
     VLOG(1) << "full sync completed";
 
+    auto bad_trailer = [this](string_view reason) {
+      LOG(ERROR) << "Bad full sync trailer from master: " << reason;
+      FlushData();
+      return std::make_error_code(std::errc::illegal_byte_sequence);
+    };
+
     if (token) {
       uint8_t buf[kRdbEofMarkSize];
       io::PrefixSource chained(loader.Leftover(), &ps);
       VLOG(1) << "Before reading from chained stream";
       io::Result<size_t> eof_res = chained.Read(io::MutableBytes{buf});
-      CHECK(eof_res && *eof_res == kRdbEofMarkSize);
+      if (!eof_res || *eof_res != kRdbEofMarkSize)
+        return bad_trailer("missing EOF mark");
 
       VLOG(1) << "Comparing token " << io::View(io::Bytes{buf});
-
-      // TODO: handle gracefully...
-      CHECK_EQ(0, memcmp(token->data(), buf, kRdbEofMarkSize));
-      CHECK(chained.UnusedPrefix().empty());
+      if (memcmp(token->data(), buf, kRdbEofMarkSize) != 0)
+        return bad_trailer("EOF mark mismatch");
+      if (!chained.UnusedPrefix().empty())
+        return bad_trailer("unexpected data after EOF mark");
     } else {
-      CHECK_EQ(0u, loader.Leftover().size());
-      CHECK_EQ(snapshot_size, loader.bytes_read());
+      if (!loader.Leftover().empty() || loader.bytes_read() != snapshot_size)
+        return bad_trailer("snapshot size mismatch");
     }
 
-    CHECK(ps.UnusedPrefix().empty());
+    if (!ps.UnusedPrefix().empty())
+      return bad_trailer("unexpected data after snapshot");
     io_buf.ConsumeInput(io_buf.InputLen());
     TouchIoTime();
   } else {
@@ -699,6 +711,10 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       }
       sync_type = "full";
 
+      // The loaded data bypasses the journal: the AOF stops appending until its next base.
+      if (GenericError ec = service_.server_family().PauseAofAndEnterRebasing(); ec)
+        return exec_st_.ReportError(std::move(ec));
+
       DVLOG(1) << "Calling Flush on all slots " << this;
 
       passed_full_sync_ = false;
@@ -781,6 +797,9 @@ error_code Replica::ConsumeRedisStream() {
   // buffer gets disposed of already processed commands, this is done in a separate fiber.
   LOG(INFO) << "Transitioned into stable sync";
 
+  // After a full sync, the AOF takes a checkpoint so its base covers the loaded data.
+  service_.server_family().StartAofRebaseCheckpoint();
+
   // Set new error handler.
   auto err_handler = [this](const auto& ge) {
     // Trigger ack-fiber
@@ -838,7 +857,7 @@ error_code Replica::ConsumeRedisStream() {
       auto cmd = last_args.Front();
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
-      // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we
+      // Dragonfly disallows some commands, such as FLUSHALL, inside of MULTI/EXEC, so here we
       // simply ignore MULTI/EXEC and execute their inner commands individually.
       if (!absl::EqualsIgnoreCase(cmd, "MULTI") && !absl::EqualsIgnoreCase(cmd, "EXEC")) {
         VLOG(2) << "Got command " << absl::CHexEscape(cmd)
@@ -933,6 +952,9 @@ error_code Replica::ConsumeDflyStream() {
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
   LOG(INFO) << "Transitioned into stable sync";
+
+  // After a full sync, the AOF takes a checkpoint so its base covers the loaded data.
+  service_.server_family().StartAofRebaseCheckpoint();
 
   // Continue the master's LSN numbering so cascaded sub-replicas share the lineage root's LSN
   // space and can negotiate partial sync when reconnecting up the chain.
@@ -1298,14 +1320,14 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
   std::string_view header;
   bool valid = false;
 
-  auto bad_header = [str]() {
-    LOG(ERROR) << "Bad replication header: " << str;
+  auto bad_header = [](std::string_view line) {
+    LOG(ERROR) << "Bad replication header: " << line;
     return std::make_error_code(std::errc::illegal_byte_sequence);
   };
 
   // non-empty lines
   if (str[0] != '+') {
-    return bad_header();
+    return bad_header(str);
   }
 
   header = str.substr(1);
@@ -1324,7 +1346,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     }
 
     if (!valid)
-      return bad_header();
+      return bad_header(str);
 
     io_buf->ConsumeInput(str.size() + 2);
     RETURN_ON_ERR(ReadLine(io_buf, &str));  // Read the next line parsed below.
@@ -1334,13 +1356,14 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     DCHECK(!str.empty());
 
     if (str[0] != '$') {
-      return bad_header();
+      return bad_header(str);
     }
 
     std::string_view token = str.substr(1);
     VLOG(1) << "token: " << token;
     if (absl::ConsumePrefix(&token, "EOF:")) {
-      CHECK_EQ(kRdbEofMarkSize, token.size()) << token;
+      if (token.size() != kRdbEofMarkSize)
+        return bad_header(str);
       dest->fullsync.emplace<string>(token);
       VLOG(1) << "Token: " << token;
     } else {
@@ -1361,7 +1384,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     return std::make_error_code(std::errc::not_supported);
   } else {
     LOG(ERROR) << "Unknown replication header";
-    return bad_header();
+    return bad_header(str);
   }
 
   return error_code{};
@@ -1434,7 +1457,7 @@ int Replica::GetMasterSocketUnreadBytes() {
   return GetSocketUnreadBytes();
 }
 
-string Replica::GetClientInfo() const {
+facade::ClientInfo Replica::GetClientInfo() const {
   auto f = [this]() {
     facade::ClientInfo ci;
     time_t now = time(nullptr);
@@ -1468,7 +1491,7 @@ string Replica::GetClientInfo() const {
     ci.db = 0;
     ci.flags = "M";
     ci.repl_phase = absl::AsciiStrToLower(GetCurrentPhase());
-    return facade::FormatClientInfo(ci);
+    return ci;
   };
   return proactor_->AwaitBrief(f);
 }

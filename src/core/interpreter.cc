@@ -5,6 +5,7 @@
 #include "core/interpreter.h"
 
 #include <absl/base/casts.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
@@ -289,6 +290,8 @@ bool RedisTranslator::HasError() {
   return has_error_;
 }
 
+constexpr const char kErrHandlerKey[] = "__dfly_err_handler";
+
 void RunSafe(lua_State* lua, string_view buf, const char* name) {
   CHECK_EQ(0, luaL_loadbuffer(lua, buf.data(), buf.size(), name));
   int err = lua_pcall(lua, 0, 0, 0);
@@ -325,13 +328,61 @@ constexpr size_t kExtraReplyElements = 1 << 20;
 // Replaces a table whose elements do not fit in the reply's budget.
 constexpr string_view kReplySizeError = "ERR reached lua reply size limit";
 
+// Pops the value on top of the stack and assigns it to the global `name`. Bypasses the read-only
+// protection of the global table (and its metamethods), so it must not be reachable from scripts.
+void SetGlobalUnprotected(lua_State* lua, const char* name) {
+  lua_pushglobaltable(lua);
+  bool readonly = lua_isreadonlytable(lua, -1);
+  lua_insert(lua, -2);  // Stack: _G value
+  lua_pushstring(lua, name);
+  lua_insert(lua, -2);  // Stack: _G name value
+  lua_enablereadonlytable(lua, -3, 0);
+  lua_rawset(lua, -3);
+  lua_enablereadonlytable(lua, -1, readonly);
+  lua_pop(lua, 1);
+}
+
+// Marks the table on top of the stack, its metatable and all tables reachable from them read-only.
+void ProtectTablesRecursively(lua_State* lua, absl::flat_hash_set<const void*>* visited) {
+  if (!visited->insert(lua_topointer(lua, -1)).second)
+    return;
+
+  CHECK(lua_checkstack(lua, 3));
+  lua_enablereadonlytable(lua, -1, 1);
+  if (lua_getmetatable(lua, -1)) {
+    ProtectTablesRecursively(lua, visited);
+    lua_pop(lua, 1);
+  }
+
+  lua_pushnil(lua);
+  while (lua_next(lua, -2) != 0) {
+    if (lua_type(lua, -1) == LUA_TTABLE)
+      ProtectTablesRecursively(lua, visited);
+    lua_pop(lua, 1);
+  }
+}
+
+// Makes the global environment read-only, so a script can not change state seen by later scripts:
+// the global table, every table reachable from it (the libraries) and the metatable of strings.
+void ProtectGlobalState(lua_State* lua) {
+  absl::flat_hash_set<const void*> visited;
+  lua_pushglobaltable(lua);
+  ProtectTablesRecursively(lua, &visited);
+  lua_pop(lua, 1);
+
+  lua_pushliteral(lua, "");
+  CHECK(lua_getmetatable(lua, -1));
+  ProtectTablesRecursively(lua, &visited);
+  lua_pop(lua, 2);
+}
+
 void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::SliceSpan args) {
   lua_createtable(lua, args.size(), 0);
   for (size_t j = 0; j < args.size(); j++) {
     lua_pushlstring(lua, args[j].data(), args[j].size());
     lua_rawseti(lua, -2, j + 1);
   }
-  lua_setglobal(lua, name);
+  SetGlobalUnprotected(lua, name);
 }
 
 /* In case the error set into the Lua stack by PushError() was generated
@@ -350,75 +401,6 @@ void LoadLibrary(lua_State* lua, const char* libname, lua_CFunction luafunc) {
   lua_pushcfunction(lua, luafunc);
   lua_pushstring(lua, libname);
   lua_call(lua, 1, 0);
-}
-
-// Returns true if the table at stack index idx is _G, its metatable, or any global table value.
-bool IsGlobalTableOrMetatable(lua_State* lua, int idx) {
-  lua_pushglobaltable(lua);
-
-  // Check if idx is _G itself.
-  if (lua_rawequal(lua, idx, -1)) {
-    lua_pop(lua, 1);
-    return true;
-  }
-
-  // Check if metatable of _G.
-  bool has_mt = lua_getmetatable(lua, -1);
-  if (has_mt) {
-    lua_remove(lua, -2);
-    bool eq = lua_rawequal(lua, idx, -1);
-    lua_pop(lua, 1);
-    if (eq) {
-      return true;
-    }
-  } else {
-    lua_pop(lua, 1);
-  }
-
-  // Check if idx is any table stored directly as a global value.
-  lua_pushglobaltable(lua);
-  lua_pushnil(lua);
-  while (lua_next(lua, -2) != 0) {
-    if (lua_type(lua, -1) == LUA_TTABLE && lua_rawequal(lua, idx, -1)) {
-      lua_pop(lua, 3);
-      return true;
-    }
-    lua_pop(lua, 1);
-  }
-
-  lua_pop(lua, 1);
-
-  return false;
-}
-
-// Protected replacement for rawset: blocks writes to _G or its metatable.
-int ProtectedRawset(lua_State* lua) {
-  int argc = lua_gettop(lua);
-  if (argc != 3 || lua_type(lua, 1) != LUA_TTABLE) {
-    lua_pushstring(lua, "rawset requires a table and two arguments");
-    return lua_error(lua);
-  }
-  if (IsGlobalTableOrMetatable(lua, 1)) {
-    lua_pushstring(lua, "Script attempted to access rawset with global environment");
-    return lua_error(lua);
-  }
-  lua_rawset(lua, 1);
-  return 1;
-}
-
-// Protected replacement for setmetatable: blocks replacing metatable of _G or its metatable.
-int ProtectedSetmetatable(lua_State* lua) {
-  int argc = lua_gettop(lua);
-  if (argc != 2 || lua_type(lua, 1) != LUA_TTABLE) {
-    lua_pushstring(lua, "setmetatable requires a table and one argument");
-    return lua_error(lua);
-  }
-  if (IsGlobalTableOrMetatable(lua, 1)) {
-    lua_pushstring(lua, "Script attempted to set metatable of global environment");
-    return lua_error(lua);
-  }
-  lua_setmetatable(lua, 1);
-  return 1;
 }
 
 void InitLua(lua_State* lua) {
@@ -440,7 +422,7 @@ void InitLua(lua_State* lua) {
   {
     constexpr char errh_func[] =
         "local dbg = debug\n"
-        "function __redis__err__handler(err)\n"
+        "return function(err)\n"
         "  local i = dbg.getinfo(2,'nSl')\n"
         "  if i and i.what == 'C' then\n"
         "    i = dbg.getinfo(3,'nSl')\n"
@@ -451,24 +433,18 @@ void InitLua(lua_State* lua) {
         "    return err\n"
         "  end\n"
         "end\n";
-    RunSafe(lua, errh_func, "@err_handler_def");
+    // Keep the handler in the registry so scripts can not replace it.
+    CHECK_EQ(0, luaL_loadbuffer(lua, errh_func, sizeof(errh_func) - 1, "@err_handler_def"));
+    CHECK_EQ(0, lua_pcall(lua, 0, 1, 0));
+    lua_setfield(lua, LUA_REGISTRYINDEX, kErrHandlerKey);
   }
 
   {
     const char code[] = R"(
 local dbg=debug
 local mt = {}
-local _orig_rawset=rawset
 setmetatable(_G, mt)
-mt.__newindex = function (t, n, v)
-  if dbg.getinfo(2) then
-    local w = dbg.getinfo(2, "S").what
-    if w ~= "main" and w ~= "C" then
-      error("Script attempted to create global variable '"..tostring(n).."'", 2)
-    end
-  end
-  _orig_rawset(t, n, v)
-end
+-- Writes to globals are rejected by the read-only protection of _G, see ProtectGlobalState().
 mt.__index = function (t, n)
   if dbg.getinfo(2) and dbg.getinfo(2, "S").what ~= "C" then
     error("Script attempted to access nonexistent global variable '"..tostring(n).."'", 2)
@@ -490,29 +466,9 @@ getmetatable = function(t)
 end
 -- Remove debug library
 debug = nil
--- Lock all global tables so scripts cannot replace their metatables.
-local global_guard = {}
-global_guard.__metatable = "Script attempted to access metatable of global table"
-for _, v in pairs(_G) do
-  if type(v) == "table" and v ~= _G then
-    setmetatable(v, global_guard)
-  end
-end
 )";
     RunSafe(lua, code, "@enable_strict_lua");
   }
-
-  // Protected replacements for built-in functions.
-  const luaL_Reg protected_funcs[] = {
-      // Blocks direct writes to _G or its metatable.
-      {"rawset", ProtectedRawset},
-      // Blocks replacing the metatable of _G or its metatable.
-      {"setmetatable", ProtectedSetmetatable},
-      {nullptr, nullptr},
-  };
-  lua_pushglobaltable(lua);
-  luaL_setfuncs(lua, protected_funcs, 0);
-  lua_pop(lua, 1);
 
   lua_pushnil(lua);
   lua_setglobal(lua, "loadfile");
@@ -835,6 +791,9 @@ Interpreter::Interpreter() {
   lua_setglobal(lua_, "redis");
   CHECK(lua_checkstack(lua_, 64));
 
+  // All globals are set up, lock them.
+  ProtectGlobalState(lua_);
+
   UpdateGCParameters();
 }
 
@@ -915,7 +874,7 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
 
   DCHECK_EQ(40u, sha.size());
 
-  lua_getglobal(lua_, "__redis__err__handler");
+  lua_getfield(lua_, LUA_REGISTRYINDEX, kErrHandlerKey);
   char fname[43];
   fname[0] = 'f';
   fname[1] = '_';
@@ -949,7 +908,8 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
   }
 
   if (err) {
-    *error = lua_tostring(lua_, -1);
+    const char* msg = lua_isstring(lua_, -1) ? lua_tostring(lua_, -1) : nullptr;
+    *error = msg ? msg : "unknown script error";
   }
 
   return err == 0 ? RUN_OK : RUN_ERR;
@@ -972,7 +932,7 @@ void Interpreter::GlobalArrayBuilder::AddElem(unsigned index, std::string_view e
 
 Interpreter::GlobalArrayBuilder::~GlobalArrayBuilder() {
   if (lua_) {
-    lua_setglobal(lua_, name_);
+    SetGlobalUnprotected(lua_, name_);
   }
 }
 
@@ -1193,21 +1153,16 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
 }
 
 bool Interpreter::AddInternal(const char* f_id, string_view body, string* error) {
-  string script = absl::StrCat("function ", f_id, "() \n");
-  absl::StrAppend(&script, body, "\nend");
-
-  int res = luaL_loadbuffer(lua_, script.data(), script.size(), "@user_script");
-  if (res == 0) {
-    res = lua_pcall(lua_, 0, 0, 0);  // run func definition code
-  }
-
-  if (res) {
+  // Compile the body as a chunk of its own, so no part of it runs before the script is called.
+  // Accept only source text: Lua does not verify binary chunks, so bytecode could break the VM.
+  if (luaL_loadbufferx(lua_, body.data(), body.size(), "@user_script", "t")) {
     error->assign(lua_tostring(lua_, -1));
     lua_pop(lua_, 1);  // Remove the error.
 
     return false;
   }
 
+  SetGlobalUnprotected(lua_, f_id);
   return true;
 }
 
@@ -1375,6 +1330,7 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
 
 void Interpreter::ResetStack() {
   lua_settop(lua_, 0);
+  redis_func_ = nullptr;
 }
 
 int64_t Interpreter::RunGC() {

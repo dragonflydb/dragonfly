@@ -5,6 +5,7 @@
 }
 
 %{
+  #include <absl/strings/ascii.h>
   #include <absl/strings/escaping.h>
   #include <absl/strings/numbers.h>
 
@@ -82,6 +83,7 @@ sep_ch     [.!#&=<>^?+/']
 "$EPSILON"           return Parser::make_EPSILON (loc());
 "$YIELD_DISTANCE_AS" return Parser::make_YIELD_DISTANCE_AS (loc());
 "$WEIGHT"            return Parser::make_WEIGHT (loc());
+"ismissing"/[[:space:]]*"(" return Parser::make_ISMISSING (loc());
 
 [0-9]{1,9}                          return Parser::make_UINT32(str(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)       return Parser::make_DOUBLE(str(), loc());
@@ -101,7 +103,7 @@ w{dq}([^"]|{esc_seq})*{dq}            { if (str()[0] != 'w') { matcher().less(1)
 {sq}([^']|{esc_seq})*{sq}(~[0-9]+)?   return make_PhraseTok(str(), loc());
 
 "$"{term_ch}+                       return ParseParam(str(), loc());
-"@"{term_ch}+                       return Parser::make_FIELD(str(), loc());
+"@"{term_part}+                     return Parser::make_FIELD(UnescapeTerm(str()), loc());
 {astrsk_ch}{term_part}+{astrsk_ch}    return Parser::make_INFIX(UnescapeTerm(matched_view(1, 1)), loc());
 {term_part}+{astrsk_ch}               return Parser::make_PREFIX(UnescapeTerm(matched_view(0, 1)), loc());
 {astrsk_ch}{term_part}+               return Parser::make_SUFFIX(UnescapeTerm(matched_view(1, 0)), loc());
@@ -164,9 +166,19 @@ string UnescapeTerm(string_view src) {
   return res;
 }
 
+// Raw whitespace the longest match takes in around an unquoted tag value only separates tokens.
+string_view TrimRawWhitespace(string_view src) {
+  src = absl::StripLeadingAsciiWhitespace(src);
+  string_view kept = absl::StripTrailingAsciiWhitespace(src);
+  size_t slashes = kept.size() - (kept.find_last_not_of('\\') + 1);
+  return src.substr(0, kept.size() + slashes % 2);  // an odd run escapes the next character
+}
+
 Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc) {
   // Trim the glob markers, then share the single-layer `\X` unescape with terms via UnescapeTerm,
   // so quoted and unquoted tag values can never diverge.
+  if (type == TagType::REGULAR)  // a trimmed affix could become "", which matches every tag
+    src = TrimRawWhitespace(src);
   size_t start = (type == TagType::SUFFIX || type == TagType::INFIX) ? 1 : 0;
   size_t end = src.size();
   if (type == TagType::PREFIX || type == TagType::INFIX) {

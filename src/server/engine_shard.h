@@ -9,6 +9,7 @@
 #include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
+#include "base/cycle_clock.h"
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
@@ -26,8 +27,6 @@ class EngineShardSet;
 class TieredStorage;
 class ShardDocIndices;
 class AofStreamer;
-
-using TypeAttributedMemory = std::array<int64_t, OBJ_TYPE_MAX>;
 
 class EngineShard {
   friend class EngineShardSet;
@@ -131,6 +130,11 @@ class EngineShard {
 
   Stats& stats() {
     return stats_;
+  }
+
+  // Shared by all outgoing migration serializers and slot cleanup on this shard.
+  base::CycleBucketAggregator& migration_cpu_aggregator() {
+    return migration_cpu_aggregator_;
   }
 
   // Calculate memory used by shard by summing multiple sources.
@@ -261,12 +265,6 @@ class EngineShard {
   // Merge underutilized buddy-segment pairs in the dash table.
   CompactTableStats CompactTable(double threshold, DbIndex db_idx);
 
-  void AddTypeMemDelta(size_t type, int64_t delta);
-
-  const TypeAttributedMemory& type_attributed_memory() const {
-    return type_attributed_memory_;
-  }
-
   friend void RetireExpiredAndEvictForTest(EngineShard*);
 
  private:
@@ -351,6 +349,7 @@ class EngineShard {
 
   ShardId shard_id_;
   Stats stats_;
+  base::CycleBucketAggregator migration_cpu_aggregator_;
 
   // Become passive if replica: don't automatially evict expired items.
   bool is_replica_ = false;
@@ -398,8 +397,6 @@ class EngineShard {
   Counter counter_[COUNTER_TOTAL];
 
   uint32_t heartbeat_ns_rotation_ = 0;
-
-  TypeAttributedMemory type_attributed_memory_ = {};
 
   static __thread EngineShard* shard_;
 };

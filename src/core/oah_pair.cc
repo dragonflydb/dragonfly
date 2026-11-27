@@ -11,15 +11,17 @@ namespace dfly {
 
 using namespace oah;
 
-TaggedPtr OAHPair::BuildBlob(std::string_view key, uint32_t real_size, char* value_ptr,
+TaggedPtr OAHPair::BuildBlob(std::string_view key, uint32_t real_size, const char* value_ptr,
                              size_t value_size, uint32_t expiry) {
   const uint8_t encoded_bit = (key.size() != real_size) * key::kEncodedBit;
   assert(value_size <= size::kMaxSize);
   const uint32_t expiry_size = (expiry != UINT32_MAX) * sizeof(expiry);
   const uint32_t key_field = size::FieldSize(real_size);
   const uint32_t val_size_field = size::FieldSize(value_size);
+  const bool use_ptr = ValueUsesPointer(value_size);
+  const size_t value_field = use_ptr ? sizeof(value_ptr) : value_size;
 
-  const size_t blob_size = expiry_size + key_field + val_size_field + sizeof(char*) + key.size();
+  const size_t blob_size = expiry_size + key_field + val_size_field + key.size() + value_field;
   char* blob = (char*)zmalloc(blob_size);
   TaggedPtr tagged_ptr = reinterpret_cast<TaggedPtr>(blob);
   if (expiry_size) {
@@ -33,22 +35,23 @@ TaggedPtr OAHPair::BuildBlob(std::string_view key, uint32_t real_size, char* val
   size::Write(value_size, val_size_field, p);
   p += val_size_field;
 
-  std::memcpy(p, &value_ptr, sizeof(value_ptr));
-  p += sizeof(value_ptr);
-
   // args are never null, even when empty (see CmdArgParser::SafeSV), so memcpy needs no size guard.
   DCHECK(key.data());
   std::memcpy(p, key.data(), key.size());
+  p += key.size();
+
+  if (use_ptr)
+    std::memcpy(p, &value_ptr, sizeof(value_ptr));
+  else if (value_size)
+    std::memcpy(p, value_ptr, value_size);
   return tagged_ptr;
 }
 
 TaggedPtr OAHPair::Create(std::string_view key, uint32_t real_size, std::string_view value,
                           uint32_t expiry) {
-  char* value_ptr = nullptr;
-  if (!value.empty()) {
-    value_ptr = (char*)zmalloc(value.size());
-    std::memcpy(value_ptr, value.data(), value.size());
-  }
+  const char* value_ptr = value.data();
+  if (ValueUsesPointer(value.size()))
+    value_ptr = (char*)std::memcpy(zmalloc(value.size()), value.data(), value.size());
   return BuildBlob(key, real_size, value_ptr, value.size(), expiry);
 }
 
@@ -76,10 +79,10 @@ void OAHPair::SetExtHash(uint64_t ext_hash) {
 void OAHPair::Rebuild(uint32_t expiry) {
   const uint64_t saved_hash = GetHash();
   const Header header = ParseHeader();
-  char* value_ptr = ReadValuePtr(header);
+  char* value_ptr = ValueData(header);
   // Copy the stored key verbatim (already encoded): no decode/re-encode, keep the encoded flag. The
-  // key content view points into the old blob and is copied before the old blob is freed; the
-  // rebuilt blob keeps the same value buffer.
+  // key content and inline value point into the old blob and are copied before the old blob is
+  // freed; the rebuilt blob keeps the same value buffer.
   const std::string_view content{header.key_content, header.key.content_size};
   TaggedPtr rebuilt = BuildBlob(content, header.key.len, value_ptr, header.value_size, expiry);
   OAHPair(rebuilt).SetExtHash(saved_hash);
@@ -122,10 +125,10 @@ ssize_t OAHPair::ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
 
   if (realloc_value) {
     const Header header = ParseHeader();
-    char* old_value = ReadValuePtr(header);
+    char* old_value = ValueData(header);
     char* new_value = (char*)zmalloc(header.value_size);
     std::memcpy(new_value, old_value, header.value_size);
-    std::memcpy(header.value_ptr_field, &new_value, sizeof(new_value));
+    std::memcpy(header.value_field, &new_value, sizeof(new_value));
     zfree(old_value);
   }
 

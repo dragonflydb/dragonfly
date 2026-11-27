@@ -104,6 +104,7 @@ string UnescapeTerm(string_view src);
   VECTOR_RANGE      "VECTOR_RANGE"
   YIELD_DISTANCE_AS "$YIELD_DISTANCE_AS"
   WEIGHT      "$WEIGHT"
+  ISMISSING   "ismissing"
   GLUE        "glue"
 ;
 
@@ -137,7 +138,7 @@ string UnescapeTerm(string_view src);
 %nterm <std::unique_ptr<AstKnnNode>> knn_query
 %nterm <std::string> opt_knn_alias
 %nterm <KnnAttributes> opt_knn_attrs knn_attrs knn_attr
-%nterm <std::string> geounit
+%nterm <std::string> geounit vec_blob
 %nterm <std::optional<uint32_t>> opt_ef_runtime
 %nterm <AstExpr> vector_range_query
 %nterm <VectorRangeAttributes> vector_range_attrs vector_range_attr vector_range_attrs_clause
@@ -159,7 +160,7 @@ final_query:
       }
 
 knn_query:
-  LBRACKET KNN UINT32 FIELD TERM opt_ef_runtime opt_knn_alias RBRACKET opt_knn_attrs
+  LBRACKET KNN UINT32 FIELD vec_blob opt_ef_runtime opt_knn_alias RBRACKET opt_knn_attrs
     {
       // Accept any string as vector - validation happens later during search execution
       uint32_t knn_count = toUint32($3);
@@ -175,6 +176,10 @@ knn_query:
       // Raw query bytes are validated at search time against the field's declared dtype width.
       $$ = make_unique<AstKnnNode>(knn_count, std::move(field), std::string{$5}, std::move(alias), ef);
     }
+
+// Only an empty parameter gives an empty TERM, and an empty vector is no vector.
+vec_blob:
+  TERM { auto b = std::move($1); if (b.empty()) YYABORT; $$ = std::move(b); }
 
 opt_knn_alias:
   AS TERM { $$ = std::move($2); }
@@ -219,6 +224,8 @@ knn_attr:
     {
       $$ = KnnAttributes{};
       $$.score_alias = std::move($3);
+      if ($$.score_alias.empty())
+        YYABORT;
     }
   | WEIGHT COLON vec_range_radius
     {
@@ -230,7 +237,7 @@ knn_attr:
     }
 
 vector_range_query:
-  FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET vector_range_attrs_clause
+  FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius vec_blob RBRACKET vector_range_attrs_clause
     {
       double radius = $5;
       auto field = std::move($1);
@@ -238,7 +245,7 @@ vector_range_query:
       $$ = make_unique<AstVectorRangeNode>(std::move(field), radius, std::string{$6},
                               std::move(attrs.score_alias), attrs.epsilon);
     }
-  | FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET %prec NO_YIELD
+  | FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius vec_blob RBRACKET %prec NO_YIELD
     {
       double radius = $5;
       auto field = std::move($1);
@@ -280,6 +287,8 @@ vector_range_attr:
     {
       $$ = VectorRangeAttributes{};
       $$.score_alias = std::move($3);
+      if ($$.score_alias.empty())
+        YYABORT;
     }
   | EPSILON COLON vec_range_radius
     {
@@ -355,8 +364,9 @@ search_or_expr:
   | search_expr OR_OP search_unary_expr            { $$ = AstLogicalNode::Combine(std::move($1), std::move($3), AstLogicalNode::OR); }
 
 // Leaf atoms shared by the top-level, field-condition, and field-grouping positions.
+// Only an empty parameter gives an empty TERM: like "", it asks for the empty value.
 term_atom:
-  TERM        { $$ = make_unique<AstTermNode>(std::move($1));   }
+  TERM        { auto t = std::move($1); if (t.empty()) $$ = make_unique<AstPhraseNode>(""); else $$ = make_unique<AstTermNode>(std::move(t)); }
   | PHRASE    { auto p = std::move($1); $$ = make_unique<AstPhraseNode>(std::move(p.raw), p.slop); }
   | PREFIX    { $$ = make_unique<AstPrefixNode>(std::move($1)); }
   | SUFFIX    { $$ = make_unique<AstSuffixNode>(std::move($1)); }
@@ -388,6 +398,7 @@ search_primary:
   | term_atom                         { $$ = std::move($1);                  }
   | glued_word                        { $$ = std::move($1);                  }
   | FIELD COLON field_cond            { $$ = make_unique<AstFieldNode>(std::move($1), std::move($3)); }
+  | ISMISSING LPAREN FIELD RPAREN     { $$ = make_unique<AstFieldNode>(std::move($3), make_unique<AstIsMissingNode>()); }
 
 field_cond:
   term_atom                                             { $$ = std::move($1);                }

@@ -119,6 +119,12 @@ class MemBufController {
     return buffer_.InputLen();
   }
 
+  // True while an entry owns the buffer, i.e. outside of a consume point. Writing or flushing other
+  // data meanwhile would split the entry's bytes.
+  bool IsEntryInProgress() const {
+    return buffer_owner_ != 0;
+  }
+
   // Returns the active entry id. Called before the serializer's consume callback, which may preempt
   // and allow other entries to interleave. The returned id must be saved by caller, and then later
   // used for restoring the state.
@@ -284,6 +290,10 @@ class RdbSerializer {
     return mem_buf_controller_.FlushableSize();
   }
 
+  bool IsEntryInProgress() const {
+    return mem_buf_controller_.IsEntryInProgress();
+  }
+
   // Flush internal buffer and return serialized blob.
   std::string Flush(FlushState flush_state);
 
@@ -372,6 +382,9 @@ class RdbSerializer {
 
   // Might preempt
   std::error_code PushToConsumerIfNeeded(FlushState flush_state);
+
+  // Runs fn, which may preempt mid-entry, at a forced consume point. Requires tagged entries.
+  template <typename F> std::error_code ConsumeAround(F&& fn);
 
   static constexpr size_t kFilterChunkSize = 1ULL << 26;
   static constexpr size_t kMinStrSizeToCompress = 256;

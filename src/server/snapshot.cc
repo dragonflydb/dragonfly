@@ -6,6 +6,7 @@
 
 #include <absl/strings/str_cat.h>
 
+#include <limits>
 #include <mutex>
 
 #include "base/cycle_clock.h"
@@ -27,11 +28,20 @@
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
+using facade::operator""_MB;
+
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
 
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
 ABSL_FLAG(bool, serialization_tagged_chunks, true,
           "Allow serializer output to be split into tagged chunks and reassembled by receiver");
+ABSL_FLAG(strings::MemoryBytesFlag, snapshot_output_buffer_limit, 64_MB,
+          "Bytes of serialized data a shard's snapshot may queue for the sink before producers "
+          "wait for it. Lets a write that serializes a bucket inline during a save or a full sync "
+          "proceed without waiting on a slow replica or storage. 0 makes every producer wait for "
+          "its data to be written.");
+
+ABSL_DECLARE_FLAG(uint32_t, replication_stream_output_limit);
 
 namespace dfly {
 
@@ -48,12 +58,19 @@ thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 // it may require (especially with compression), and less responsive the server may be.
 constexpr size_t kMinBlobSize = 8_KB;
 
+// True once the current fiber has run for more than a jiffy (~15usec) since it was last resumed,
+// i.e. it should yield to let the other fibers of the thread run.
+bool CpuSliceUsedUp() {
+  return ThisFiber::GetRunningTimeCycles() > (base::CycleClock::Frequency() >> 16);
+}
+
 }  // namespace
 
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
                              SnapshotDataConsumerInterface* consumer, ExecutionState* cntx,
                              DflyVersion replica_dfly_version)
     : SerializerBase(slice, cntx),
+      writer_(cntx, [this](string data) { consumer_->ConsumeData(std::move(data), base_cntx_); }),
       compression_mode_(compression_mode),
       replica_dfly_version_(replica_dfly_version),
       consumer_(consumer) {
@@ -80,6 +97,9 @@ bool SliceSnapshot::IsSnaphotInProgress() {
 void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
+  writer_.Start(absl::StrCat("SnapshotWriter-", ProactorBase::me()->GetPoolIndex()),
+                absl::GetFlag(FLAGS_snapshot_output_buffer_limit));
+
   use_background_mode_ = absl::GetFlag(FLAGS_background_snapshotting);
   SerializerBase::RegisterChangeListener(stream_journal);
 
@@ -90,10 +110,13 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   size_t flush_threshold = 0;
   RdbSerializer::ConsumeFun consume_fun;
   if (allow_flush == SnapshotFlush::kAllow) {
+    // 0 disables splitting by size. The callback is still needed for forced consume points.
     flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
+    if (flush_threshold == 0)
+      flush_threshold = std::numeric_limits<size_t>::max();
+
     // The callback receives data directly from the serializer, no need to call back into it.
-    if (flush_threshold != 0)
-      consume_fun = std::bind_front(&SliceSnapshot::ConsumeBigValueChunk, this);
+    consume_fun = std::bind_front(&SliceSnapshot::ConsumeBigValueChunk, this);
   }
 
   bool serialize_index = SaveMode() != dfly::SaveMode::RDB &&
@@ -120,6 +143,10 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     }
     this->IterateBucketsFb(stream_journal);
     UnregisterChangeListener();
+
+    // Journal streaming keeps producing until FinalizeJournalStream, which stops the writer then.
+    if (!stream_journal)
+      writer_.Stop();
     consumer_->Finalize();
     VLOG(1) << "Serialization peak bytes: " << serializer_->GetSerializationPeakBytes();
   });
@@ -133,6 +160,7 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
     // In case of incremental snapshotting in StartIncremental, if an error is encountered,
     // journal_cb_id_ may not be set, but the snapshot fiber is still running.
     snapshot_fb_.JoinIfNeeded();
+    writer_.Stop();
     return;
   }
   uint32_t cb_id = journal_cb_id_;
@@ -148,6 +176,9 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
     std::ignore = serializer_->SendJournalOffset(journal::GetLsn());
     PushSerialized(true);
   }
+
+  // Every producer is unregistered, so the writer can drain and stop.
+  writer_.Stop();
 }
 
 // Serializes all the entries with version less than snapshot_version_.
@@ -164,6 +195,14 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   // A successful traversal leaves no bucket dependency pending.
   DCHECK(!IsAnyBucketBlocked());
   if (send_full_sync_cut) {
+    // DFLY STARTSTABLE, which the replica sends after the cut, stops the writer under a global
+    // transaction and the replica's mutex. A replica that stops reading would block that drain,
+    // and every shard with it, where replication_timeout can not break it, so by then nothing may
+    // be queued beyond the chunks producers still wait on, as without the buffer. Lower the limit
+    // to 0 gradually: dropping it at once would make the next journal flush wait for the whole
+    // backlog while it holds the shard's transaction queue. Starting the stable sync bound above
+    // the backlog keeps a flush right at the cut from waiting for the write in flight.
+    writer_.LowerLimit(0, absl::GetFlag(FLAGS_replication_stream_output_limit));
     CHECK(!serializer_->SendFullSyncCut());
     PushSerialized(true);
   }
@@ -178,20 +217,26 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 }
 
-void SliceSnapshot::PaceTraversal(bool done) {
+void SliceSnapshot::PaceTraversal(bool /*done*/) {
   if (use_background_mode_) {
     // Yielding for background fibers has low overhead if the time slice isn't used up.
     // Do it after every bucket for maximum responsiveness.
     DCHECK(ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND);
     ThisFiber::Yield();
-    PushSerialized(false);
-    return;
+    ThrottleIfNeeded();
+  } else {
+    // Skip the flush while another fiber is mid-entry, as in ThrottleIfNeeded.
+    bool pushed = !stream_mu_.is_locked() && PushSerialized(false);
+    if (!pushed && CpuSliceUsedUp())
+      ThisFiber::Yield();
   }
 
-  const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
-  if (!PushSerialized(false) && ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
-    ThisFiber::Yield();
-  }
+  // Between buckets no dependency is held, so this is where the traversal waits for the sink.
+  // One queued chunk keeps the sink busy, so the traversal queues no more than that and leaves
+  // the room, and the memory, to the mutation path. Mutation chunks queued meanwhile do not
+  // extend the wait: sustained writes can not stall the traversal for good.
+  writer_.WaitBelow(
+      min(writer_.limit() / 4, size_t(ServerState::tlocal()->serialization_max_chunk_size)));
 }
 
 void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
@@ -199,7 +244,8 @@ void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, c
   io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire, mc_flags, db_index);
   if (!res) {
     if (res.error() == errc::operation_canceled) {
-      LOG_EVERY_T(WARNING, 1) << "Snapshot cancelled while serializing entry in dbid=" << db_index;
+      // The context has already stopped, and ExecutionState logged the cause if it was a failure.
+      VLOG(1) << "Snapshot cancelled while serializing entry in dbid=" << db_index;
     } else {
       string tmp;
       LOG_EVERY_T(ERROR, 1) << "Snapshot failed to serialize key " << pk.GetSlice(&tmp)
@@ -218,42 +264,31 @@ void SliceSnapshot::HandleFlushData(std::string data) {
     ++stats_.flushed_under_lock;
   }
   size_t serialized = data.size();
-  uint64_t id = rec_id_++;
+
+  // We measure running_cycles before the preemption points, because they reset the counter.
+  uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
+
+  // Track egress as the chunk is queued. Attribute it to a high priority (out of order) write when
+  // it comes from the mutation path.
+  ServerState::tlocal()->GetEgressThrottler().Record(serialized, OnMutationPath());
+
+  // Nothing preempts between taking the chunk from the serializer and queueing it, so the queue
+  // order is the production order across fibers. Blocking point.
+  writer_.Push(std::move(data));
 
   if (use_background_mode_) {
-    // Yield after possibly long cpu slice due to compression and serialization
-    // before possbile suspension of ConsumeData resets the cpu time of the last slice
+    // Yield after possibly long cpu slice due to compression and serialization. Only after the
+    // push: a fiber running during the yield must queue behind this chunk.
     if (ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND)
       ThisFiber::Yield();
     // else: This function is invoked from the journal with regular priority as well.
     // TODO: Mavbe Sleep() to provide write backpressure in advance?
   }
 
-  uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
-
-  fb2::NoOpLock lk;
-  // We create a critical section here that ensures that records are pushed in sequential order.
-  // As a result, it is not possible for two fiber producers to push concurrently.
-  // If A.id = 5, and then B.id = 6, and both are blocked here, it means that last_pushed_id_ < 4.
-  // Once last_pushed_id_ = 4, A will be unblocked, while B will wait until A finishes pushing and
-  // update last_pushed_id_ to 5.
-  seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
-
-  // Track egress just before the socket write. Attribute it to a high priority (out of order)
-  // write when we don't run on the snapshot fiber.
-  ServerState::tlocal()->GetEgressThrottler().Record(serialized, !snapshot_fb_.IsActive());
-
-  // Blocking point.
-  consumer_->ConsumeData(std::move(data), base_cntx_);
-
-  DCHECK_EQ(last_pushed_id_ + 1, id);
-  last_pushed_id_ = id;
-  seq_cond_.notify_all();
-
-  if (!use_background_mode_) {
+  // A mutation fiber holds its shard's transaction queue, so only the traversal paces itself.
+  if (!OnMutationPath() && !use_background_mode_) {
     // serializer_->Flush can be quite slow for large values or due to compression, therefore
     // we counter-balance CPU over-usage by sleeping.
-    // We measure running_cycles before the preemption points, because they reset the counter.
     uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
     ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
   }
@@ -308,11 +343,15 @@ void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item)
 }
 
 void SliceSnapshot::ThrottleIfNeeded() {
+  // Without tagged chunks, an entry holds stream_mu_ while it may suspend mid-entry (e.g. reading a
+  // tiered list node). Flushing then would cut it, so leave the flush to a later call.
+  if (stream_mu_.is_locked())
+    return;
   PushSerialized(false);
 }
 
 size_t SliceSnapshot::GetBufferCapacity() const {
-  return serializer_ ? serializer_->GetBufferCapacity() : 0;
+  return (serializer_ ? serializer_->GetBufferCapacity() : 0) + writer_.pending_bytes();
 }
 
 size_t SliceSnapshot::GetTempBuffersSize() const {

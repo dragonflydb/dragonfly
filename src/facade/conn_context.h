@@ -18,6 +18,7 @@ class ConnectionContext {
     conn_closing = false;
     req_auth = false;
     replica_conn = false;
+    slot_migration_conn = false;
     authenticated = false;
     async_dispatch = false;
     sync_dispatch = false;
@@ -58,6 +59,7 @@ class ConnectionContext {
   bool conn_closing : 1;
   bool req_auth : 1;
   bool replica_conn : 1;  // whether it's a replica connection on the master side.
+  bool slot_migration_conn : 1;
   bool authenticated : 1;
 
   // Dispatch-state flags Clarification: their names come from the V1 producer/consumer model:

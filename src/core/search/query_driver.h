@@ -50,10 +50,6 @@ class QueryDriver {
     return std::move(expr_);
   }
 
-  const QueryParams& GetParams() const {
-    return *params_;
-  }
-
   Scanner* scanner() {
     return scanner_.get();
   }

@@ -9,8 +9,10 @@
 
 #include <atomic>
 #include <iterator>
+#include <random>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "absl/strings/str_replace.h"
 #include "absl/strings/substitute.h"
@@ -23,15 +25,22 @@
 #include "core/detail/gen_utils.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "facade/facade_test.h"
+#include "server/cluster_support.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/namespaces.h"
 #include "server/test_utils.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
 
+extern "C" {
+#include "redis/crc16.h"
+}
+
 ABSL_DECLARE_FLAG(bool, force_epoll);
+ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 
 namespace dfly::cluster {
 namespace {
@@ -205,6 +214,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
                                                     "health", "online"))))))));
 
   EXPECT_THAT(Run({"get", "x"}).GetString(),
+              testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
+  EXPECT_THAT(Run({"move", "x", "1"}).GetString(),
               testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
 
   EXPECT_THAT(Run({"cluster", "slots"}),
@@ -710,6 +721,63 @@ TEST_F(ClusterFamilyTest, ClusterMultiExec) {
   Run({"SET", "X3", "X3"});
 
   EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
+
+  // Keys must share a slot even when they belong to different databases.
+  Run({"MULTI"});
+  Run({"MOVE", "X1", "1"});
+  Run({"SELECT", "1"});
+  Run({"MOVE", "X2", "0"});
+  EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
+
+  Run({"MULTI"});
+  Run({"SET", "{tag}key", "value"});
+  Run({"MOVE", "{tag}key", "1"});
+  EXPECT_THAT(Run({"EXEC"}), RespElementsAre("OK", IntArg(1)));
+
+  Run({"MULTI"});
+  Run({"SET", "X1", "queued"});
+
+  // Change ownership on another connection while the transaction is queued.
+  pp_->at(1)->Await([&] { ConfigSingleNodeCluster("other-node"); });
+  EXPECT_THAT(Run({"EXEC"}), ErrArg("MOVED"));
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(0));
+}
+
+TEST_F(ClusterFamilyTest, ClusterMultiExecShardedPubSub) {
+  single_response_ = false;
+  ConfigSingleNodeCluster(GetMyId());
+
+  auto subscribe_resp = pp_->at(2)->Await([&] { return Run({"SSUBSCRIBE", "X1"}); });
+  ASSERT_THAT(subscribe_resp, RespElementsAre("ssubscribe", "X1", IntArg(1)));
+
+  EXPECT_EQ(Run({"MULTI"}), "OK");
+  EXPECT_EQ(Run({"SPUBLISH", "X1", "a transactional message"}), "QUEUED");
+  EXPECT_THAT(Run({"EXEC"}), RespElementsAre(IntArg(1)));
+  pp_->AwaitFiberOnAll([](util::ProactorBase* pb) {});
+  ASSERT_EQ(1, SubscriberMessagesLen("IO2"));
+  EXPECT_EQ("a transactional message", GetPublishedMessage("IO2", 0).message);
+
+  for (string_view command : {"SET", "SPUBLISH"}) {
+    EXPECT_EQ(Run({"MULTI"}), "OK");
+    EXPECT_EQ(Run({"SPUBLISH", "X1", "message"}), "QUEUED");
+    EXPECT_EQ(Run({command, "X2", "value"}), "QUEUED");
+    EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
+  }
+  pp_->AwaitFiberOnAll([](util::ProactorBase* pb) {});
+  EXPECT_EQ(1, SubscriberMessagesLen("IO2"));
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(0));
+
+  EXPECT_EQ(Run({"MULTI"}), "OK");
+  EXPECT_EQ(Run({"SPUBLISH", "X1", "queued"}), "QUEUED");
+
+  // Change ownership on another connection while the transaction is queued.
+  pp_->at(1)->Await([&] { ConfigSingleNodeCluster("other-node"); });
+  EXPECT_THAT(Run({"EXEC"}), ErrArg("MOVED"));
+  pp_->AwaitFiberOnAll([](util::ProactorBase* pb) {});
+
+  // Slot migration sends a forced unsubscribe notification.
+  ASSERT_EQ(2, SubscriberMessagesLen("IO2"));
+  EXPECT_TRUE(GetPublishedMessage("IO2", 1).force_unsubscribe);
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
@@ -1252,11 +1320,6 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
     ASSERT_THAT(resp.GetVec()[i], RespElementsAre(IntArg(i % 8000), _, _, _, _, _, _, _, _));
 }
 
-TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
-  EXPECT_THAT(Run({"select", "1"}), ErrArg("SELECT is not allowed in cluster mode"));
-  EXPECT_EQ(Run({"select", "0"}), "OK");
-}
-
 TEST_F(ClusterFamilyTest, ClusterModePubSubNotAllowed) {
   EXPECT_THAT(Run({"PUBLISH", "ch", "message"}),
               ErrArg("PUBLISH is not supported in cluster mode yet"));
@@ -1335,6 +1398,50 @@ TEST_F(ClusterFamilyTest, Keyslot) {
 
   EXPECT_EQ(CheckedInt({"cluster", "keyslot", "abc{def}ghi"}),
             CheckedInt({"cluster", "keyslot", "123{def}456"}));
+
+  EXPECT_EQ(0, KeySlot(string_view{}));
+  EXPECT_EQ(0, KeySlot(""));
+  EXPECT_EQ(0x31C3, KeySlot("123456789"));  // The CRC16-XMODEM check value.
+}
+
+// Whether Crc16() and each of its kernels compute the same CRC of data as the table-driven crc16()
+// of Redis, in all 16 bits rather than only the 14 that KeySlot() keeps. Crc16() only runs the
+// fastest kernel the CPU supports, so the kernels are also called directly.
+AssertionResult Crc16MatchesRedis(string_view data) {
+  const uint16_t expected = crc16(data.data(), data.size());
+  if (detail::Crc16(data) != expected)
+    return AssertionFailure() << "Crc16() differs";
+  if (detail::impl::Crc16Scalar(data) != expected)
+    return AssertionFailure() << "Crc16Scalar() differs";
+#ifdef DFLY_CRC16_HAS_CLMUL
+  if (detail::impl::kSupportsClmul() && detail::impl::Crc16Clmul(data) != expected)
+    return AssertionFailure() << "Crc16Clmul() differs";
+#endif
+  return AssertionSuccess();
+}
+
+TEST(Crc16Test, MatchesRedis) {
+  // Every input of up to 3 bytes.
+  for (size_t len = 0; len <= 3; ++len) {
+    for (uint32_t value = 0; value < (1u << (8 * len)); ++value) {
+      const char bytes[] = {static_cast<char>(value), static_cast<char>(value >> 8),
+                            static_cast<char>(value >> 16)};
+      ASSERT_TRUE(Crc16MatchesRedis({bytes, len})) << "len " << len << " value " << value;
+    }
+  }
+
+  // Random bytes of every length up to 256, which takes the kernels down each of their paths, at 16
+  // alignments. Each input ends its allocation, so ASAN catches a kernel reading past it.
+  std::mt19937 rng(42);
+  for (size_t len = 0; len <= 256; ++len) {
+    for (size_t offset = 0; offset < 16; ++offset) {
+      vector<char> buf(offset + len);
+      for (char& c : buf)
+        c = static_cast<char>(rng());
+      ASSERT_TRUE(Crc16MatchesRedis({buf.data() + offset, len}))
+          << "len " << len << " offset " << offset;
+    }
+  }
 }
 
 TEST_F(ClusterFamilyTest, FlushSlots) {
@@ -1368,12 +1475,15 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                                   _, "total_writes", _, "memory_bytes", _)))));
 }
 
+// Uses a non-default database: blocked clients are woken through the flushed table's db index.
 TEST_F(ClusterFamilyTest, FlushSlotsWakesBlockedXReadGroup) {
   ConfigSingleNodeCluster(GetMyId());
+  EXPECT_EQ(Run({"SELECT", "2"}), "OK");
   EXPECT_EQ(Run({"XGROUP", "CREATE", "s", "group", "0", "MKSTREAM"}), "OK");
 
   RespExpr blocked_resp;
   auto reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    EXPECT_EQ(Run({"SELECT", "2"}), "OK");
     blocked_resp =
         Run({"XREADGROUP", "GROUP", "group", "consumer", "BLOCK", "2000", "STREAMS", "s", ">"});
   });
@@ -1482,19 +1592,65 @@ TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
   });
 }
 
-TEST_F(ClusterFamilyTest, MoveNotAllowedInClusterMode) {
+// MOVE is a global transaction, but its journal record must carry the key's slot so that slot
+// migrations stream it. Failed moves are not journaled. Commands inside EXEC, squashed or not,
+// also keep their slot and the database they ran in.
+TEST_F(ClusterFamilyTest, ClusterModeDatabases) {
+  struct JournalConsumer : journal::JournalConsumerInterface {
+    void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+      if (item.cmd == "MOVE" || item.cmd == "DEL") {
+        io::BytesSource source{item.journal_item.data};
+        JournalReader reader{&source, 0};
+        journal::ParsedEntry entry;
+        ASSERT_FALSE(reader.ReadEntry(&entry));
+        entries.emplace_back(entry.dbid, item.slot);
+      }
+    }
+
+    void ThrottleIfNeeded() override {
+    }
+
+    vector<pair<DbIndex, optional<SlotId>>> entries;
+  } consumer;
+
   ConfigSingleNodeCluster(GetMyId());
+  EXPECT_EQ(Run({"ACL", "SETUSER", "user", "on", ">pw", "~*", "+@all", "$1"}), "OK");
 
-  EXPECT_EQ(Run({"set", "key", "val"}), "OK");
-  EXPECT_THAT(Run({"move", "key", "1"}), ErrArg("MOVE is not allowed in cluster mode"));
-  EXPECT_EQ(Run({"get", "key"}), "val");
-}
+  const ShardId shard_id = Shard("key", shard_set->size());
+  const uint32_t consumer_id = StartJournalWithConsumer(&consumer, shard_id);
+  absl::Cleanup unregister = [&] {
+    pp_->at(shard_id)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
 
-TEST_F(ClusterFamilyTest, AclSelectDbNotAllowedInClusterMode) {
-  EXPECT_THAT(Run({"acl", "setuser", "u1", "on", ">pw", "~*", "+@all", "$1"}),
-              ErrArg("not allowed in cluster mode"));
-  EXPECT_EQ(Run({"acl", "setuser", "u2", "on", ">pw", "~*", "+@all", "$0"}), "OK");
-  EXPECT_EQ(Run({"acl", "setuser", "u3", "on", ">pw", "~*", "+@all", "$ALL"}), "OK");
+  EXPECT_THAT(Run({"MOVE", "key", "1"}), IntArg(0));
+  EXPECT_EQ(Run({"SET", "key", "val"}), "OK");
+  EXPECT_THAT(Run({"MOVE", "key", "1"}), IntArg(1));
+  EXPECT_EQ(Run({"SET", "key", "val"}), "OK");
+  EXPECT_THAT(Run({"MOVE", "key", "1"}), IntArg(0));
+  const optional<SlotId> slot{KeySlot("key")};
+  EXPECT_THAT(consumer.entries, ElementsAre(Pair(0, slot)));
+
+  absl::FlagSaver saver;
+  for (bool squash : {false, true}) {
+    absl::SetFlag(&FLAGS_multi_exec_squash, squash);
+    SCOPED_TRACE(squash);
+    consumer.entries.clear();
+
+    // Atomically replace the key in db 0 with its version from db 1.
+    Run({"SET", "key", "old"});
+    Run({"SELECT", "1"});
+    Run({"SET", "key", "new"});
+    Run({"SELECT", "0"});
+    Run({"MULTI"});
+    Run({"DEL", "key"});
+    Run({"SELECT", "1"});
+    Run({"MOVE", "key", "0"});
+    EXPECT_THAT(Run({"EXEC"}), RespElementsAre(IntArg(1), "OK", IntArg(1)));
+    EXPECT_THAT(consumer.entries, ElementsAre(Pair(0, slot), Pair(1, slot)));
+
+    Run({"SELECT", "0"});
+    EXPECT_EQ(Run({"GET", "key"}), "new");
+  }
 }
 
 // FlushSlots covers all databases: db 1 entries must be deleted through db 1's table (charging
@@ -1532,7 +1688,7 @@ TEST_F(ClusterFamilyTest, FlushSlotsNonDefaultDb) {
     ASSERT_TRUE(res.ok());
     EXPECT_TRUE(res->is_new);
 
-    util::ThisFiber::SleepFor(50ms);  // let the flush fiber finish
+    ASSERT_TRUE(WaitUntilCondition([&] { return !db_slice.HasRegisteredCallbacks(); }, 1s));
 
     // Only the entry written after FlushSlots stays.
     EXPECT_EQ(db_slice.DbSize(1), 1u);
@@ -1719,6 +1875,73 @@ TEST_F(ClusterFamilyTest, DflyMigrateRealModeWithoutConfig) {
   EXPECT_EQ(Run({"DFLYMIGRATE", "ACK", "src", "1"}), "UNKNOWN_MIGRATION");
   EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), ErrArg("syncid not found"));
 }
+
+TEST_F(ClusterFamilyTest, MigrationFlowMatchesNoClientType) {
+  constexpr string_view kConfig = R"json([
+    {"slot_ranges": [{"start": 0, "end": 16383}], "replicas": [],
+     "master": {"id": "src", "ip": "10.0.0.1", "port": 7000},
+     "migrations": [{"slot_ranges": [{"start": 0, "end": 16383}], "node_id": "$0",
+                     "ip": "10.0.0.2", "port": 7001}]},
+    {"slot_ranges": [], "replicas": [], "master": {"id": "$0", "ip": "10.0.0.2", "port": 7001}}
+  ])json";
+  ASSERT_EQ(RunPrivileged({"DFLYCLUSTER", "CONFIG", absl::Substitute(kConfig, GetMyId())}), "OK");
+  ASSERT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "16383"}), "OK");
+
+  // Paused flows do not read the socket; a test connection has no fd.
+  ASSERT_EQ(Run({"DEBUG", "MIGRATION", "PAUSE"}), "OK");
+  Run("flow", {"PING"});
+  auto flow = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    GetConnection("flow")->cntx()->sync_dispatch = true;  // DflyMigrateFlow DCHECKs it
+    EXPECT_EQ(Run("flow", {"DFLYMIGRATE", "FLOW", "src", "0"}), "OK");
+  });
+  EXPECT_TRUE(
+      pp_->at(0)->Await([&] { return GetConnection("flow")->cntx()->slot_migration_conn; }));
+
+  // A new INIT stops the flow.
+  EXPECT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "16383"}), "OK");
+  flow.Join();
+  for (string_view type : {"normal", "pubsub", "replica"})
+    EXPECT_THAT(Run("flow", {"CLIENT", "KILL", "TYPE", type, "SKIPME", "no"}), IntArg(0)) << type;
+  EXPECT_THAT(Run("flow", {"CLIENT", "KILL", "SKIPME", "no"}), IntArg(1));
+}
+
+static uint16_t RedisCrc16(string_view data) {
+  return crc16(data.data(), data.size());
+}
+
+// Each Crc16 kernel next to the table-driven crc16() of Redis, and KeySlot() with its hash-tag
+// lookup on top of the dispatched kernel.
+template <auto crc16_fn> static void BM_Crc16(benchmark::State& state) {
+  if constexpr (detail::impl::kHasClmul && crc16_fn == detail::impl::Crc16Clmul) {
+    if (!detail::impl::kSupportsClmul()) {
+      state.SkipWithError("The CPU lacks carry-less multiplication");
+      return;
+    }
+  }
+
+  string data(state.range(0), '\0');
+  std::mt19937 rng(42);
+  for (char& c : data)
+    c = 'a' + rng() % 26;
+
+  while (state.KeepRunning())
+    benchmark::DoNotOptimize(crc16_fn(data));
+  state.SetBytesProcessed(state.iterations() * data.size());
+}
+
+static void Crc16Args(benchmark::Benchmark* benchmark) {
+  benchmark->ArgName("len");
+  for (int len : {1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 48, 64, 65, 128, 256, 1024})
+    benchmark->Arg(len);
+}
+
+BENCHMARK_TEMPLATE(BM_Crc16, RedisCrc16)->Apply(Crc16Args);
+BENCHMARK_TEMPLATE(BM_Crc16, detail::impl::Crc16Scalar)->Apply(Crc16Args);
+#ifdef DFLY_CRC16_HAS_CLMUL
+BENCHMARK_TEMPLATE(BM_Crc16, detail::impl::Crc16Clmul)->Apply(Crc16Args);
+#endif
+BENCHMARK_TEMPLATE(BM_Crc16, detail::Crc16)->Apply(Crc16Args);
+BENCHMARK_TEMPLATE(BM_Crc16, KeySlot)->Apply(Crc16Args);
 
 }  // namespace
 }  // namespace dfly::cluster

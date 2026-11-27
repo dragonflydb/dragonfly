@@ -19,6 +19,9 @@ namespace dfly {
 // fsyncs directory dir, so that names created, renamed or removed in it are durable.
 std::error_code AofSyncDir(const std::string& dir);
 
+// fdatasyncs the file at path.
+std::error_code AofSyncFile(const std::string& path);
+
 // Writes one AOF segment. Not thread safe: all calls, including Open and Shutdown, must run
 // on the same proactor thread. Call Shutdown() before destruction if Open() succeeded, and
 // only then; it waits for in-flight I/O and cancels the periodic sync.
@@ -50,6 +53,20 @@ class AofSegmentWriter {
 
   // Open block payload + sealed blocks still held: unwritten, or written behind an unwritten one.
   size_t PendingBytes() const;
+
+  // End of the contiguous written prefix of the segment.
+  size_t WrittenSize() const {
+    return written_offset_;
+  }
+
+  // Written but not yet covered by a successful fdatasync.
+  size_t UnsyncedBytes() const {
+    return written_offset_ - durable_offset_;
+  }
+
+  const AofFsyncStats& fsync_stats() const {
+    return fsync_stats_;
+  }
 
   // Last record fully written (not necessarily durable), 0 if none.
   uint64_t WrittenLsn() const {
@@ -93,7 +110,10 @@ class AofSegmentWriter {
   // Runs every kAofSyncMs: starts an fdatasync of completed writes, unless one is running or
   // nothing new was written.
   void MaybeStartFSync();
-  void OnSyncDone(uint64_t sync_lsn, int res);
+  void OnSyncDone(size_t sync_offset, uint64_t sync_lsn, uint64_t start_cycles, int res);
+
+  // Counts a completed fdatasync that started at start_cycles (base::CycleClock).
+  void RecordSync(uint64_t start_cycles);
 
   std::string dir_;
   uint32_t shard_id_;
@@ -114,9 +134,16 @@ class AofSegmentWriter {
   // When written_offset_ == next_offset_ all blocks are written
   size_t written_offset_ = kAofSegmentHeaderSize;
   uint64_t written_lsn_ = 0;
+
+  // End of the prefix covered by the last successful fdatasync.
+  size_t durable_offset_ = kAofSegmentHeaderSize;
   uint64_t durable_lsn_ = 0;
 
   bool sync_in_flight_ = false;
+
+  // The last record the running fdatasync covers.
+  uint64_t sync_target_lsn_ = 0;
+  AofFsyncStats fsync_stats_;
   uint32_t tick_id_ = 0;
   // See error(); never cleared.
   std::error_code ec_;

@@ -25,6 +25,11 @@ std::optional<double> ParseNumericField(std::string_view value) {
   return std::nullopt;
 }
 
+bool DocumentAccessor::IsFieldMissing(std::string_view active_field) const {
+  auto strings = GetStrings(active_field);
+  return strings && strings->empty();
+}
+
 DefragmentResult& DefragmentResult::Merge(DefragmentResult&& other) {
   quota_depleted |= other.quota_depleted;
   objects_moved += other.objects_moved;

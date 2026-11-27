@@ -40,6 +40,8 @@ constexpr char kDoublePref[] = ",";
 constexpr char kLongPref[] = ":";
 constexpr char kNullStringR2[] = "$-1\r\n";
 constexpr char kNullStringR3[] = "_\r\n";
+constexpr char kTrueR3[] = "#t\r\n";
+constexpr char kFalseR3[] = "#f\r\n";
 
 template <typename T> size_t piece_size(const T& v) {
   if constexpr (is_array_v<T>)
@@ -410,6 +412,14 @@ void RedisReplyBuilderBase::SendDouble(double val) {
   WritePieces(kDoublePref, val_str, kCRLF);
 }
 
+void RedisReplyBuilderBase::SendBool(bool val) {
+  if (!IsResp3())
+    return SendLong(val);
+
+  ReplyScope scope(this);
+  WritePieces(val ? kTrueR3 : kFalseR3);
+}
+
 void RedisReplyBuilderBase::SendNullArray() {
   ReplyScope scope(this);
   IsResp3() ? WritePieces(kNullStringR3) : WritePieces("*-1", kCRLF);
@@ -512,32 +522,6 @@ void RedisReplyBuilder::SendBulkStrArr(const facade::ArgRange& strs, CollectionT
   StartCollection(ct == CollectionType::MAP ? strs.Size() / 2 : strs.Size(), ct);
   for (std::string_view str : strs)
     SendBulkString(str);
-}
-
-void RedisReplyBuilder::SendScoredArray(ScoredArray arr, bool with_scores) {
-  ReplyScope scope(this);
-  StartArray((with_scores && !IsResp3()) ? arr.size() * 2 : arr.size());
-  for (const auto& [str, score] : arr) {
-    if (with_scores && IsResp3())
-      StartArray(2);
-    SendBulkString(str);
-    if (with_scores)
-      SendDouble(score);
-  }
-}
-
-void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr) {
-  ReplyScope scope(this);
-
-  StartArray(2);
-
-  SendBulkString(arr_label);
-  StartArray(arr.size());
-  for (const auto& [str, score] : arr) {
-    StartArray(2);
-    SendBulkString(str);
-    SendDouble(score);
-  }
 }
 
 template <typename I> void RedisReplyBuilder::SendLongArr(absl::Span<const I> longs) {

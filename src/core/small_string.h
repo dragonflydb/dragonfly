@@ -17,6 +17,9 @@ class SmallString {
   static constexpr unsigned kPrefLen = 10;
 
  public:
+  // CanAllocate() refuses longer strings.
+  static constexpr unsigned kMaxSize = (1 << 8) - 1;
+
   static void InitThreadLocal(void* heap);
   // Drops the thread-local allocator; call only right before the heap is bulk-freed.
   static void ShutdownThreadLocal();

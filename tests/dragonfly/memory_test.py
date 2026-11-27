@@ -138,7 +138,11 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     df_server.start()
 
     client = df_server.client()
+    # Populate writes are subject to the rss deny check too, so disable it while populating
+    ratio = (await client.config_get("rss_oom_deny_ratio"))["rss_oom_deny_ratio"]
+    await client.config_set("rss_oom_deny_ratio", 0)
     await client.execute_command("DEBUG POPULATE 10100 key 40000 RAND")
+    await client.config_set("rss_oom_deny_ratio", ratio)
 
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 

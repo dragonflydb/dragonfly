@@ -16,6 +16,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/metrics.h"
+#include "server/replica_manager.h"
 #include "server/replica_types.h"
 #include "server/server_state.h"
 #include "server/stats.h"
@@ -75,6 +76,18 @@ struct ReplicaRoleInfo {
   uint64_t lsn_lag;
 };
 
+// A full sync loads data past the journal; the AOF needs a new base covering it (aof_state).
+enum class AofRebase : uint8_t {
+  // The base and log cover the data in memory.
+  kNone,
+
+  // A full sync runs, or a node restarted in the middle of one: no checkpoint yet.
+  kSyncing,
+
+  // Stable sync started or the node was promoted: the checkpoint fiber takes the new base.
+  kCheckpoint,
+};
+
 // Contains the state of the last save operation.
 // This object is immutable.
 struct SaveInfoData {
@@ -94,6 +107,26 @@ struct SaveInfoData {
 
   // Unlike bgsave_in_progress, also covers SAVE, scheduled and shutdown saves.
   bool save_in_progress = false;
+
+  // The save in progress becomes the AOF checkpoint.
+  bool aof_checkpoint_in_progress = false;
+
+  // Bytes of the AOF base, the dump the manifest names.
+  size_t aof_base_size = 0;
+
+  // True if the last checkpoint wrote its dump and then the manifest naming it as the base.
+  bool aof_last_checkpoint_ok = true;
+
+  // Checkpoints failed in a row; a committed one resets it.
+  uint32_t aof_checkpoint_failures = 0;
+
+  // The base's summary file name, empty without a base.
+  std::string aof_base_file;
+
+  AofRebase aof_rebase = AofRebase::kNone;
+
+  // Bumped by every full sync, so a checkpoint that predates the latest one cannot end rebasing.
+  uint64_t aof_rebase_epoch = 0;
 };
 
 // A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
@@ -124,11 +157,6 @@ class ThreadSafeSaveInfo {
   SaveInfoData data_;
 };
 
-struct ReplicaOffsetInfo {
-  std::string sync_id;
-  std::vector<uint64_t> flow_offsets;
-};
-
 struct SaveCmdOptions {
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   bool new_version;
@@ -141,6 +169,12 @@ struct SaveCmdOptions {
 bool ReadProcStats(io::StatusData* sdata);
 uint64_t GetDelayMs(uint64_t cycles_ts);
 
+// The AOF restore at startup: a full sync's start sets cancel and waits until it is done.
+struct AofRestoreState {
+  std::atomic_bool cancel{false};
+  util::fb2::EmbeddedBlockingCounter done;
+};
+
 class ServerFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
@@ -150,7 +184,7 @@ class ServerFamily {
 
   void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners);
   void Register(CommandRegistry* registry);
-  void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Shutdown();
 
   // Public because is used by DflyCmd.
   void ShutdownCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
@@ -200,28 +234,19 @@ class ServerFamily {
   GenericError CheckSnapshotLoadable(const std::string& path);
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
-  // future with error_code.
+  // future with error_code. Returns at once while fibers load; whoever waits on the future holds
+  // the server LOADING (e.g. a Service::LoadingScope) until it resolves.
   enum class LoadExistingKeys : uint8_t { kFail, kOverride };
-  std::optional<util::fb2::Future<GenericError>> Load(const std::string& file_name,
-                                                      LoadExistingKeys existing_keys);
+  util::fb2::Future<GenericError> Load(const std::string& file_name,
+                                       LoadExistingKeys existing_keys);
 
   bool TEST_IsSaving() const;
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
 
-  void PauseReplication(bool pause) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  // Investigation-only (DEBUG REPLDIAG). Remove once closed.
-  std::optional<int> GetReplicaMasterSocketUnreadBytes() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  const std::string& master_replid() const {
-    return master_replid_;
+  ReplicaManager& replica_manager() const {
+    return *replica_manager_;
   }
-
-  // The lineage root replication id of this node: its own replid if it is a true master, or the
-  // ancestor id advertised by its master when it is itself a replica (cascaded replication).
-  std::string GetLineageId() const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   DflyCmd* GetDflyCmd() const {
     return dfly_cmd_.get();
@@ -231,30 +256,19 @@ class ServerFamily {
   // with a cancellation error (DfylCmd::CancelReplicas) and resetting the journal
   void ForceReplicasToFullSync();
 
-  std::optional<LastMasterSyncData> GetLastMasterData() const {
-    return last_master_data_;
-  }
+  // A replica's full sync starts: the loaded data bypasses the journal, so stop appending to the
+  // AOF and mark its manifest rebasing. No-op without --aof.
+  GenericError PauseAofAndEnterRebasing();
+
+  // The replica entered stable sync or was promoted: the checkpoint fiber takes the checkpoint
+  // whose base covers the loaded data. Returns without waiting. No-op unless rebasing.
+  void StartAofRebaseCheckpoint();
 
   absl::Span<facade::Listener* const> GetListeners() const {
     return listeners_;
   }
 
   std::vector<facade::Listener*> GetNonPriviligedListeners() const;
-
-  // Replica-side method. Returns replication summary if this server is a replica,
-  // nullopt otherwise.
-  std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const;
-
-  struct MasterLinkClientInfo {
-    uint32_t client_id;
-    std::string info;
-  };
-
-  // One entry per attached outbound master link; empty if not replicating.
-  std::vector<MasterLinkClientInfo> GetMasterLinkClientInfo() const
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  bool IsMasterLinkClientId(uint32_t id) const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void OnClose(ConnectionContext* cntx);
 
@@ -296,19 +310,16 @@ class ServerFamily {
   void Memory(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void FlushDb(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Hello(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void LastSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Latency(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void ReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void AddReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void ReplConf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Role(facade::CmdArgParser parser, CommandContext* cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Role(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Save(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void BgSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Script(facade::CmdArgParser parser, CommandContext* cmd_cntx);
@@ -317,16 +328,8 @@ class ServerFamily {
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
-  enum ActionOnConnectionFail {
-    kReturnOnError,        // if we fail to connect to master, return to err
-    kContinueReplication,  // continue attempting to connect to master, regardless of initial
-                           // failure
-  };
-
   void ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmnd_cntx,
-                         ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+                         ReplicaManager::ActionOnConnectionFail on_error);
 
   struct LoadOptions {
     std::string snapshot_id;
@@ -342,6 +345,12 @@ class ServerFamily {
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
+  // Wakes every second and checkpoints the AOF once its log outgrows the trigger size.
+  void AofCheckpointScheduling();
+
+  // Saves an AOF-owned base and commits it as the next checkpoint. Blocks until it finishes.
+  GenericError DoAofCheckpoint();
+
   void SendInvalidationMessages() const;
 
   std::optional<SaveCmdOptions> GetSaveCmdOpts(facade::ParsedArgs args, CommandContext* cmd_cntx);
@@ -351,6 +360,9 @@ class ServerFamily {
   struct DoSaveCheckAndStartOpts {
     bool ignore_state = false;
     bool bg_save = false;
+
+    // An automatic AOF checkpoint, see DoAofCheckpoint().
+    bool aof_owned_base = false;
   };
 
   GenericError DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
@@ -358,8 +370,6 @@ class ServerFamily {
 
   GenericError WaitUntilSaveFinished(Transaction* trans,
                                      bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;
-  void StopAllClusterReplicas() ABSL_EXCLUSIVE_LOCKS_REQUIRED(replicaof_mu_);
-
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
   void ClientPauseCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
@@ -370,6 +380,7 @@ class ServerFamily {
 
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
+  util::fb2::Fiber aof_checkpoint_fb_;
 
   Service& service_;
 
@@ -378,16 +389,11 @@ class ServerFamily {
   bool accepting_connections_ = true;  // reject connections near oom
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable util::fb2::Mutex replicaof_mu_, save_mu_;
-  std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
-  std::vector<std::unique_ptr<Replica>> cluster_replicas_
-      ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
+  mutable util::fb2::Mutex save_mu_;
+  std::unique_ptr<ReplicaManager> replica_manager_;
 
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
-
-  std::string master_replid_;
-  std::optional<LastMasterSyncData> last_master_data_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
@@ -399,6 +405,12 @@ class ServerFamily {
   bool save_on_shutdown_{true};
 
   util::fb2::Done schedule_done_;
+
+  // Wakes the checkpoint fiber before its next check; what to do comes from SaveInfoData.
+  util::fb2::Done aof_checkpoint_wake_;
+  std::atomic_bool aof_checkpoint_stop_{false};
+
+  AofRestoreState aof_restore_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 

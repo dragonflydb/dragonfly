@@ -289,28 +289,11 @@ async def test_one_interpreter(async_client: aioredis.Redis):
                 p.evalsha(sha, 1, key)
             await p.execute()
 
-    max_blocked = 0
-
-    async def measure_blocked():
-        nonlocal max_blocked
-        while True:
-            max_blocked = max(
-                max_blocked, (await async_client.info("STATS"))["blocked_on_interpreter"]
-            )
-            await asyncio.sleep(0.01)
-
     tm = [asyncio.create_task(run(True)) for _ in range(10)]
     ts = [asyncio.create_task(run(False)) for _ in range(10)]
-    # block_measure = asyncio.create_task(measure_blocked())
 
     async with async_timeout.timeout(5):
         await asyncio.gather(*(tm + ts))
-
-    # block_measure.cancel()
-
-    # At least some connection was seen blocked
-    # Flaky: release build is too fast and never blocks
-    # assert max_blocked > 0
 
 
 """

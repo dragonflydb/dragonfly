@@ -89,7 +89,7 @@ template <bool kCaseSensitive> bool MatchClass(string_view* pattern, char c) {
   return match != negate;
 }
 
-// Consumes the non-'*' token at the front, matched or not: the caller resets pattern on mismatch.
+// Consumes the token at the front, matched or not: MatchGlobImpl resets pattern on mismatch.
 template <bool kCaseSensitive> bool MatchToken(string_view* pattern, char c) {
   DCHECK(!pattern->empty());
   char token = pattern->front();
@@ -159,6 +159,13 @@ template <bool kCaseSensitive> bool MatchGlobImpl(string_view pattern, string_vi
 
 bool GlobMatcher::MatchGlob(string_view pattern, string_view str, bool case_sensitive) {
   return case_sensitive ? MatchGlobImpl<true>(pattern, str) : MatchGlobImpl<false>(pattern, str);
+}
+
+bool GlobMatcher::MatchesAllWithPrefix(string_view pattern, string_view prefix) {
+  bool ends_with_star = false;  // only a real '*': escaped or in a class it matches one byte
+  for (string_view rest = pattern; !rest.empty(); MatchToken<true>(&rest, '\0'))
+    ends_with_star = rest.front() == '*';
+  return ends_with_star && MatchGlob(pattern, prefix, true);
 }
 
 string GlobMatcher::Glob2Regex(string_view glob) {

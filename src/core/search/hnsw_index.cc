@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <mutex>
 
 #include "base/logging.h"
 #include "core/search/hnsw_alg.h"
@@ -225,7 +226,7 @@ struct HnswlibAdapter {
   void DoAdd(const void* data, GlobalDocId id) {
     while (true) {
       try {
-        absl::ReaderMutexLock resize_lock(&resize_mutex_);
+        absl::ReaderMutexLock resize_lock(resize_mutex_);
         world_.addPoint(data, id);
         return;
       } catch (const std::exception& e) {
@@ -241,9 +242,9 @@ struct HnswlibAdapter {
   }
 
   void DoRemove(GlobalDocId id) {
-    auto it = copy_vector_ ? world_.label_lookup_.end() : world_.label_lookup_.find(id);
-
-    HnswErrorStatus status = world_.markDelete(id);
+    absl::ReaderMutexLock resize_lock(resize_mutex_);
+    hnswlib::tableint internal_id = 0;
+    HnswErrorStatus status = world_.markDelete(id, &internal_id);
     if (status != HnswErrorStatus::SUCCESS) {
       VLOG(1) << "HnswlibAdapter::Remove failed with status: " << static_cast<int>(status)
               << " for global id: " << id;
@@ -255,11 +256,8 @@ struct HnswlibAdapter {
     // pointer with stub_vector_ so the caller can free the original data.
     // Uses a native-encoded 1.0 (not zero) because a zero-norm vector yields
     // cosine distance 0 and would bias traversal toward deleted nodes.
-    if (it != world_.label_lookup_.end()) {
-      const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
-      char* ptr_location = world_.getDataPtrByInternalId(it->second);
-      memcpy(ptr_location, &safe_ptr, sizeof(void*));
-    }
+    if (!copy_vector_)
+      world_.storeDataPtr(internal_id, stub_vector_.data());
   }
 
   // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
@@ -267,7 +265,7 @@ struct HnswlibAdapter {
   void ResizeIfFull() {
     {
       // First check with reader lock to avoid contention.
-      absl::ReaderMutexLock lock(&resize_mutex_);
+      absl::ReaderMutexLock lock(resize_mutex_);
       if (world_.getCurrentElementCount() < world_.getMaxElements() ||
           (world_.allow_replace_deleted_ && world_.getDeletedCount() > 0)) {
         return;
@@ -275,7 +273,7 @@ struct HnswlibAdapter {
     }
     try {
       // Upgrade to writer lock.
-      absl::WriterMutexLock lock(&resize_mutex_);
+      absl::WriterMutexLock lock(resize_mutex_);
       if (world_.getCurrentElementCount() == world_.getMaxElements() &&
           (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
         auto max_elements = world_.getMaxElements();
@@ -303,7 +301,7 @@ struct HnswlibAdapter {
   // caller should fall back to rebuilding the index from the keyspace.
   bool RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-    absl::WriterMutexLock resize_lock(&resize_mutex_);
+    absl::WriterMutexLock resize_lock(resize_mutex_);
 
     if (nodes.empty()) {
       return true;
@@ -404,11 +402,8 @@ struct HnswlibAdapter {
 
       // In borrowed mode, deleted nodes are still traversed by addPoint.
       // Point to stub_vector_ so distance computations don't dereference nullptr.
-      if (!copy_vector_) {
-        const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
-        char* ptr_location = world_.getDataPtrByInternalId(internal_id);
-        memcpy(ptr_location, &safe_ptr, sizeof(void*));
-      }
+      if (!copy_vector_)
+        world_.storeDataPtr(internal_id, stub_vector_.data());
     }
 
     // Set the metadata for the graph
@@ -425,15 +420,19 @@ struct HnswlibAdapter {
   // Returns false if the node doesn't exist in the index.
   bool UpdateVectorData(GlobalDocId id, const void* data) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    absl::ReaderMutexLock resize_lock(resize_mutex_);
 
     // Find the internal id for this label
-    auto it = world_.label_lookup_.find(id);
-    if (it == world_.label_lookup_.end()) {
-      VLOG(1) << "UpdateVectorData: label " << id << " not found in index";
-      return false;
+    size_t internal_id;
+    {
+      std::lock_guard<std::mutex> lock_table(world_.label_lookup_lock);
+      auto it = world_.label_lookup_.find(id);
+      if (it == world_.label_lookup_.end()) {
+        VLOG(1) << "UpdateVectorData: label " << id << " not found in index";
+        return false;
+      }
+      internal_id = it->second;
     }
-
-    size_t internal_id = it->second;
 
     // Copy/store the vector data based on copy_vector_ mode
     if (world_.copy_vector_) {
@@ -442,8 +441,7 @@ struct HnswlibAdapter {
       memcpy(data_ptr, data, world_.data_size_);
     } else {
       // Borrowed mode: store pointer to external data
-      char* ptr_location = world_.getDataPtrByInternalId(internal_id);
-      memcpy(ptr_location, &data, sizeof(void*));
+      world_.storeDataPtr(internal_id, data);
     }
 
     // Unmark deleted so the node participates in KNN searches now that it
@@ -470,6 +468,10 @@ struct HnswlibAdapter {
  private:
   HnswSpace space_;
   HierarchicalNSW<float> world_;
+
+  // Writers share mrmw_mutex_, and resizeIndex moves the level-0 block under them: readers of
+  // this mutex touch nodes (DoAdd, DoRemove, UpdateVectorData), writers replace the memory
+  // (ResizeIfFull, RestoreFromNodes).
   absl::Mutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
   std::atomic_bool retired_ = false;

@@ -39,6 +39,7 @@ static string KeyOf(OAHPair p) {
 }
 
 [[maybe_unused]] const bool kThreadLocalAllocatorsInitialized = [] {
+  server.max_listpack_map_bytes = 8192;  // values of 8192+ bytes get a separate buffer
   auto* tlh = mi_heap_get_backing();
   init_zmalloc_threadlocal(tlh);
   InitTLStatelessAllocMR(PMR_NS::get_default_resource());
@@ -204,33 +205,28 @@ TEST_F(OAHMapTest, OAHPairSizeEncoding) {
         EXPECT_EQ(pair.AllocSize(), zmalloc_used_memory_tl - used_before);
 
         // Decode the fields directly from the blob:
-        //   [expiry?, key_header, value_size, value_ptr:8B, key_content]
+        //   [expiry?, key_header, value_size, key_content, value | value_ptr:8B]
         const char* key_header = pair.Raw() + (expiry != UINT32_MAX) * sizeof(expiry);
         const oah::key::Header kh = oah::key::ReadHeader(key_header);
         EXPECT_EQ(kh.len, key_size);
         EXPECT_EQ(kh.encoded, ASCIIStr(key).encoded());
         const char* value_size_field = key_header + kh.field_size;
         const oah::size::Decoded decoded_value_size = oah::size::Read(value_size_field);
-        const char* value_ptr_field = value_size_field + decoded_value_size.field_size;
         EXPECT_EQ(decoded_value_size.size, value_size);
 
-        char* stored_value = nullptr;
-        std::memcpy(&stored_value, value_ptr_field, sizeof(stored_value));
-        EXPECT_EQ(stored_value, pair.Value().data());
-
-        // Key content (ascii-packed or raw) is stored right after the value pointer.
-        const char* key_content = value_ptr_field + sizeof(stored_value);
+        // Key content (ascii-packed or raw) is stored right after the value size.
+        const char* key_content = value_size_field + decoded_value_size.field_size;
         EXPECT_EQ(pair.KeyContent().data(), key_content);
         EXPECT_EQ(pair.KeyContent().size(), ASCIIStr(key).content().size());
 
-        const uintptr_t raw = reinterpret_cast<uintptr_t>(pair.Raw());
-        const uintptr_t raw_end = raw + zmalloc_usable_size(pair.Raw());
-        const uintptr_t value_data = reinterpret_cast<uintptr_t>(pair.Value().data());
-        if (value_size == 0) {
-          EXPECT_EQ(pair.Value().data(), nullptr);  // empty value: no buffer
+        const char* value_field = key_content + kh.content_size;
+        if (value_size < 8192) {
+          EXPECT_EQ(pair.Value().data(), value_field);  // stored inline
         } else {
-          EXPECT_TRUE(value_data < raw || value_data >= raw_end);  // outside the blob
-          EXPECT_EQ(value_data % 8, 0u);  // separate zmalloc buffer is >=8-byte aligned
+          char* stored_value = nullptr;
+          std::memcpy(&stored_value, value_field, sizeof(stored_value));
+          EXPECT_EQ(stored_value, pair.Value().data());
+          EXPECT_EQ(uintptr_t(stored_value) % 8, 0u);  // separate buffer is >=8-byte aligned
         }
 
         OAHPair::Destroy(pair.Release());

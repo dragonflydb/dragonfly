@@ -56,10 +56,6 @@ template <typename T> struct OptionalMutex {
 
 }  // namespace detail
 
-// Opaque identity for a physical DashTable bucket — its memory address.
-// Unique across all databases/segments for the lifetime of a serialization.
-using BucketIdentity = uintptr_t;
-
 // Track dependencies for buckets.
 // Asynchronous processes during bucket serialization like big value streaming and tiered value
 // loading must increase the dependency count for their bucket to hold off changes to it.
@@ -74,6 +70,9 @@ struct BucketDependencies {
   void WaitEmpty() const;
   bool HasAny() const {
     return !deps_.empty();
+  }
+  bool Has(BucketIdentity bucket) const {
+    return deps_.contains(bucket);
   }
 
  private:
@@ -178,7 +177,10 @@ class SerializerBase : public BucketDependencies,
     uint64_t change_during_serialization = 0;  // change hit an in-flight bucket
   };
 
-  explicit SerializerBase(DbSlice* slice, ExecutionState* cntx);
+  // Migrations pass their shard's CPU aggregator, which must outlive the serializer. Snapshots
+  // don't pace on CPU usage, so they pass none and skip the accounting.
+  explicit SerializerBase(DbSlice* slice, ExecutionState* cntx,
+                          base::CycleBucketAggregator* cpu_aggregator = nullptr);
   virtual ~SerializerBase();
 
   // Register db_slice change listener and save snapshot version.
@@ -246,6 +248,23 @@ class SerializerBase : public BucketDependencies,
 
   void WaitForNoBucketBlocked() const override;
 
+  bool IsBucketBlocked(BucketIdentity bucket) const override {
+    return BucketDependencies::Has(bucket);
+  }
+
+  void WaitForBucketUnblocked(BucketIdentity bucket) const override {
+    BucketDependencies::Wait(bucket);
+  }
+
+  // Only with tagged chunks disabled: journal changes wait for the entry being streamed
+  bool IsJournalAppendBlocked() const override {
+    return stream_mu_.is_locked();
+  }
+
+  bool SerializesBaselines() const override {
+    return true;
+  }
+
   // --- Shared members ---
 
   DbSlice* const db_slice_;
@@ -255,8 +274,8 @@ class SerializerBase : public BucketDependencies,
 
   Stats stats_;
 
-  // Accounts the time spent in SerializeBucket, from both the traversal and OnChange flows.
-  base::RealTimeAggregator cpu_aggregator_;
+  // If set, accounts for serializing buckets in both traversal and OnChange flows.
+  base::CycleBucketAggregator* const cpu_aggregator_;
 
   // Guards output stream (serializer) to not be used from multiple fibers
   // as buffered changes can be flushed amid writing a value (logical stream)

@@ -449,7 +449,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
 
   if (op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPOP" : "RPOP";
-    RecordJournal(op_args, command, ArgSlice{key}, 1);
+    RecordJournal(op_args, command, ArgSlice{key});
   }
 
   return value;
@@ -567,7 +567,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     vector<string_view> mapped(vals.size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
-    RecordJournal(op_args, command, mapped, 2);
+    RecordJournal(op_args, command, mapped);
   }
 
   return len;
@@ -615,7 +615,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
 
   if (op_args.shard->journal() && journal_rewrite) {
     string command = dir == ListDir::LEFT ? "LPOP" : "RPOP";
-    RecordJournal(op_args, command, ArgSlice{key}, 2);
+    RecordJournal(op_args, command, ArgSlice{key});
   }
   return res;
 }
@@ -889,9 +889,9 @@ void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir des
       if (op_res) {
         if (op_args.shard->journal()) {
           std::string_view cmd = src_dir == ListDir::LEFT ? "LPOP" : "RPOP";
-          RecordJournal(op_args, cmd, ArgSlice{src}, 1);
+          RecordJournal(op_args, cmd, ArgSlice{src});
           cmd = dest_dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
-          RecordJournal(op_args, cmd, ArgSlice{dest, op_res.value()}, 1);
+          RecordJournal(op_args, cmd, ArgSlice{dest, op_res.value()});
         }
       }
       return op_res;
@@ -1016,9 +1016,9 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
     if (op_res) {
       if (op_args.shard->journal()) {
         std::string_view cmd = popdir_ == ListDir::LEFT ? "LPOP" : "RPOP";
-        RecordJournal(op_args, cmd, ArgSlice{pop_key_}, 1);
+        RecordJournal(op_args, cmd, ArgSlice{pop_key_});
         cmd = pushdir_ == ListDir::LEFT ? "LPUSH" : "RPUSH";
-        RecordJournal(op_args, cmd, ArgSlice{push_key_, op_res.value()}, 1);
+        RecordJournal(op_args, cmd, ArgSlice{push_key_, op_res.value()});
       }
     }
 

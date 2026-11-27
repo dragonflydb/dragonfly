@@ -293,7 +293,11 @@ TEST_F(AclFamilyTest, AclWhoAmI) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run("ACL WHOAMI");
-  EXPECT_THAT(resp, "User is kostas");
+  EXPECT_THAT(resp, "kostas");
+
+  // These run before authentication, so the user's command rules never deny them.
+  for (std::string_view cmd : {"AUTH kostas pass", "HELLO 3", "QUIT", "RESET"})
+    EXPECT_EQ(Run(absl::StrCat("ACL DRYRUN kostas ", cmd)), "OK") << cmd;
 }
 
 TEST_F(AclFamilyTest, TestAllCategories) {

@@ -81,7 +81,7 @@ ReplyStats::ReplyStats(ReplyStats&& other) noexcept {
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 88u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 72u + kSanitizerOverhead);
   ADD(io_write_calls);
   ADD(io_write_bytes);
 
@@ -101,7 +101,7 @@ ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
 #undef ADD
 
 ReplyStats& ReplyStats::operator=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 88u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 72u + kSanitizerOverhead);
 
   if (this == &o) {
     return *this;
@@ -151,6 +151,10 @@ const char* RespExpr::TypeName(Type t) {
       return "nil";
     case ERROR:
       return "error";
+    case BOOL:
+      return "bool";
+    case VERB:
+      return "verbatim";
   }
   ABSL_UNREACHABLE();
 }
@@ -221,6 +225,12 @@ ostream& operator<<(ostream& os, const facade::RespExpr& e) {
       break;
     case RespExpr::ERROR:
       os << "e(" << ToSV(get<RespExpr::Buffer>(e.u)) << ")";
+      break;
+    case RespExpr::BOOL:
+      os << (get<int64_t>(e.u) ? "true" : "false");
+      break;
+    case RespExpr::VERB:
+      os << "v'" << ToSV(get<RespExpr::Buffer>(e.u)) << "'";
       break;
   }
 

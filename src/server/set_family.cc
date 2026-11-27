@@ -538,10 +538,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   }
 
   if (add_res.is_new || overwrite) {
-    // If we're overwriting an existing key (not a new one), we need to remove it from
-    // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
     if (!add_res.is_new && overwrite) {
-      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, co, op_args.shard);
       // Account for the old value's memory under its original type before destroying it,
       // since InitSet will free the old value and change the type.
       add_res.post_updater.ReduceHeapUsage();
@@ -554,9 +551,10 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       // inside InitSet is reported to the client as OOM and must leave the value readable.
       PrimeValue replacement;
       InitSet(vals, &replacement);
-      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &co);
+      db_slice.PrepareOverwrite(op_args.db_cntx, key, &co);
       co = std::move(replacement);
     } else {
+      db_slice.PrepareOverwrite(op_args.db_cntx, key, &co);
       InitSet(vals, &co);
     }
   }
@@ -701,7 +699,9 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
       const PrimeValue& pv = res.value()->second;
       SetType st{pv.RObjPtr(), pv.Encoding()};
       found_[0] = IsInSet(t->GetDbContext(), st, member_);
-      DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), k, pv);
+      if (DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), k, pv)) {
+        found_[0] = OpStatus::KEY_NOTFOUND;
+      }
     } else {
       found_[index] = res.status();
     }
@@ -737,7 +737,11 @@ OpResult<unsigned> Mover::Commit(Transaction* t) {
   OpResult<unsigned> res;
   bool noop = false;
 
-  if (found_[0].status() == OpStatus::WRONG_TYPE || found_[1].status() == OpStatus::WRONG_TYPE) {
+  if (found_[0].status() == OpStatus::KEY_NOTFOUND) {
+    res = 0;
+    noop = true;
+  } else if (found_[0].status() == OpStatus::WRONG_TYPE ||
+             found_[1].status() == OpStatus::WRONG_TYPE) {
     res = OpStatus::WRONG_TYPE;
     noop = true;
   } else if (!found_[0].value_or(false)) {
@@ -1389,7 +1393,7 @@ void CmdSRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
       RedisReplyBuilder::ReplyScope scope(rb);
-      rb->StartCollection(vals.size(), CollectionType::SET);
+      rb->StartArray(vals.size());
       for (size_t i = 0; i < vals.size(); ++i) {
         rb->SendBulkString(vals[i]);
       }

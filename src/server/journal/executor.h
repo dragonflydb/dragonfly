@@ -33,10 +33,6 @@ class JournalExecutor {
   void FlushAll();  // Execute FLUSHALL.
   void FlushSlots(const cluster::SlotRange& slot_range);
 
-  ConnectionContext* connection_context() {
-    return &conn_context_;
-  }
-
  private:
   facade::DispatchResult Execute(CommandContext* cmd_cntx);
 

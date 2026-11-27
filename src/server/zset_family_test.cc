@@ -245,11 +245,10 @@ TEST_F(ZSetFamilyTest, ZRandMember) {
   auto resp = Run({"ZAdd", "x", "1", "a", "2", "b", "3", "c"});
   EXPECT_THAT(resp, IntArg(3));
 
-  // Test if count > 0
-  resp = Run({"ZRandMember", "x"});
-  // ZRandMember always uses SendScoredArray which wraps in an array even without count arg.
-  EXPECT_THAT(resp, RespElementsAre(AnyOf("a", "b", "c")));
+  // Without a count the reply is the member itself.
+  EXPECT_THAT(Run({"ZRandMember", "x"}), AnyOf("a", "b", "c"));
 
+  // Test if count > 0
   resp = Run({"ZRandMember", "x", "1"});
   EXPECT_THAT(resp, RespElementsAre(AnyOf("a", "b", "c")));
 
@@ -292,6 +291,14 @@ TEST_F(ZSetFamilyTest, ZRandMember) {
   ASSERT_THAT(Run({"ZRandMember", "empty::zset", "0"}), ArrLen(0));
   ASSERT_THAT(Run({"ZRandMember", "empty::zset", "3"}), ArrLen(0));
   ASSERT_THAT(Run({"ZRandMember", "empty::zset", "-4"}), ArrLen(0));
+
+  // RESTORE accepts an empty listpack, so a sorted set can exist without members.
+  uint8_t empty_lp[] = {0x11, 0x07, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0b,
+                        0x00, 0xd5, 0xe0, 0xb0, 0xd2, 0x28, 0xdc, 0xda, 0x90};
+  EXPECT_EQ(Run({"restore", "empty::lp", "0", ToSV(empty_lp)}), "OK");
+  EXPECT_THAT(Run({"ZRandMember", "empty::lp"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"ZRandMember", "empty::lp", "3"}), ArrLen(0));
+  EXPECT_THAT(Run({"ZRandMember", "empty::lp", "-2"}), ArrLen(0));
 
   // Test if key does not exist
   ASSERT_THAT(Run({"ZRandMember", "y"}), ArgType(RespExpr::NIL));
@@ -481,6 +488,38 @@ TEST_F(ZSetFamilyTest, ByLex) {
 
   resp = Run({"zrangebylex", "key", "-", "+", "LIMIT", "5", "1"});
   ASSERT_THAT(resp, RespElementsAre("foo"));
+}
+
+// Sorted sets above zset_max_listpack_entries use SortedMap.
+TEST_F(ZSetFamilyTest, ByLexSentinelBoundsBig) {
+  vector<string> args = {"zadd", "key"};
+  for (unsigned i = 0; i < 200; ++i) {
+    args.push_back("0");
+    args.push_back(absl::StrCat("k", absl::Dec(i, absl::kZeroPad3)));
+  }
+  Run(args);
+
+  for (auto [min, max] : vector<pair<string, string>>{{"-", "-"}, {"[k005", "-"}, {"+", "+"}}) {
+    SCOPED_TRACE(min + " " + max);
+    EXPECT_THAT(Run({"zrangebylex", "key", min, max}), ArrLen(0));
+    EXPECT_THAT(Run({"zrevrangebylex", "key", max, min}), ArrLen(0));
+    EXPECT_EQ(0, CheckedInt({"zlexcount", "key", min, max}));
+    EXPECT_EQ(0, CheckedInt({"zremrangebylex", "key", min, max}));
+  }
+  EXPECT_EQ(200, CheckedInt({"zcard", "key"}));
+}
+
+TEST_F(ZSetFamilyTest, ZAddChUnchangedScoreBig) {
+  vector<string> args = {"zadd", "key"};
+  for (unsigned i = 0; i < 200; ++i) {
+    args.push_back(absl::StrCat(i));
+    args.push_back(absl::StrCat("m", i));
+  }
+  Run(args);
+
+  EXPECT_EQ(0, CheckedInt({"zadd", "key", "ch", "5", "m5"}));
+  EXPECT_EQ(0, CheckedInt({"zadd", "key", "ch", "xx", "5", "m5"}));
+  EXPECT_EQ(1, CheckedInt({"zadd", "key", "ch", "6", "m5", "7", "m7"}));
 }
 
 TEST_F(ZSetFamilyTest, ZRevRangeByLex) {
@@ -1249,6 +1288,34 @@ TEST_F(ZSetFamilyTest, Resp3) {
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("a", DoubleArg(1)));
   ASSERT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("b", DoubleArg(2)));
+
+  // ZUNION and ZINTER reply with [member, score] pairs too.
+  Run({"zadd", "y", "3", "b", "4", "c"});
+  resp = Run({"zunion", "2", "x", "y", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("a", DoubleArg(1)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("c", DoubleArg(4)));
+  EXPECT_THAT(resp.GetVec()[2].GetVec(), ElementsAre("b", DoubleArg(5)));
+
+  resp = Run({"zinter", "2", "x", "y", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("b", DoubleArg(5)));
+
+  // Without WITHSCORES they stay a flat list of members.
+  resp = Run({"zunion", "2", "x", "y"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "c", "b"));
+
+  // ZPOPMIN and ZPOPMAX nest the pairs only when COUNT is given.
+  EXPECT_THAT(Run({"zpopmin", "x"}), RespElementsAre("a", DoubleArg(1)));
+  EXPECT_THAT(Run({"zpopmax", "y"}), RespElementsAre("c", DoubleArg(4)));
+  resp = Run({"zpopmin", "y", "1"});
+  ASSERT_THAT(resp, ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("b", DoubleArg(3)));
+  EXPECT_THAT(Run({"zpopmin", "y"}), ArrLen(0));
+
+  // ZMPOP names the key and nests a [member, score] pair per member.
+  EXPECT_THAT(Run({"zmpop", "1", "x", "MIN"}),
+              RespElementsAre("x", RespElementsAre(RespElementsAre("b", DoubleArg(2)))));
 }
 
 TEST_F(ZSetFamilyTest, BlockingIsReleased) {
@@ -1412,6 +1479,10 @@ TEST_F(ZSetFamilyTest, ZDiff_Resp3) {
   ASSERT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("two", DoubleArg(2)));
   ASSERT_THAT(resp.GetVec()[2].GetVec(), ElementsAre("three", DoubleArg(3)));
   ASSERT_THAT(resp.GetVec()[3].GetVec(), ElementsAre("four", DoubleArg(4)));
+
+  // Without WITHSCORES the members are not wrapped.
+  resp = Run({"zdiff", "1", "z1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "two", "three", "four"));
 }
 
 TEST_F(ZSetFamilyTest, ZDiffStoreError) {

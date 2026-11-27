@@ -42,6 +42,11 @@ RespExpr RespExprBuilder::BuildNode(const RESPObj& obj) {
       expr.u = obj.As<double>().value();
       break;
     }
+    case RESPObj::Type::BOOL: {
+      expr.type = RespExpr::BOOL;
+      expr.u = int64_t{obj.As<bool>().value()};
+      break;
+    }
     case RESPObj::Type::NIL: {
       expr.type = RespExpr::NIL;
       break;
@@ -57,6 +62,11 @@ RespExpr RespExprBuilder::BuildNode(const RESPObj& obj) {
       SetStringPayload(obj, &expr);
       break;
     }
+    case RESPObj::Type::VERB: {
+      expr.type = RespExpr::VERB;
+      SetStringPayload(obj, &expr);
+      break;
+    }
     case RESPObj::Type::ARRAY:
     case RESPObj::Type::MAP:
     case RESPObj::Type::SET: {
@@ -68,6 +78,10 @@ RespExpr RespExprBuilder::BuildNode(const RESPObj& obj) {
           expr.u.emplace<RespExpr::Vec*>(nullptr);
         } else {
           expr.type = RespExpr::ARRAY;
+          if (obj.GetType() == RESPObj::Type::MAP)
+            expr.agg = RespExpr::Agg::kMap;
+          else if (obj.GetType() == RESPObj::Type::SET)
+            expr.agg = RespExpr::Agg::kSet;
           auto vec = std::make_unique<RespExpr::Vec>();
           vec->resize(arr->Size());
           expr.u = vec.get();

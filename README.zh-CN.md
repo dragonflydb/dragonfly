@@ -13,7 +13,7 @@
 
 其他语言:  [English](README.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md) [ภาษาไทย](README.th-TH.md)
 
-[主页](https://dragonflydb.io/) • [快速入门](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start) • [社区 Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly 论坛](https://dragonfly.discourse.group/) • [加入 Dragonfly 社区](https://www.dragonflydb.io/community)
+[主页](https://dragonflydb.io/) • [快速入门](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start) • [社区 Slack](https://join.slack.com/t/dragonflycommunityhq/shared_invite/zt-4ftpylx50-SQZ0g0CD2lJMvi0EsqPNbQ) • [Dragonfly 论坛](https://dragonfly.discourse.group/) • [加入 Dragonfly 社区](https://www.dragonflydb.io/community)
 
 [GitHub Discussions](https://github.com/dragonflydb/dragonfly/discussions) • [GitHub Issues](https://github.com/dragonflydb/dragonfly/issues) • [贡献指南](https://github.com/dragonflydb/dragonfly/blob/main/CONTRIBUTING.md)
 

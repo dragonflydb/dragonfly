@@ -24,6 +24,11 @@ removes deduplication key
 # Upstream comment: "additional delay since XREAD from '$' is unstable"
 emits waiting when a job has been added
 
+# QueueEvents sends XREAD ... $ only after waitUntilReady() resolves (CLIENT SETNAME round trip);
+# the waiting-children XADD from FlowProducer.add can land first and '$' skips it. Upstream pads
+# this exact test with delay(50): "additional delay since XREAD from '$' is unstable".
+emits waiting-children and waiting event
+
 # getWorkers: race between worker 'ready' event and assertion.
 gets all workers for this queue only
 

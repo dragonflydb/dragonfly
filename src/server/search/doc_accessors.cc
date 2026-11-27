@@ -102,6 +102,8 @@ FieldValue ToSortableValueFromJson(search::SchemaField::FieldType type, const Js
   if (json.is_null()) {
     return std::monostate{};
   }
+  if (json.is_bool())
+    return string{json.as_bool() ? "1" : "0"};
   auto json_as_string = json.as_string();
   return ToSortableValue(type, json_as_string);
 }
@@ -188,13 +190,10 @@ std::optional<BaseAccessor::StringList> ListPackAccessor::GetStrings(
   return it != lw_.end() ? StringList{(*it).second} : StringList{};
 }
 
-SearchDocData ListPackAccessor::SerializeAll(const DocFieldTypes& types) const {
+SearchDocData ListPackAccessor::SerializeAll() const {
   SearchDocData out{};
-  for (const auto [key, value] : lw_) {
-    if (auto field_value = ToSortableValue(types.Of(key), value); field_value) {
-      out[key] = std::move(field_value).value();
-    }
-  }
+  for (const auto [key, value] : lw_)
+    out[key] = string{value};
   return out;
 }
 
@@ -216,14 +215,10 @@ std::optional<BaseAccessor::StringList> StringMapAccessor::GetStrings(
   return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList{};
 }
 
-SearchDocData StringMapAccessor::SerializeAll(const DocFieldTypes& types) const {
+SearchDocData StringMapAccessor::SerializeAll() const {
   SearchDocData out{};
-  for (const auto& [kptr, vptr] : *hset_) {
-    auto field_value = ToSortableValue(types.Of(SdsToSafeSv(kptr)), SdsToSafeSv(vptr));
-    if (field_value) {
-      out[SdsToSafeSv(kptr)] = std::move(field_value).value();
-    }
-  }
+  for (const auto& [kptr, vptr] : *hset_)
+    out[SdsToSafeSv(kptr)] = string{SdsToSafeSv(vptr)};
   return out;
 }
 
@@ -243,6 +238,16 @@ struct JsonAccessor::JsonPathContainer {
           val);
 
     return res;
+  }
+
+  // Whether the path selects any value; unlike Evaluate, copies nothing on the default engine.
+  bool Selects(const JsonType& json) const {
+    if (const auto* path = get_if<json::Path>(&val)) {
+      bool found = false;
+      json::EvaluatePath(*path, json, [&](auto, const JsonType&) { found = true; });
+      return found;
+    }
+    return !Evaluate(json).empty();
   }
 
   variant<json::Path, jsoncons::jsonpath::jsonpath_expression<JsonType>> val;
@@ -404,6 +409,11 @@ std::optional<BaseAccessor::NumsList> JsonAccessor::GetNumbers(string_view activ
   return nums_list;
 }
 
+bool JsonAccessor::IsFieldMissing(string_view field) const {
+  auto* path = GetPath(field);
+  return !path || !path->Selects(json_);
+}
+
 JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) const {
   if (auto it = path_cache_.find(field); it != path_cache_.end()) {
     return it->second.get();
@@ -456,7 +466,7 @@ SearchDocData JsonAccessor::Serialize(absl::Span<const DocField> fields) const {
   return out;
 }
 
-SearchDocData JsonAccessor::SerializeAll(const DocFieldTypes&) const {
+SearchDocData JsonAccessor::SerializeAll() const {
   return {{"$", json_.to_string()}};
 }
 
@@ -474,7 +484,7 @@ struct EmptyAccessor : public BaseAccessor {
     return std::optional<StringList>{std::in_place};
   }
 
-  SearchDocData SerializeAll(const DocFieldTypes&) const override {
+  SearchDocData SerializeAll() const override {
     return {};
   }
 };

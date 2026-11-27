@@ -224,7 +224,57 @@ int ZsetAdd(PrimeValue* pv, double score, std::string_view ele, int in_flags, in
   return ss->AddElem(score, ele, in_flags, out_flags, newscore);
 }
 
-void OutputScoredArrayResult(const OpResult<ScoredArray>& result, SinkReplyBuilder* builder) {
+// RESP3 nests a [member, score] pair per member, RESP2 sends them flat.
+template <typename Pairs, typename Unpack>
+void SendScoredPairs(Pairs arr, bool with_scores, Unpack unpack, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope(rb);
+  rb->StartArray((with_scores && !rb->IsResp3()) ? arr.size() * 2 : arr.size());
+  for (const auto& elem : arr) {
+    const auto [member, score] = unpack(elem);
+    if (with_scores && rb->IsResp3())
+      rb->StartArray(2);
+    rb->SendBulkString(member);
+    if (with_scores)
+      rb->SendDouble(score);
+  }
+}
+
+void SendScoredArray(absl::Span<const ScoredMember> arr, bool with_scores, RedisReplyBuilder* rb) {
+  SendScoredPairs(
+      arr, with_scores,
+      [](const ScoredMember& elem) {
+        return pair<string_view, double>{elem.first, elem.second};
+      },
+      rb);
+}
+
+// Score first, as the set operations compute them.
+void SendScoredArray(ScoredMemberSpan arr, bool with_scores, RedisReplyBuilder* rb) {
+  SendScoredPairs(
+      arr, with_scores,
+      [](const ScoredMemberView& elem) {
+        return pair<string_view, double>{elem.second, elem.first};
+      },
+      rb);
+}
+
+void SendLabeledScoredArray(string_view arr_label, absl::Span<const ScoredMember> arr,
+                            RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ReplyScope scope(rb);
+
+  rb->StartArray(2);
+
+  rb->SendBulkString(arr_label);
+  rb->StartArray(arr.size());
+  for (const auto& [str, score] : arr) {
+    rb->StartArray(2);
+    rb->SendBulkString(str);
+    rb->SendDouble(score);
+  }
+}
+
+void OutputScoredArrayResult(const OpResult<ScoredArray>& result, bool has_count,
+                             SinkReplyBuilder* builder) {
   if (result.status() == OpStatus::WRONG_TYPE) {
     return builder->SendError(kWrongTypeErr);
   }
@@ -232,7 +282,15 @@ void OutputScoredArrayResult(const OpResult<ScoredArray>& result, SinkReplyBuild
   LOG_IF(WARNING, !result && result.status() != OpStatus::KEY_NOTFOUND)
       << "Unexpected status " << result.status();
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->SendScoredArray(result.value(), true /* with scores */);
+  if (has_count)
+    return SendScoredArray(result.value(), true /* with scores */, rb);
+
+  // Without COUNT the popped member and its score are flat in both protocols.
+  RedisReplyBuilder::ArrayScope scope{rb, result.value().size() * 2};
+  for (const auto& [member, score] : result.value()) {
+    rb->SendBulkString(member);
+    rb->SendDouble(score);
+  }
 }
 
 OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams,
@@ -263,12 +321,8 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
       robj_ptr = lpNew(0);
     }
 
-    // If we're overwriting an existing key (not a new one), we need to remove it from
-    // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
-    if (!add_res.is_new && zparams.override) {
-      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, pv, op_args.shard);
-      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &pv);
-    }
+    if (!add_res.is_new && zparams.override)
+      db_slice.PrepareOverwrite(op_args.db_cntx, key, &pv);
 
     pv.InitRobj(OBJ_ZSET, encoding, robj_ptr);
   } else {
@@ -1076,7 +1130,7 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   OpArgs op_args = t->GetOpArgs(shard);
   if (op_args.shard->journal()) {
     string command = is_max ? "ZPOPMAX" : "ZPOPMIN";
-    RecordJournal(op_args, command, ArgSlice{key}, 1);
+    RecordJournal(op_args, command, ArgSlice{key});
   }
 
   return res;
@@ -1203,7 +1257,7 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
     DCHECK(std::holds_alternative<ZSetFamily::TopNScored>(range_spec.interval));
     auto count = std::get<ZSetFamily::TopNScored>(range_spec.interval);
     string command = (reverse ? "ZPOPMAX" : "ZPOPMIN");
-    RecordJournal(op_args, command, ArgSlice{key, absl::StrCat(count)}, 1);
+    RecordJournal(op_args, command, ArgSlice{key, absl::StrCat(count)});
   }
 
   return iv.PopResult();
@@ -1514,6 +1568,9 @@ OpResult<ScoredArray> OpRandMember(int count, const ZSetFamily::RangeParams& par
   PrimeValue& pv = const_cast<PrimeValue&>(it.value()->second);
 
   const std::size_t size = pv.Size();
+  if (size == 0)
+    return ScoredArray{};  // RESTORE can create a sorted set without members
+
   const std::size_t picks_count =
       count >= 0 ? std::min(static_cast<std::size_t>(count), size) : std::abs(count);
 
@@ -1620,17 +1677,7 @@ void ZBooleanOperation(CmdArgParser parser, string_view cmd, bool is_union, bool
     builder->SendLong(smvec.size());
   } else {
     rng::sort(smvec);
-
-    // We can't use SendScoredArray because it expects strings, not string_views
-    // TOOD: Not longer relevant with new io, use scoping
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    rb->StartArray(smvec.size() * (op_args->with_scores ? 2 : 1));
-    for (const auto& elem : smvec) {
-      rb->SendBulkString(elem.second);
-      if (op_args->with_scores) {
-        rb->SendDouble(elem.first);
-      }
-    }
+    SendScoredArray(smvec, op_args->with_scores, static_cast<RedisReplyBuilder*>(builder));
   }
 }
 
@@ -1666,13 +1713,14 @@ OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards shou
 
 void ZPopMinMaxFromArgs(CmdArgParser parser, bool reverse, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
+  const bool has_count = parser.HasNext();
   uint32 count = parser.NextOrDefault<uint32>(1);
   if (parser.TakeError()) {
     return cmd_cntx->SendError(kUintErr);
   }
 
   OutputScoredArrayResult(ZPopMinMaxInternal(key, FilterShards::NO, count, reverse, cmd_cntx->tx()),
-                          cmd_cntx->rb());
+                          has_count, cmd_cntx->rb());
 }
 
 void ZRangeInternal(const facade::ParsedArgs& args, ZSetFamily::RangeParams range_params,
@@ -1743,7 +1791,7 @@ void ZRangeInternal(const facade::ParsedArgs& args, ZSetFamily::RangeParams rang
 
   if (!range_params.store_key) {
     auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-    rb->SendScoredArray(range_result.value(), range_params.with_scores);
+    SendScoredArray(range_result.value(), range_params.with_scores, rb);
     return;
   }
 
@@ -2292,16 +2340,7 @@ void CmdZDiff(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   const bool with_scores = absl::EqualsIgnoreCase(args[args.size() - 1], "WITHSCORES");
-  bool is_resp3 = rb->IsResp3();
-  rb->StartArray(smvec.size() * ((with_scores && !is_resp3) ? 2 : 1));
-  for (const auto& [score, key] : smvec) {
-    if (is_resp3)
-      rb->StartArray(with_scores ? 2 : 1);
-    rb->SendBulkString(key);
-    if (with_scores) {
-      rb->SendDouble(score);
-    }
-  }
+  SendScoredArray(smvec, with_scores, rb);
 }
 
 void CmdZDiffStore(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2546,7 +2585,7 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   }
 
   LOG_IF(WARNING, !pop_result) << "Unexpected status " << pop_result.status();
-  response_builder->SendLabeledScoredArray(*key_to_pop, pop_result.value());
+  SendLabeledScoredArray(*key_to_pop, pop_result.value(), response_builder);
 }
 
 void CmdZMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2700,10 +2739,16 @@ void CmdZRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   OpResult<ScoredArray> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (result) {
-    rb->SendScoredArray(result.value(), params.with_scores);
+    // Without a count the member is sent alone; a RESTOREd sorted set can be empty.
+    if (is_count)
+      SendScoredArray(result.value(), params.with_scores, rb);
+    else if (result->empty())
+      rb->SendNull();
+    else
+      rb->SendBulkString(result->front().first);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
-      rb->SendScoredArray(ScoredArray(), params.with_scores);
+      SendScoredArray(ScoredArray(), params.with_scores, rb);
     } else {
       rb->SendNull();
     }

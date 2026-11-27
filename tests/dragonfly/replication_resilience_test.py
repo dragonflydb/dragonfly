@@ -532,6 +532,14 @@ async def test_take_over_read_commands(df_factory, master_threads, replica_threa
     assert await c_replica.execute_command("role") == master_role_reply([])
     await promt_task
 
+    master.stop()
+    replica.stop()
+    assert master.is_in_logs("Takeover initiated, locking down the database")
+    assert replica.is_in_logs("Takeover successful, promoting this instance to master")
+    for instance in (master, replica):
+        warnings = instance.find_in_logs(r"^[WEF].*ExecutionState cancelled")
+        assert not warnings, warnings
+
 
 async def test_take_over_timeout(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=2)
@@ -730,7 +738,9 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     In parallel, connect a replica, so that these SETEX commands write their custom journal log.
     This makes sure that no Fiber context switch while inside a shard callback.
     """
-    master, _, c_master, [c_replica] = await setup_replication(df_factory, connect=False)
+    master, _, c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"snapshot_output_buffer_limit": 0}, connect=False
+    )
 
     async def send_setex():
         script = """

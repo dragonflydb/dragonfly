@@ -11,15 +11,19 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/flags/reflection.h>
+#include <lz4frame.h>
 #include <mimalloc.h>
 #include <sys/resource.h>
+#include <zstd.h>
 
 #include <filesystem>
 #include <fstream>
 
 #include "base/flags.h"
 #include "base/gtest.h"
+#include "base/hash.h"
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/cuckoo.h"
@@ -64,6 +68,7 @@ ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
 ABSL_DECLARE_FLAG(bool, df_snapshot_format);
 ABSL_DECLARE_FLAG(uint32_t, max_rdb_save_serialize_buffer_capacity);
+ABSL_DECLARE_FLAG(uint32_t, dbnum);
 
 namespace {
 
@@ -123,6 +128,16 @@ class RdbTest : public BaseFamilyTest {
       io::BytesSource src(string_view(reinterpret_cast<const char*>(data), size));
       RdbLoadContext load_context;
       RdbLoader loader(service_.get(), &load_context);
+      return loader.Load(&src);
+    });
+  }
+
+  std::error_code LoadRdbBounded(const std::string& rdb) {
+    return pp_->at(0)->Await([&] {
+      io::BytesSource src{io::Buffer(rdb)};
+      RdbLoadContext load_context;
+      RdbLoader loader(service_.get(), &load_context);
+      loader.set_source_limit(rdb.size());
       return loader.Load(&src);
     });
   }
@@ -213,7 +228,7 @@ TEST_F(RdbTest, UnsupportedVersion) {
   }
 }
 
-TEST_F(RdbTest, LoadValkeyHashWithExpiry) {
+TEST_F(RdbTest, LoadHashWithExpiry) {
   for (string_view header : {"", "VALKEY081", "VALKEY999"}) {
     SCOPED_TRACE(header);
     EXPECT_EQ(Run({"FLUSHALL"}), "OK");
@@ -224,6 +239,39 @@ TEST_F(RdbTest, LoadValkeyHashWithExpiry) {
                 UnorderedElementsAre("expiring", "one", "persistent", "two", "overflow", "three"));
     EXPECT_THAT(Run({"HPEXPIRETIME", "hash", "FIELDS", "2", "expiring", "persistent"}),
                 RespElementsAre(2524608000000, -1));
+  }
+
+  // Redis 7.4.2 saved hashes with metadata and listpack_ex encodings and their DUMP payloads. The
+  // listpack_ex DUMP is LZF-compressed and also has 1500 fields expired at the time set below,
+  // which fill its first load batch.
+  TEST_current_time_ms = 2524607900000;
+  auto ec = LoadRdb("redis7_hash_expiry.rdb");
+  ASSERT_FALSE(ec) << ec.message();
+
+  // Returns the DUMP with another footer version and a matching CRC64.
+  auto with_version = [](string dump, uint16_t version) {
+    absl::little_endian::Store16(dump.data() + dump.size() - 10, version);
+    absl::little_endian::Store64(dump.data() + dump.size() - 8,
+                                 crc64(0, to_byte(dump.data()), dump.size() - 8));
+    return dump;
+  };
+  for (string_view key : {"metadata", "listpack_ex"}) {
+    SCOPED_TRACE(key);
+    string restored = StrCat(key, ":restored");
+    string dump = Run({"GET", StrCat("dump:", key)}).GetString();
+    EXPECT_EQ(Run({"RESTORE", restored, "0", dump}), "OK");
+
+    // Dragonfly DUMPs use RDB_SER_VERSION and can't carry Redis-only types, while RedisShake
+    // wraps Redis RDB values with version 6.
+    EXPECT_THAT(Run({"RESTORE", "invalid", "0", with_version(dump, RDB_SER_VERSION)}),
+                ErrArg("Bad data format"));
+    EXPECT_EQ(Run({"RESTORE", restored, "0", with_version(dump, 6), "REPLACE"}), "OK");
+    for (string_view hash : {key, string_view{restored}}) {
+      EXPECT_THAT(Run({"HGETALL", hash}).GetVec(),
+                  UnorderedElementsAre("expiring", "one", "persistent", "two"));
+      EXPECT_THAT(Run({"HPEXPIRETIME", hash, "FIELDS", "2", "expiring", "persistent"}),
+                  RespElementsAre(2524608000000, -1));
+    }
   }
 }
 
@@ -313,6 +361,50 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
     resp = Run({"dfly", "load", save_info.file_name});
     ASSERT_EQ(resp, "OK");
     ASSERT_EQ(50000, CheckedInt({"dbsize"}));
+  }
+}
+
+// A collection saved in several tagged chunks has its header in one compressed blob and its
+// elements in the following ones, so its element count can exceed the bytes left in the file.
+TEST_F(RdbTest, ReloadSplitCollectionCompressed) {
+  absl::FlagSaver fs;
+
+  struct Round {
+    CompressionMode mode;
+    string_view chunk_size, add_cmd, len_cmd;
+    unsigned count;
+  };
+
+  const Round kRounds[] = {
+      // The file fits into the loader's read-ahead buffer, so once the header is read only the
+      // rest of its blob is left to count.
+      {CompressionMode::MULTI_ENTRY_LZ4, "512", "sadd", "scard", 1000},
+      {CompressionMode::MULTI_ENTRY_LZ4, "512", "hset", "hlen", 1000},
+
+      // Sorted members with equal scores take less than a byte each in the file.
+      {CompressionMode::MULTI_ENTRY_ZSTD, "8192", "zadd", "zcard", 100000},
+  };
+
+  for (const Round& round : kRounds) {
+    SCOPED_TRACE(round.add_cmd);
+    SetFlag(&FLAGS_compression_mode, round.mode);
+    ASSERT_EQ(Run({"config", "set", "serialization_max_chunk_size", round.chunk_size}), "OK");
+
+    for (unsigned i = 0; i < round.count;) {
+      vector<string> args{string(round.add_cmd), "key"};
+      for (unsigned j = 0; j < 1000; ++j, ++i) {
+        if (round.add_cmd == "zadd")
+          args.push_back("0");
+        args.push_back(absl::StrFormat("m%06u", i));
+        if (round.add_cmd == "hset")
+          args.push_back("v");
+      }
+      ASSERT_THAT(Run(absl::Span<string>{args}), IntArg(1000));
+    }
+
+    ASSERT_EQ(Run({"debug", "reload"}), "OK");
+    EXPECT_EQ(round.count, CheckedInt({round.len_cmd, "key"}));
+    ASSERT_EQ(Run({"flushall"}), "OK");
   }
 }
 
@@ -680,11 +772,11 @@ class TestCloudStorage : public detail::FileSnapshotStorage {
   explicit TestCloudStorage(Failure failure) : FileSnapshotStorage(nullptr), failure_(failure) {
   }
 
-  io::Result<pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(const string& path) override {
+  io::Result<io::WriteFile*, GenericError> OpenWriteFile(const string& path) override {
     if (failure_ == kOpenSummary && path.find("summary") != string::npos)
       return nonstd::make_unexpected(GenericError(make_error_code(errc::io_error)));
     ++opened;
-    return pair<io::Sink*, uint8_t>{new File(this), detail::FileType::CLOUD};
+    return new File(this);
   }
 
   bool IsCloud() const override {
@@ -851,7 +943,8 @@ TEST_F(RdbTest, JsonTest) {
       R"({"a":1})"sv,                          //
       R"([1,2,3,4,5,6])"sv,                    //
       R"({"a":1.0,"b":[1,2],"c":"value"})"sv,  //
-      R"({"a":{"a":{"a":{"a":1}}}})"sv         //
+      R"({"a":{"a":{"a":{"a":1}}}})"sv,        //
+      "5"sv                                    //
   };
 
   for (auto test : data) {
@@ -861,6 +954,9 @@ TEST_F(RdbTest, JsonTest) {
     Run({"restore", "doc", "0", facade::ToSV(dump.GetBuf())});
     auto res = Run({"json.get", "doc"});
     ASSERT_EQ(res, test);
+
+    // JSON.GET reads plain strings too, so check that the value is still JSON.
+    EXPECT_EQ(Run({"type", "doc"}), "ReJSON-RL");
   }
 }
 
@@ -1036,12 +1132,51 @@ TEST_F(RdbTest, SearchAliasesRoundTrip) {
   expect_aliases(expected_aliases);
 }
 
+TEST_F(RdbTest, SearchAliasAndAlterConsistency) {
+  absl::FlagSaver flags;
+  SetFlag(&FLAGS_num_shards, 1);
+  ResetService();
+
+  ASSERT_EQ(Run({"DEBUG", "POPULATE", "15000", "doc", "32", "TYPE", "HASH", "ELEMENTS", "1"}),
+            "OK");
+
+  // DEBUG POPULATE uses a field and value of 16 'x' characters for these hashes.
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", string(16, 'x'), "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "idx-alias", "idx"}), "OK");
+
+  const auto aliases = pp_->at(0)->Await(
+      [&] { return RdbSaver::GetGlobalData(service_.get(), true).search_aliases; });
+  ASSERT_EQ(aliases.size(), 1);
+
+  atomic done{false};
+  bool consistent = true;
+  size_t samples = 0;
+  auto collector = pp_->at(1)->LaunchFiber([&] {
+    while (!done.load(memory_order_relaxed)) {
+      auto data = RdbSaver::GetGlobalData(service_.get(), true);
+      if (data.search_indices.size() != 1 || data.search_aliases != aliases)
+        consistent = false;
+      ++samples;
+    }
+  });
+
+  // Repeatedly restart the build to give metadata collection chances to observe cancellation.
+  for (unsigned i = 0; i < 20; ++i)
+    EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", StrCat("field", i), "TEXT"}), "OK");
+  done.store(true, memory_order_relaxed);
+  collector.Join();
+
+  EXPECT_GT(samples, 0);
+  EXPECT_TRUE(consistent);
+}
+
 // Users choose names, prefixes, stop words, separators and synonym terms, spaces and tabs included.
 TEST_F(RdbTest, SearchDefinitionsWithSpacesSurviveReload) {
   ASSERT_EQ(Run({"FT.CREATE", "my idx", "ON",        "JSON", "PREFIX",    "2",
                  "my pfx:",   "j:",     "STOPWORDS", "1",    "a b",       "LANGUAGE_FIELD",
                  "my lang",   "SCHEMA", "$.t",       "AS",   "t",         "TEXT",
-                 "$.d.city",  "AS",     "my city",   "TAG",  "SEPARATOR", " "}),
+                 "$.d.city",  "AS",     "my city",   "TAG",  "SEPARATOR", " ",
+                 "$.d.zip",   "AS",     "zip",       "TAG"}),
             "OK");
   ASSERT_EQ(Run({"FT.CREATE", "h idx", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "first name",
                  "TEXT", "a\tb", "TAG"}),
@@ -1235,7 +1370,7 @@ TEST_F(RdbTest, FailedLoadDropsUnbuiltIndex) {
   EXPECT_THAT(Run({"ft._list"}).GetVec(), IsEmpty());
   EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), no_index);
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), no_index);
-  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), no_index);
   EXPECT_THAT(
       Run({"FT.HYBRID", "idx", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
       no_index);
@@ -1271,12 +1406,33 @@ TEST_F(RdbTest, UnbuiltIndexAnswersWithoutCrash) {
     service_->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
   });
 
-  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), ErrArg("not built"));
+  const auto not_built = ErrArg("not built");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), not_built);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*=>[KNN 2 @v $vec]", "PARAMS", "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@v:[VECTOR_RANGE 1 $vec]", "PARAMS", "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), not_built);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @v $vec]", "PARAMS", "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "@v:[VECTOR_RANGE 1 $vec]", "PARAMS", "2", "vec", vec}),
+              not_built);
   EXPECT_THAT(
       Run({"FT.HYBRID", "idx", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
-      ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
-  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}).GetVec(), IsEmpty());
+      not_built);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "idx.t", "LOAD_FROM", "idx", "AS", "j",
+                   "1", "j.g=idx.g"}),
+              not_built);
+  EXPECT_THAT(Run({"FT.PROFILE", "idx", "SEARCH", "QUERY", "*=>[KNN 2 @v $vec]", "PARAMS", "2",
+                   "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.PROFILE", "idx", "SEARCH", "QUERY", "@v:[VECTOR_RANGE 1 $vec]", "PARAMS",
+                   "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.PROFILE", "idx", "HYBRID", "QUERY", "SEARCH", "hello", "VSIM", "@v", "$vec",
+                   "PARAMS", "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), not_built);
   auto info = Run({"FT.INFO", "idx"}).GetVec();
   auto it = rng::find_if(info, [](const auto& e) { return e == "percent_indexed"; });
   ASSERT_NE(it, info.end());
@@ -2109,6 +2265,477 @@ void AddKV(std::string* out, std::string_view key, std::string_view val) {
   AppendString(out, val);
 }
 
+void AppendDbHeader(std::string* body) {
+  body->push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
+  AppendLen(body, 0);
+  body->push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+}
+
+void AppendBinaryDouble(std::string* out, double val) {
+  uint64_t bits;
+  memcpy(&bits, &val, sizeof(bits));
+
+  uint8_t buf[8];
+  absl::little_endian::Store64(buf, bits);
+  out->append(reinterpret_cast<const char*>(buf), sizeof(buf));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeDeclaredLength) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendLen(&body, 1ULL << 60);
+
+  const string rdb_file = absl::StrCat("rdb_sourcelimit_", getpid(), ".rdb");
+  io::WriteStringToFileOrDie(WrapInRdb(body), rdb_file);
+  auto cleanup = absl::MakeCleanup([&] { unlink(rdb_file.c_str()); });
+
+  auto scope = service_->EnterExclusiveLoading();
+  ASSERT_TRUE(scope);
+  auto err = static_cast<std::error_code>(
+      service_->server_family().Load(rdb_file, ServerFamily::LoadExistingKeys::kFail).Get());
+
+  EXPECT_EQ(err, RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsTruncatedFile) {
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
+  AppendLen(&body, 0);
+  string rdb = WrapInRdb(body);
+  rdb.resize(rdb.size() - 9);
+
+  EXPECT_EQ(LoadRdbBounded(rdb), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeLzfKey) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_STRING));
+  body.push_back(static_cast<char>((RDB_ENCVAL << 6) | RDB_ENC_LZF));
+  AppendLen(&body, 1);
+  AppendLen(&body, 1ULL << 60);
+  body.push_back('\x00');
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeLzfCompressedLength) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_STRING));
+  body.push_back(static_cast<char>((RDB_ENCVAL << 6) | RDB_ENC_LZF));
+  AppendLen(&body, 500);
+  AppendLen(&body, 1000);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+void AppendEmptyStreamValue(std::string* body) {
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+}
+
+TEST_F(RdbTest, LoadRejectsHugeStreamCgroupsCount) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_STREAM_LISTPACKS_3));
+  AppendString(&body, "k");
+  AppendEmptyStreamValue(&body);
+  AppendLen(&body, 1ULL << 60);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeStreamPelCount) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_STREAM_LISTPACKS_3));
+  AppendString(&body, "k");
+  AppendEmptyStreamValue(&body);
+  AppendLen(&body, 1);
+  AppendString(&body, "");
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 1ULL << 60);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+void AppendInt64(std::string* out, int64_t val) {
+  uint8_t buf[8];
+  absl::little_endian::Store64(buf, static_cast<uint64_t>(val));
+  out->append(reinterpret_cast<const char*>(buf), sizeof(buf));
+}
+
+TEST_F(RdbTest, LoadAcceptsLegacyStream) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_STREAM_LISTPACKS));
+  AppendString(&body, "k");
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 1);
+  AppendString(&body, "g");
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 2);
+  AppendString(&body, "a");
+  AppendInt64(&body, 0);
+  AppendLen(&body, 0);
+  AppendString(&body, "b");
+  AppendInt64(&body, 0);
+  AppendLen(&body, 0);
+
+  auto ec = LoadRdbBounded(WrapInRdb(body));
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"type", "k"}), "stream");
+  EXPECT_THAT(Run({"xinfo", "groups", "k"}), ArrLen(1));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeCmsCounters) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_CMS));
+  AppendString(&body, "k");
+  AppendLen(&body, 1ULL << 30);
+  AppendLen(&body, 1);
+  AppendLen(&body, 0);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeTopkHeap) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_TOPK));
+  AppendString(&body, "k");
+  AppendLen(&body, 0);
+  AppendLen(&body, UINT32_MAX);
+  AppendLen(&body, 1);
+  AppendLen(&body, 1);
+  AppendBinaryDouble(&body, 0.5);
+  AppendLen(&body, UINT32_MAX);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeCuckooFilterCount) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_CUCKOO));
+  AppendString(&body, "k");
+  AppendLen(&body, 4);
+  AppendLen(&body, 1);
+  AppendLen(&body, 1);
+  AppendLen(&body, 1);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 1ULL << 60);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeSbfFilterSize) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_SBF2));
+  AppendString(&body, "k");
+  AppendLen(&body, 0);
+  AppendBinaryDouble(&body, 1.0);
+  AppendBinaryDouble(&body, 0.5);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 1);
+  AppendLen(&body, 0);
+  AppendLen(&body, 1ULL << 60);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeZstdContentSize) {
+  string frame;
+  const uint8_t magic[] = {0x28, 0xB5, 0x2F, 0xFD};
+  frame.append(reinterpret_cast<const char*>(magic), sizeof(magic));
+  frame.push_back(static_cast<char>(0xE0));
+  uint8_t size_buf[8];
+  absl::little_endian::Store64(size_buf, 1ULL << 40);
+  frame.append(reinterpret_cast<const char*>(size_buf), sizeof(size_buf));
+
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadAcceptsBoundedZstdBlob) {
+  string value(50000, 'v');
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendString(&inner, value);
+
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  auto ec = LoadRdbBounded(WrapInRdb(body));
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"get", "k"}), value);
+}
+
+TEST_F(RdbTest, LoadAcceptsExactPowerOfTwoBlob) {
+  string value(65536, 'v');
+  auto build = [&](const string& val) {
+    string in;
+    in.push_back(static_cast<char>(RDB_TYPE_STRING));
+    AppendString(&in, "k");
+    AppendString(&in, val);
+    return in;
+  };
+  string inner = build(value);
+  value.resize(value.size() - (inner.size() - 65536));
+  inner = build(value);
+  ASSERT_EQ(inner.size(), 65536u);
+
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  auto ec = LoadRdbBounded(WrapInRdb(body));
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(CheckedInt({"strlen", "k"}), 65528);
+}
+
+TEST_F(RdbTest, LoadRejectsTruncatedBlobContent) {
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendLen(&inner, 1000);
+  inner.append(5, 'x');
+
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+  body.append(4096, 'F');
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+  EXPECT_THAT(Run({"get", "k"}), kMatchNil);
+}
+
+TEST_F(RdbTest, LoadRejectsBlobEndingMidInteger) {
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendLen(&inner, 1000);
+  inner.append(1000, 'x');
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  inner.append(3, '\x80');
+
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+  body.append(4096, 'F');
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeLz4ContentSize) {
+  string frame;
+  const uint8_t magic[] = {0x04, 0x22, 0x4D, 0x18};
+  frame.append(reinterpret_cast<const char*>(magic), sizeof(magic));
+  frame.push_back(static_cast<char>(0x68));
+  frame.push_back(static_cast<char>(0x40));
+  uint8_t size_buf[8];
+  absl::little_endian::Store64(size_buf, 1ULL << 40);
+  frame.append(reinterpret_cast<const char*>(size_buf), sizeof(size_buf));
+  uint8_t hc = (base::XXHash32(std::string_view{frame}.substr(4)) >> 8) & 0xFF;
+  frame.push_back(static_cast<char>(hc));
+
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsNestedCompressedBlob) {
+  string inner(1, static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsStrayCompressedBlobEnd) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_BLOB_END));
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsEofInsideCompressedBlob) {
+  string inner(1, static_cast<char>(RDB_OPCODE_EOF));
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+string MakeLz4Frame(string_view content) {
+  LZ4F_preferences_t prefs{};
+  prefs.frameInfo.contentSize = content.size();
+  string frame(LZ4F_compressFrameBound(content.size(), &prefs), '\0');
+  size_t frame_size =
+      LZ4F_compressFrame(frame.data(), frame.size(), content.data(), content.size(), &prefs);
+  CHECK_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+  return frame;
+}
+
+TEST_F(RdbTest, LoadAcceptsBoundedLz4Blob) {
+  string value(2000, 'v');
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendString(&inner, value);
+  string frame = MakeLz4Frame(inner);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
+  AppendString(&body, frame);
+
+  auto ec = LoadRdbBounded(WrapInRdb(body));
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"get", "k"}), value);
+}
+
+TEST_F(RdbTest, LoadAcceptsLz4ExactPowerOfTwoBlob) {
+  string value(131072, 'v');
+  auto build = [&](const string& val) {
+    string in;
+    in.push_back(static_cast<char>(RDB_TYPE_STRING));
+    AppendString(&in, "k");
+    AppendString(&in, val);
+    return in;
+  };
+  string inner = build(value);
+  value.resize(value.size() - (inner.size() - 131072));
+  inner = build(value);
+  ASSERT_EQ(inner.size(), 131072u);
+  string frame = MakeLz4Frame(inner);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
+  AppendString(&body, frame);
+
+  auto ec = LoadRdbBounded(WrapInRdb(body));
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(CheckedInt({"strlen", "k"}), value.size());
+}
+
+TEST_F(RdbTest, LoadRejectsLyingLz4ContentSize) {
+  string inner(2000, '\0');
+  string frame = MakeLz4Frame(inner);
+  ASSERT_EQ(frame[4] & 0x08, 0x08);
+
+  uint8_t size_buf[8];
+  absl::little_endian::Store64(size_buf, 1000);
+  frame.replace(6, 8, reinterpret_cast<const char*>(size_buf), 8);
+  frame[14] =
+      static_cast<char>((base::XXHash32(std::string_view{frame}.substr(4, 10)) >> 8) & 0xFF);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsTruncatedZstdFrame) {
+  string value(50000, 'v');
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendString(&inner, value);
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size - 4);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsTruncatedLz4Frame) {
+  string value(20000, 'v');
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendString(&inner, value);
+  string frame = MakeLz4Frame(inner);
+  frame.resize(frame.size() - 4);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
 std::string MakeTaggedChunk(uint32_t id, std::string_view payload) {
   std::string out;
   out.push_back(static_cast<char>(RDB_OPCODE_TAGGED_CHUNK));
@@ -2120,15 +2747,6 @@ std::string MakeTaggedChunk(uint32_t id, std::string_view payload) {
 
   out.append(payload);
   return out;
-}
-
-void AppendBinaryDouble(std::string* out, double val) {
-  uint64_t bits;
-  memcpy(&bits, &val, sizeof(bits));
-
-  uint8_t buf[8];
-  absl::little_endian::Store64(buf, bits);
-  out->append(reinterpret_cast<const char*>(buf), sizeof(buf));
 }
 
 // Drives interleaving SaveEntry calls from the serializer's consume callback to exercise
@@ -2184,12 +2802,15 @@ struct InterleaveHarness {
 }  // namespace
 
 TEST_F(RdbTest, UnsupportedTypeOrOpcode) {
-  // Redis hash metadata (22) and newer types overlap with Dragonfly's custom types.
+  // Redis pre-GA hash metadata (22) and newer types overlap with Dragonfly's custom types.
   // Reject them before attempting to read their payload, even after loading a supported key.
   for (string_view header : {"REDIS0012", "REDIS0015", "VALKEY081"}) {
     SCOPED_TRACE(header);
-    for (int type : {22, 24, 27, 30, 200, 220, 243}) {
+    for (int type : {22, 23, 24, 25, 27, 30, 200, 220, 243}) {
       if (header == "VALKEY081" && type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS)
+        continue;
+      if (header != "VALKEY081" &&
+          (type == RDB_TYPE_HASH_METADATA || type == RDB_TYPE_HASH_LISTPACK_EX))
         continue;
       SCOPED_TRACE(type);
       EXPECT_EQ(Run({"FLUSHALL"}), "OK");
@@ -2225,11 +2846,14 @@ TEST_F(RdbTest, DragonflyExtensions) {
     body.append(reinterpret_cast<const char*>(flags), sizeof(flags));
     body.push_back(RDB_TYPE_JSON);
     AddKV(&body, "json", R"({"value":42})");
+
+    // Dragonfly may reuse the IDs of Redis-only types for other encodings.
+    body.push_back(RDB_TYPE_HASH_METADATA);
     auto data = WrapInRdb(body);
     data.replace(0, 9, header);
 
     auto ec = LoadRdbBytes(to_byte(data.data()), data.size());
-    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_EQ(ec, RdbError(rdb::errc::invalid_rdb_type));
     EXPECT_EQ(Run({"JSON.GET", "json"}), R"({"value":42})");
     EXPECT_THAT(Run({"STICK", "json"}), IntArg(0));
   }
@@ -2787,15 +3411,23 @@ TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
   EXPECT_THAT(Run({"HTTL", "A", "FIELDS", "2", "field:0", "field:1"}), RespElementsAre(1000, -1));
 }
 
-std::string MakeJournalDel(std::string_view key) {
+std::string MakeJournalDel(std::string_view key, DbIndex db_index = 0) {
   io::StringSink sink;
   JournalWriter writer(&sink);
-  writer.Write(journal::Entry{1, journal::Op::COMMAND, 0, std::nullopt,
+  writer.Write(journal::Entry{1, journal::Op::COMMAND, db_index, std::nullopt,
                               journal::Entry::Payload("DEL", ArgSlice{key})});
 
   RdbSerializer serializer(CompressionMode::NONE);
   CHECK(!serializer.WriteJournalEntry(std::move(sink).str()));
   return serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+}
+
+TEST_F(RdbTest, JournalRejectsInvalidDatabase) {
+  ASSERT_EQ(Run({"SET", "invalid-db-key", "value"}), "OK");
+  const auto data = WrapInRdb(MakeJournalDel("invalid-db-key", absl::GetFlag(FLAGS_dbnum)));
+  EXPECT_EQ(LoadRdbBytes(to_byte(data.data()), data.size()),
+            RdbError(rdb::errc::rdb_file_corrupted));
+  EXPECT_EQ(Run({"GET", "invalid-db-key"}), "value");
 }
 
 TEST_F(RdbTest, JournalDelWaitsForShardLoads) {
@@ -3153,6 +3785,59 @@ TEST_F(RdbTest, SnapshotEgressThrottle) {
   EXPECT_GT(t_lim, t_base * 3);
 }
 
+// With an output buffer, writes to buckets the traversal has not reached yet queue their
+// inline-serialized chunks instead of waiting for the sink. Save in DF format with values above
+// serialization_max_chunk_size, so those buckets are handed over in several chunks, with the
+// buffer off, on, and off again (the flag is read when a snapshot starts). The file must load back
+// whole, with the values as of the save's start.
+TEST_F(RdbTest, SnapshotOutputBuffer) {
+  absl::FlagSaver fs;
+  constexpr unsigned kKeys = 5000;
+  ASSERT_EQ(Run({"config", "set", "serialization_max_chunk_size", "1024"}), "OK");
+  const string updated(4000, 'u');
+
+  for (string_view limit : {"0", "1mb", "0"}) {
+    Run({"debug", "populate", StrCat(kKeys), "key", "4000"});
+    ASSERT_EQ(Run({"config", "set", "snapshot_output_buffer_limit", limit}), "OK");
+    vector<string> original;
+    for (unsigned i = 0; i < kKeys; i += 7) {
+      original.push_back(Run({"get", StrCat("key:", i)}).GetString());
+    }
+
+    std::atomic_bool save_done = false;
+    auto save_fb = pp_->at(0)->LaunchFiber([&] {
+      EXPECT_EQ(Run({"save", "df"}), "OK");
+      save_done = true;
+    });
+
+    // A save that fails outright, e.g. when the file system does not support direct I/O, never
+    // reports itself as saving, so stop waiting once it is done instead of spinning forever.
+    const bool started =
+        WaitUntilCondition([&] { return service_->server_family().TEST_IsSaving() || save_done; },
+                           chrono::seconds(10));
+    if (!started || save_done) {
+      save_fb.Join();  // destroying a joinable fiber aborts the whole test binary
+      FAIL() << "the save did not run while the writes did";
+    }
+
+    pp_->at(1)->Await([&] {
+      for (unsigned i = 0; i < kKeys; i += 7) {
+        Run({"set", StrCat("key:", i), updated});
+      }
+    });
+    save_fb.Join();
+
+    auto save_info = service_->server_family().GetLastSaveInfo();
+    ASSERT_EQ(Run({"flushall"}), "OK");
+    ASSERT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
+    EXPECT_THAT(Run({"dbsize"}), IntArg(kKeys));
+    for (unsigned i = 0; i < kKeys; i += 7) {
+      ASSERT_EQ(Run({"get", StrCat("key:", i)}).GetString(), original[i / 7]) << i;
+    }
+    ASSERT_EQ(Run({"flushall"}), "OK");
+  }
+}
+
 TEST_F(RdbTest, EofWithRemoteShardChunksPending) {
   // This test creates a key whose RDB chunk is dispatched to a remote shard (not the shard
   // driving the load), and simulates the source stream ending (EOF) before all of that chunk's
@@ -3206,6 +3891,29 @@ TEST(RdbSerializerTest, BufferShrinksIfOverCap) {
   ASSERT_FALSE(serializer.WriteRaw(io::Buffer(tail)));
   ASSERT_EQ(serializer.GetBufferCapacity(), kMaxCap);
   EXPECT_EQ(serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry), tail);
+}
+
+// Deleting an expired key whose value the snapshot is streaming must not free it under the
+// serializer: the deletion waits for the bucket, then expires the key.
+TEST_F(RdbTest, DelExpiredHashDuringSave) {
+  Run({"debug", "populate", "1", "k", "64", "RAND", "TYPE", "hash", "ELEMENTS", "100000"});
+  Run({"pexpire", "k:0", "1000"});
+
+  auto save_fb = pp_->at(1)->LaunchFiber([&] { EXPECT_EQ(Run({"save"}), "OK"); });
+
+  // Wait until the snapshot is suspended in the middle of serializing the hash.
+  ShardId sid = Shard("k:0", shard_set->size());
+  while (!shard_set->Await(sid, [] {
+    return namespaces->GetDefaultNamespace()
+        .GetDbSlice(EngineShard::tlocal()->shard_id())
+        .IsAnyBucketBlocked();
+  })) {
+    usleep(10);
+  }
+
+  AdvanceTime(2000);
+  EXPECT_THAT(Run({"del", "k:0"}), IntArg(0));
+  save_fb.Join();
 }
 
 }  // namespace dfly

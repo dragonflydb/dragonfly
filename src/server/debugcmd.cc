@@ -50,6 +50,7 @@ using namespace std;
 ABSL_DECLARE_FLAG(string, dir);
 ABSL_DECLARE_FLAG(string, dbfilename);
 ABSL_DECLARE_FLAG(bool, df_snapshot_format);
+ABSL_DECLARE_FLAG(bool, aof);
 
 ABSL_FLAG(bool, background_debug_jobs, false, "Use background fibers for debug jobs");
 
@@ -572,6 +573,12 @@ template <typename F> void TraverseAllEntries(bool background, ConnectionContext
     fb.Join();
 }
 
+// Skips expired keys: their mutable lookup may wait for serialization inside the traversal.
+bool IsEmptyMap(PrimeIterator it, uint64_t now_ms) {
+  return it->second.Encoding() == kEncodingStrMap2 && it->second.Size() == 0 &&
+         !it->first.IsExpired(now_ms);
+}
+
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx)
@@ -788,6 +795,11 @@ void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   string last_save_file = sf_.GetLastSaveInfo().file_name;
 
+  // Before FlushAll: no other load may run, and no write lands between the flush and the load.
+  auto scope = sf_.service().EnterExclusiveLoading();
+  if (!scope)
+    return cmd_cntx->SendError(kLoadingErr);
+
   // Validate before FlushAll so an unloadable snapshot does not destroy the dataset.
   if (GenericError load_check = sf_.CheckSnapshotLoadable(last_save_file); load_check) {
     LOG(WARNING) << "Cannot reload snapshot '" << last_save_file << "': " << load_check.Format();
@@ -796,13 +808,12 @@ void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   sf_.FlushAll(cntx_->ns);
 
-  if (auto fut_ec = sf_.Load(last_save_file, ServerFamily::LoadExistingKeys::kFail); fut_ec) {
-    GenericError ec = fut_ec->Get();
-    if (ec) {
-      string msg = ec.Format();
-      LOG(WARNING) << "Could not load file " << msg;
-      return cmd_cntx->SendError(msg);
-    }
+  GenericError ec = sf_.Load(last_save_file, ServerFamily::LoadExistingKeys::kFail).Get();
+  scope.reset();
+  if (ec) {
+    string msg = ec.Format();
+    LOG(WARNING) << "Could not load file " << msg;
+    return cmd_cntx->SendError(msg);
   }
 
   rb->SendOk();
@@ -813,10 +824,10 @@ void DebugCmd::Replica(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (opt == "PAUSE" || opt == "RESUME") {
-    sf_.PauseReplication(opt == "PAUSE");
+    sf_.replica_manager().Pause(opt == "PAUSE");
     return rb->SendOk();
   } else if (opt == "OFFSET") {
-    const auto offset_info = sf_.GetReplicaOffsetInfo();
+    const auto offset_info = sf_.replica_manager().GetOffsetInfo();
     if (offset_info) {
       rb->StartArray(2);
       rb->SendBulkString(offset_info.value().sync_id);
@@ -899,6 +910,10 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgParser par
 }
 
 void DebugCmd::Populate(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Its writes bypass the LOADING check; before the AOF streamers run they would not be logged.
+  if (absl::GetFlag(FLAGS_aof) && ServerState::tlocal()->gstate() == GlobalState::LOADING)
+    return cmd_cntx->SendError(kLoadingErr);
+
   optional<PopulateOptions> options = ParsePopulateArgs(parser, cmd_cntx);
   if (!options.has_value()) {
     return;
@@ -1246,10 +1261,9 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
 
     // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
     // in the currently traversed DB (not the connection-selected one).
-    if ((obj_type == OBJ_SET || obj_type == OBJ_HASH) &&
-        it->second.Encoding() == kEncodingStrMap2 && it->second.Size() == 0) {
+    if (uint64_t now_ms = GetCurrentTimeMs(); IsEmptyMap(it, now_ms)) {
       auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
-      DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
+      DbContext db_cntx{cntx->ns, dbid, now_ms};
       string key;
       it->first.GetString(&key);
       DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
@@ -1319,7 +1333,7 @@ void DebugCmd::Stacktrace(CommandContext* cmd_cntx) {
 void DebugCmd::ReplDiag(CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (auto unread = sf_.GetReplicaMasterSocketUnreadBytes(); unread) {
+  if (auto unread = sf_.replica_manager().GetMasterSocketUnreadBytes(); unread) {
     LOG(WARNING) << "DEBUG REPLDIAG: master_socket_unread_bytes=" << *unread;
   } else {
     LOG(WARNING) << "DEBUG REPLDIAG: not a redis-stream replica (no master socket)";
@@ -1650,13 +1664,12 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
 
     // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
     // in the currently traversed DB (not the connection-selected one).
-    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
+    if (uint64_t now_ms = GetCurrentTimeMs(); IsEmptyMap(it, now_ms)) {
       auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
-      DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
+      DbContext db_cntx{cntx->ns, dbid, now_ms};
       string key;
       it->first.GetString(&key);
-      if (obj_type == OBJ_SET || obj_type == OBJ_HASH)
-        DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
+      DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
     }
   };
 

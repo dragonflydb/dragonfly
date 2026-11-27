@@ -225,8 +225,10 @@ async def _create_search_option_indexes(client: aioredis.Redis):
 async def _assert_search_option_indexes(client: aioredis.Redis):
     nooff_info = _search_info_dict(await client.execute_command("FT.INFO", "idx_nooff"))
     assert nooff_info["index_options"] == ["NOOFFSETS"]
-    with pytest.raises(redis.exceptions.ResponseError, match="phrase queries require offsets"):
-        await client.execute_command("FT.SEARCH", "idx_nooff", '"machine learning"')
+
+    # Without positions a phrase matches its words in any order
+    nooff = await client.execute_command("FT.SEARCH", "idx_nooff", '"learning machine"')
+    assert _search_doc_ids(nooff) == {"nooff:1"}
 
     nostem_info = await client.execute_command("FT.INFO", "idx_nostem")
     assert "NOSTEM" in _search_attribute(nostem_info, "t")
@@ -304,7 +306,7 @@ async def test_management(async_client: aioredis.Redis):
             "type",
             "NUMERIC",
             "blocksize",
-            "10000",
+            10000,
             "SORTABLE",
             "UNF",
         ],
@@ -329,7 +331,7 @@ async def test_management(async_client: aioredis.Redis):
             "type",
             "NUMERIC",
             "blocksize",
-            "10000",
+            10000,
             "SORTABLE",
             "UNF",
             "NOINDEX",
@@ -347,17 +349,17 @@ async def test_management(async_client: aioredis.Redis):
             "data_type",
             "FLOAT32",
             "dim",
-            "1",
+            1,
             "distance_metric",
             "L2",
             "initial_cap",
-            "100",
+            100,
             "M",
-            "16",
+            16,
             "ef_construction",
-            "200",
+            200,
             "ef_runtime",
-            "10",
+            10,
             "epsilon",
             "0.01",
         ],

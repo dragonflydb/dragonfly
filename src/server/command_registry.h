@@ -183,6 +183,13 @@ class CommandId : public facade::CommandId {
     return std::move(*this);
   }
 
+  // Exactly these ACL categories, without the ones the option mask implies.
+  CommandId&& SetAclCategories(uint32_t mask) && {
+    acl_categories_ = mask;
+    kind_mask_ &= ~IMPLICIT_ACL;
+    return std::move(*this);
+  }
+
   bool is_multi_key() const {
     return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
   }

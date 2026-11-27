@@ -1000,6 +1000,14 @@ void Connection::MarkForClose() {
   request_shutdown_ = true;
 }
 
+void Connection::MaybeCloseAfterReply() {
+  if (!close_after_reply_ || reply_builder_->GetError())
+    return;
+
+  reply_builder_->Flush();
+  MarkForClose();
+}
+
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
 void Connection::OnShutdown() {
   VLOG(1) << CONN_ID << "Connection::OnShutdown";
@@ -1066,7 +1074,7 @@ void Connection::OnPostMigrateThread() {
 }
 
 void Connection::OnConnectionStart() {
-  SetName(absl::StrCat(id_));
+  SetName({});
 
   // is null in unit-tests.
   if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
@@ -1353,7 +1361,7 @@ ClientInfo Connection::BuildClientInfo(unsigned thread_id) const {
     else if (ctx_info.is_scheduled)
       phase_name = "scheduled";
     ci.db = ctx_info.db_index;
-    // ctx_info.Format() returns "db=N" or "db=N flags=X"; extract flags only.
+    // ctx_info.Format() returns "db=N flags=X"; extract flags only.
     size_t flags_pos = ctx_info.Format().find(" flags=");
     if (flags_pos != string::npos)
       ci.flags = ctx_info.Format().substr(flags_pos + sizeof(" flags=") - 1);
@@ -1399,7 +1407,8 @@ bool Connection::IsMainOrMemcache() const {
 }
 
 void Connection::SetName(string name) {
-  util::ThisFiber::SetName(absl::StrCat("DflyConn_", name));
+  // An unnamed connection keeps its id in the fiber name.
+  util::ThisFiber::SetName(absl::StrCat("DflyConn_", name.empty() ? absl::StrCat(id_) : name));
   name_ = std::move(name);
 }
 
@@ -1577,8 +1586,8 @@ void Connection::ConnectionFlow() {
   }
 
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
-  // offending request.
-  if (parse_status == ERROR) {
+  // offending request. A connection closed after its reply has no protocol error to send.
+  if (parse_status == ERROR && !close_after_reply_) {
     VLOG(1) << CONN_ID << "Error parser status " << parser_error_;
 
     // V2 sends protocol errors inside IoLoopV2().
@@ -1662,6 +1671,8 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     // prefer synchronous dispatching to save memory.
     optimize_for_async = false;
     last_interaction_ = time(nullptr);
+    if (cc_->conn_closing)
+      return;
   }
 
   // Avoid sync dispatch if we can interleave with an ongoing async dispatch.
@@ -1678,6 +1689,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
       cc_->sync_dispatch = true;
       invoke_cb();
       cc_->sync_dispatch = false;
+      MaybeCloseAfterReply();
     }
     last_interaction_ = time(nullptr);
 
@@ -2290,6 +2302,7 @@ void Connection::ProcessPipelineCommandV1() {
   cc_->async_dispatch = false;
 
   ReleasePipelinedCommand(cmd);
+  MaybeCloseAfterReply();
 
   // If we drained the pipeline and no admin messages are waiting, flush.
   if (!HasPendingMessages()) {
@@ -3343,8 +3356,9 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
     //   mid-flight waits for this command. A lone V2 command sets no other flag, so without it the
     //   write can slip past CLIENT PAUSE.
     // - async_dispatch (flush-before-block): makes MainService::DispatchCommand flush the buffered
-    //   pipeline replies before a blocking command (e.g. BLPOP) parks the fiber. Gating it avoids a
-    //   bogus flush / blocking-in-pipeline stat bump for a lone blocking command.
+    //   pipeline replies before a blocking command (e.g. BLPOP) parks the fiber. Buffered replies
+    //   can outlive their commands, so a lone tail still needs this flag until the prefix flushes.
+    //   A standalone blocking command with no buffered replies keeps the flag clear.
     // V1 sets these flags elsewhere (DispatchSingle / the AsyncFiber paths), hence the ioloop_v2_
     // guard.
     //
@@ -3358,7 +3372,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
       DCHECK(!cc_->sync_dispatch);
       DCHECK(!cc_->async_dispatch);
       cc_->sync_dispatch = true;
-      cc_->async_dispatch = is_true_pipeline;
+      cc_->async_dispatch = is_true_pipeline || reply_builder_->HasBufferedOutput();
       fiber_park_spot_ = FiberParkSpot::kSimpleHop;
     }
     // parse-in-proactor can append commands while we are parked in DispatchCommandSimple. We might
@@ -3409,6 +3423,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
     } else {
       DCHECK(is_head);  // only head can execute sync
       retire_head();
+      MaybeCloseAfterReply();
     }
   }
 
@@ -4162,7 +4177,7 @@ bool Connection::HasControlEvent() const {
   // a reply became ready, control-plane messages are queued (dispatch_q_), the socket errored or
   // closed (io_ec_), or a thread migration is pending and actionable.
 
-  return (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
+  return (HasInFlightCommands() && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
          IsReadyToMigrate();
 }
 
@@ -4226,9 +4241,12 @@ void Connection::DrainQueuedCommands() {
 }
 
 void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_waiter) {
-  // Draining (by the caller) may have freed enough memory; only park if still over the limit, to
-  // prevent a busy-spin.
-  if (!IsOverPipelineLimit())
+  // Draining may expose a command ready to execute even while the queue remains over the limit.
+  // Let already-parsed work free memory, but keep new input subject to parse throttling.
+  auto should_wake = [this] {
+    return !IsOverPipelineLimit() || HasCommandToExecute() || HasControlEvent();
+  };
+  if (should_wake())
     return;
 
   auto& conn_stats = GetLocalConnStats();
@@ -4253,13 +4271,7 @@ void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_wait
   if (auto ec = FlushReplies(); ec)
     return;
 
-  io_event_.await([this]() {
-    // Leave the backpressure wait once our own pipeline pressure clears, or on any control event
-    // (the latter lets a terminating/migrating connection escape the park).
-    bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
-        GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
-    return under_limit || HasControlEvent();
-  });
+  io_event_.await(should_wake);
 }
 
 auto Connection::FinalizeV2ParserError() -> IoLoopResult {
@@ -4312,6 +4324,14 @@ auto Connection::IoLoopV2() -> IoLoopResult {
   util::fb2::detail::Waiter cmd_completion_waiter{ioevent_cb};
   absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
 
+  // ReplyBatch can advance the head and clear its subscription during this iteration. Subscribe
+  // before either park, and only for a pending reply: a ready captured payload has no blocker.
+  auto subscribe_to_head_completion = [this, &cmd_completion_waiter] {
+    if (HasInFlightCommands() && !current_wait_ && !parsed_head_->CanReply()) {
+      current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
+    }
+  };
+
   // Waiter used for transient, conditional subscriptions (via check_or_subscribe)
   // to global pipeline-backpressure relief notifications.
   util::fb2::detail::Waiter backpressure_waiter{ioevent_cb};
@@ -4320,11 +4340,6 @@ auto Connection::IoLoopV2() -> IoLoopResult {
 
   do {
     HandleMigrateRequest();
-
-    // Register completion for current head if its pending and we don't wait on current_wait_.
-    if (HasInFlightCommands() && !current_wait_.has_value()) {
-      current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
-    }
 
     if (!parser_error_draining_) {
       if (shared_read_buf_enabled_) {
@@ -4354,6 +4369,7 @@ auto Connection::IoLoopV2() -> IoLoopResult {
       const bool wait_for_reply = HasInFlightCommands();
       const uint64_t idle_wait_start = CycleClock::Now();
 
+      subscribe_to_head_completion();
       fiber_park_spot_ = FiberParkSpot::kIdleAwait;
       const bool parked = io_event_.await([this] { return ShouldWakeIdle(); });
       fiber_park_spot_ = FiberParkSpot::kNone;
@@ -4395,8 +4411,10 @@ auto Connection::IoLoopV2() -> IoLoopResult {
     if (parser_error_draining_ || shared_read_buf_enabled_ || (io_buf_.InputLen() == 0) ||
         over_limit) {
       DrainQueuedCommands();
-      if (over_limit)
+      if (over_limit) {
+        subscribe_to_head_completion();
         ParkOnBackpressure(&backpressure_waiter);
+      }
 
       // ReadAndParseShared already supplied this iteration's status. Private buffer mode did not
       // parse here, so report that it requires more input for capacity bookkeeping below.

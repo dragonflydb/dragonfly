@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#include <algorithm>
+#include <functional>
 #include <source_location>
 #include <system_error>
 
@@ -188,6 +190,16 @@ class RdbLoaderBase {
     // If the sbf_filter field is set, then this number also includes the partially read filter.
     size_t remaining = 0;
 
+    // Base timestamp for Redis hash field expiry offsets, retained across partial reads.
+    uint64_t hash_min_expiry_ms = 0;
+
+    // Keep the packed Redis hash while decoding its field/value/expiry triples in bounded batches.
+    struct HashListpackState {
+      base::PODArray<char> data;
+      size_t offset = 0;
+    };
+    std::optional<HashListpackState> hash_listpack;
+
     // partial state for single filter in an SBF
     // when chunk size runs out mid-filter, saves the partially filled buffer and resumes on the
     // next chunk.
@@ -250,6 +262,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadIntSet();
   Result<OpaqueObj> ReadGeneric(int rdbtype);
   ::io::Result<OpaqueObj> ReadHMap(int rdbtype);
+  Result<OpaqueObj> ReadHashListpackEx();
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
@@ -275,13 +288,27 @@ class RdbLoaderBase {
 
   Error EnsureReadInternal(size_t min_to_read);
 
-  // Upper bound on bytes a bounded source can still supply; SIZE_MAX when unbounded (file load).
+  bool ExceedsRemainingInput(uint64_t n, std::string_view what, size_t min_entry_bytes = 1);
+
+  // Upper bound on bytes a bounded source can still supply; SIZE_MAX when no limit is set.
   // Used to reject a declared length/count before allocating for it (a crafted RESTORE OOM).
   size_t RemainingBytes() const {
     if (source_limit_ == SIZE_MAX)
       return SIZE_MAX;
     size_t from_source = bytes_read_ < source_limit_ ? source_limit_ - bytes_read_ : 0;
     return (mem_buf_ ? mem_buf_->InputLen() : 0) + from_source;
+  }
+
+  // Outside a tagged chunk a collection is read to its end from the remaining input, which bounds
+  // its element count. A tagged chunk holds only a part of it and the following chunks can
+  // compress below a byte per element, so there only the up-front reservation is capped.
+  bool ExceedsCollectionInput(uint64_t count, size_t min_element_bytes = 1) const {
+    const size_t limit = current_chunk_state_ ? SIZE_MAX : RemainingBytes();
+    return count > limit / min_element_bytes;
+  }
+
+  size_t ReserveHint(uint64_t count) const {
+    return std::min<uint64_t>(count, RemainingBytes());
   }
 
   // Wrapper to consume n bytes from mem buf, and also decrement remaining_payload_bytes if a chunk
@@ -296,6 +323,12 @@ class RdbLoaderBase {
     return current_chunk_state_ && current_chunk_state_->remaining_payload_bytes == 0;
   }
 
+  // Whether the current object can load another part now. A packed Redis hash still decodes
+  // buffered entries after its tagged chunk payload is consumed.
+  bool CanReadObjectPart() const {
+    return !ChunkBudgetExhausted() || pending_read_.hash_listpack;
+  }
+
   // Called to validate that the current chunk is fully consumed, after validation resets current
   // chunk state.
   std::error_code FinishCurrentChunk();
@@ -308,6 +341,7 @@ class RdbLoaderBase {
 
   size_t bytes_read_ = 0;
   size_t source_limit_ = SIZE_MAX;
+  std::function<size_t()> size_provider_;
   base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<detail::DecompressImpl> decompress_impl_;
   std::optional<uint64_t> journal_offset_ = std::nullopt;
@@ -355,6 +389,10 @@ class RdbLoader : protected RdbLoaderBase {
 
   void set_source_limit(size_t n) {
     source_limit_ = n;
+  }
+
+  void set_source_size_provider(std::function<size_t()> provider) {
+    size_provider_ = std::move(provider);
   }
 
   ::io::Bytes Leftover() const {
@@ -506,7 +544,6 @@ class RdbLoader : protected RdbLoaderBase {
   const bool deserialize_hnsw_index_;
   uint32_t shard_id_ = UINT32_MAX;
   uint32_t shard_count_ = 0;
-  size_t table_used_memory_ = 0;
   ScriptMgr* script_mgr_;
   std::vector<ItemsBuf> shard_buf_;
 

@@ -6,12 +6,12 @@
 
 #include <absl/functional/function_ref.h>
 
+#include <climits>
 #include <nonstd/expected.hpp>
 #include <string>
 #include <variant>
 #include <vector>
 
-#include "core/flatbuffers.h"
 #include "core/json/json_object.h"
 
 namespace dfly::json {
@@ -37,11 +37,6 @@ class AggFunction {
       valid_ = ApplyImpl(src);
   }
 
-  void Apply(FlatJson src) {
-    if (valid_ != 0)
-      valid_ = ApplyImpl(src);
-  }
-
   // returns null if Apply was not called or ApplyImpl failed.
   Result GetResult() const {
     return valid_ == 1 ? GetResultImpl() : Result{};
@@ -49,7 +44,6 @@ class AggFunction {
 
  protected:
   virtual bool ApplyImpl(const JsonType& src) = 0;
-  virtual bool ApplyImpl(FlatJson src) = 0;
   virtual Result GetResultImpl() const = 0;
 
   int valid_ = -1;
@@ -108,7 +102,6 @@ class PathSegment {
   }
 
   void Evaluate(const JsonType& json) const;
-  void Evaluate(FlatJson json) const;
   AggFunction::Result GetResult() const;
 
  private:
@@ -123,34 +116,20 @@ using Path = std::vector<PathSegment>;
 // Passes the key name for object fields or nullopt for array elements.
 // The second argument is a json value of either object fields or array elements.
 using PathCallback = absl::FunctionRef<void(std::optional<std::string_view>, const JsonType&)>;
-using PathFlatCallback = absl::FunctionRef<void(std::optional<std::string_view>, FlatJson)>;
 
 // Returns true if the entry should be deleted, false otherwise.
 using MutateCallback = absl::FunctionRef<void(std::optional<std::string_view>, JsonType*)>;
 
 void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback);
 
-// Same as above but for flatbuffers.
-void EvaluatePath(const Path& path, FlatJson json, PathFlatCallback callback);
-
 // returns number of matches found with the given path.
 unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json);
-unsigned MutatePath(const Path& path, MutateCallback callback, FlatJson json,
-                    flexbuffers::Builder* fbb);
 
 // Simplified deletion operation without callback - more efficient for JSON.DEL operations
 unsigned DeletePath(const Path& path, JsonType* json);
-unsigned DeletePath(const Path& path, FlatJson json, flexbuffers::Builder* fbb);
 
 // utility function to parse a jsonpath. Returns an error message if a parse error was
 // encountered.
 nonstd::expected<Path, std::string> ParsePath(std::string_view path);
-
-// Transforms FlatJson to JsonType.
-JsonType FromFlat(FlatJson src);
-
-// Transforms JsonType to a buffer using flexbuffers::Builder.
-// Does not call flexbuffers::Builder::Finish.
-void FromJsonType(const JsonType& src, flexbuffers::Builder* fbb);
 
 }  // namespace dfly::json

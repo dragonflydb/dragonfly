@@ -244,7 +244,8 @@ jobs:
 
           GTEST_OUTPUT="xml:${GTEST_IOURING_DIR}/" \
           GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
-          FLAGS_fiber_safety_margin=4096 timeout 20m ctest -V -L DFLY -E allocation_tracker_test \
+          FLAGS_fiber_safety_margin=4096 timeout --kill-after=30s 30m \
+            ctest -V -L DFLY -E allocation_tracker_test --timeout 600 \
             --output-junit "${CTEST_JUNIT_DIR}/iouring.xml"
 
           # Run allocation tracker test separately without alsologtostderr because it generates a TON of logs.
@@ -255,7 +256,8 @@ jobs:
           run_manual_gtest ./json_family_test --jsonpathv2=false
           run_manual_gtest ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
           run_manual_gtest ./search_test --use_numeric_range_tree=false
-          run_manual_gtest ./search_family_test --use_numeric_range_tree=false
+          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" \
+            timeout 10m ./search_family_test --use_numeric_range_tree=false
 
       - name: C++ Unit Tests - Epoll
         run: |
@@ -278,7 +280,7 @@ jobs:
             gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
           GTEST_OUTPUT="xml:${GTEST_EPOLL_DIR}/" \
           GLOG_alsologtostderr=1 FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
-          timeout 20m ctest -V -L DFLY -E allocation_tracker_test \
+          timeout --kill-after=30s 30m ctest -V -L DFLY -E allocation_tracker_test --timeout 600 \
             --output-junit "${CTEST_JUNIT_DIR}/epoll.xml"
 
           GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" FLAGS_fiber_safety_margin=4096 \
@@ -292,7 +294,7 @@ jobs:
           GTEST_CLUSTER_DIR="${JUNIT_DIR}/gtest/cluster"
           mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_CLUSTER_DIR}"
           GTEST_OUTPUT="xml:${GTEST_CLUSTER_DIR}/" FLAGS_fiber_safety_margin=4096 \
-            FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY \
+            FLAGS_cluster_mode=emulated timeout --kill-after=30s 30m ctest -V -L DFLY --timeout 600 \
             --output-junit "${CTEST_JUNIT_DIR}/cluster.xml"
 
       - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
@@ -303,7 +305,8 @@ jobs:
           GTEST_CLUSTER_DIR="${JUNIT_DIR}/gtest/cluster-hashtags"
           mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_CLUSTER_DIR}"
           GTEST_OUTPUT="xml:${GTEST_CLUSTER_DIR}/" FLAGS_fiber_safety_margin=4096 \
-            FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY \
+            FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true \
+            timeout --kill-after=30s 30m ctest -V -L DFLY --timeout 600 \
             --output-junit "${CTEST_JUNIT_DIR}/cluster-hashtags.xml"
 
       - name: Upload unit logs on failure

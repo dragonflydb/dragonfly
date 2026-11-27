@@ -31,6 +31,8 @@ class RESPObj {
     ERROR = REDIS_REPLY_ERROR,
     MAP = REDIS_REPLY_MAP,
     SET = REDIS_REPLY_SET,
+    BOOL = REDIS_REPLY_BOOL,
+    VERB = REDIS_REPLY_VERB,
   };
   RESPObj() = default;
   RESPObj(redisReply* reply, bool needs_to_free) : reply_(reply), needs_to_free_(needs_to_free) {
@@ -71,7 +73,7 @@ class RESPArray {
   }
 
   bool Empty() const {
-    return Size() == 0;
+    return Size() == 0 || Size() == SIZE_MAX;
   }
 
   RESPObj operator[](size_t index) const {
@@ -205,10 +207,14 @@ template <class T> std::optional<T> RESPObj::As() const {
   }
   if constexpr (std::is_constructible_v<T, std::string_view>) {
     if (reply_->type == REDIS_REPLY_STRING || reply_->type == REDIS_REPLY_ERROR ||
-        reply_->type == REDIS_REPLY_STATUS) {
+        reply_->type == REDIS_REPLY_STATUS || reply_->type == REDIS_REPLY_VERB) {
       return T{std::string_view{reply_->str, reply_->len}};
     } else if (reply_->type == REDIS_REPLY_NIL) {
       return T{std::string_view("NIL")};
+    }
+  } else if constexpr (std::is_same_v<T, bool>) {
+    if (reply_->type == REDIS_REPLY_BOOL) {
+      return reply_->integer != 0;
     }
   } else if constexpr (std::is_integral_v<T>) {
     if (reply_->type == REDIS_REPLY_INTEGER) {

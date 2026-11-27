@@ -33,6 +33,9 @@ namespace dfly {
 
 using StringVec = std::vector<std::string>;
 
+// What a registered index answers until its data structures are rebuilt after a load.
+inline constexpr std::string_view kIndexNotBuilt = "index is not built";
+
 namespace search {
 struct IndexBuilder;
 }  // namespace search
@@ -149,21 +152,6 @@ std::vector<DocField> ResolveFields(const search::Schema& schema,
 std::optional<std::vector<DocField>> ResolveFields(
     const search::Schema& schema, const std::optional<std::vector<FieldReference>>& fields);
 
-// Types of document fields by identifier for whole-document replies, decided as by
-// Schema::FindByIdentifier. Views the schema it was built from, which has to outlive it.
-class DocFieldTypes {
- public:
-  explicit DocFieldTypes(const search::Schema& schema);
-
-  search::SchemaField::FieldType Of(std::string_view identifier) const;  // TEXT when unknown
-
-  size_t GetNonPmrMemoryUsage() const;
-
- private:
-  // The attribute standing for each document field.
-  absl::flat_hash_map<std::string_view, const search::SchemaField*> fields_;
-};
-
 enum class SortOrder { ASC, DESC };
 
 // SORTBY order shared by the shards and the coordinator: docs with a value first, then by value and
@@ -187,6 +175,7 @@ struct SearchParams {
   size_t limit_total = 10;
 
   bool with_sortkeys = false;
+  bool with_payloads = false;
 
   /*
   1. If not set -> return all fields
@@ -443,6 +432,9 @@ class ShardDocIndex {
   // Possibly blocking to stop indexing job
   ~ShardDocIndex();
 
+  // Waits for the builder to stop and may yield.
+  void CancelBuilder();
+
   // Perform search on all indexed documents and return results.
   // When global_stats is non-null, scorers see cluster-wide counts.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
@@ -460,9 +452,9 @@ class ShardDocIndex {
   search::ShardScoringStats CollectScoringStats(search::SearchAlgorithm* search_algo) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
-  std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,
-                                                 const AggregateParams& params,
-                                                 search::SearchAlgorithm* search_algo) const;
+  using AggregateShardResult = io::Result<std::vector<SearchDocData>, facade::ErrorReply>;
+  AggregateShardResult SearchForAggregator(const OpArgs& op_args, const AggregateParams& params,
+                                           search::SearchAlgorithm* search_algo) const;
 
   // Load and serialize docs for aggregation from pre-computed (DocId, distance) pairs.
   // Used by the HNSW VECTOR_RANGE path in FT.AGGREGATE, where doc ids and distances come
@@ -473,7 +465,7 @@ class ShardDocIndex {
       const absl::flat_hash_map<search::DocId, float>& text_score_map) const;
 
   // Methods needed for join operation
-  join::Vector<join::OwnedEntry> PreagregateDataForJoin(
+  io::Result<join::Vector<join::OwnedEntry>, facade::ErrorReply> PreagregateDataForJoin(
       const OpArgs& op_args, absl::Span<const std::string_view> join_fields,
       search::SearchAlgorithm* search_algo) const;
 
@@ -499,6 +491,11 @@ class ShardDocIndex {
   // (which contains the entire schema by value).
   const DocIndex& base() const {
     return *base_;
+  }
+
+  // False between a definition replayed by a load and the rebuild that follows it.
+  bool IsBuilt() const {
+    return indices_.has_value();
   }
 
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
@@ -566,7 +563,7 @@ class ShardDocIndex {
   using SerializedEntryWithKey = std::optional<SerializedDoc>;
   SerializedEntryWithKey SerializeDocWithKey(search::DocId id, const OpArgs& op_args,
                                              const std::optional<std::vector<DocField>>& fields,
-                                             const DocField* sort_field = nullptr);
+                                             const FieldReference* sort_field = nullptr);
 
   search::DefragmentResult Defragment(PageUsage* page_usage) {
     if (indices_) {
@@ -623,9 +620,6 @@ class ShardDocIndex {
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);
 
-  // Cancel builder if in progress
-  void CancelBuilder();
-
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
 
@@ -672,7 +666,6 @@ class ShardDocIndex {
 
  private:
   std::shared_ptr<const DocIndex> base_;
-  DocFieldTypes field_types_;  // derived from base_->schema
 
   // Declared before index resources so its destructor releases the resident gate last.
   HashIndexLifetime hash_index_lifetime_;

@@ -29,6 +29,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
+#include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
@@ -50,7 +51,8 @@ using absl::SimpleAtoi;
 
 namespace {
 
-using IncrByParam = std::variant<double, int64_t>;
+// A float increment comes back as its stored text.
+using IncrByParam = std::variant<long double, int64_t, std::string>;
 using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 
@@ -352,12 +354,12 @@ size_t EstimateListpackMinBytes(const ParsedArgs& members) {
 }
 
 OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
-  if (holds_alternative<double>(*param)) {
-    double incr = get<double>(*param);
-    double value = 0;
+  if (holds_alternative<long double>(*param)) {
+    long double incr = get<long double>(*param);
+    long double value = 0;
 
     if (prev_val) {
-      if (!ParseDouble(*prev_val, &value)) {
+      if (!ParseLongDouble(*prev_val, &value)) {
         return OpStatus::INVALID_VALUE;
       }
     }
@@ -366,7 +368,7 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
       return OpStatus::NAN_OR_INF_DURING_INCR;
     }
 
-    param->emplace<double>(value);
+    param->emplace<long double>(value);
 
     return OpStatus::OK;
   }
@@ -389,6 +391,30 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
   param->emplace<int64_t>(new_val);
 
   return OpStatus::OK;
+}
+
+// One record keeps the value and its field TTL together, so replicas get both or neither.
+void JournalFieldValue(const OpArgs& op_args, string_view key, string_view field, string_view value,
+                       const PrimeValue& pv) {
+  if (pv.Encoding() == kEncodingStrMap2 && pv.HasMemberExpiration()) {
+    auto* sm = GetStringMap(pv, op_args.db_cntx);
+    if (auto it = sm->Find(field); it != sm->end() && it.HasExpiry()) {
+      // Replicas before VER7 can't parse the PXAT form; the legacy one takes a TTL in seconds.
+      if (DflyCmd::GetMinReplicaVersion() < DflyVersion::VER7) {
+        const string ttl = absl::StrCat(it.ExpiryTime() - sm->time_now());
+        const string_view args[] = {key, ttl, field, value};
+        RecordJournal(op_args, "HSETEX", args);
+        return;
+      }
+
+      const string deadline = absl::StrCat((uint64_t{it.ExpiryTime()} + kMemberExpiryBase) * 1000);
+      const string_view args[] = {key, "PXAT", deadline, "FIELDS", "1", field, value};
+      RecordJournal(op_args, "HSETEX", args);
+      return;
+    }
+  }
+  const string_view args[] = {key, field, value};
+  RecordJournal(op_args, "HSET", args);
 }
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
@@ -426,14 +452,17 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
       res = it->second;
   }
 
-  if (OpStatus status = IncrementValue(res, param); status != OpStatus::OK)
+  if (OpStatus status = IncrementValue(res, param); status != OpStatus::OK) {
+    if (!add_res.is_new)
+      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
     return status;
+  }
 
-  if (holds_alternative<double>(*param)) {
-    double new_val = get<double>(*param);
-    char buf[128];
-    char* str = RedisReplyBuilder::FormatDouble(new_val, buf, sizeof(buf));
-    hw.AddOrUpdate(field, str);
+  const bool is_float = holds_alternative<long double>(*param);
+  string float_val;
+  if (is_float) {
+    float_val = FormatLongDouble(get<long double>(*param));
+    hw.AddOrUpdate(field, float_val);
   } else {  // integer increment
     int64_t new_val = get<int64_t>(*param);
     absl::AlphaNum an(new_val);
@@ -443,6 +472,13 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   hw.Launder(pv);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
+  // A float result is journaled as the value: replicas may compute with another long double.
+  if (is_float && op_args.shard->journal()) {
+    add_res.post_updater.Run();
+    JournalFieldValue(op_args, key, field, float_val, pv);
+  }
+  if (is_float)
+    *param = std::move(float_val);
   return OpStatus::OK;
 }
 
@@ -900,6 +936,27 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   return expiry.Apply(flags);
 }
 
+// Fields set with a deadline that has already passed expire at once, so they are deleted.
+OpResult<CbVariant<uint32_t>> OpSetExpired(const OpArgs& op_args, string_view key,
+                                           const ParsedArgs& values,
+                                           const DbSlice::ExpireParams& exp_params) {
+  auto op_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_HASH);
+  if (op_res.status() == OpStatus::KEY_NOTFOUND)
+    return CbVariant<uint32_t>{1u};
+  RETURN_ON_BAD_STATUS(op_res);
+
+  PrimeValue& pv = op_res->it->second;
+  if (pv.IsExternal() && !pv.IsCool())
+    return OpStatus::CANCELLED;  // can't mutate offloaded hashes synchronously
+
+  absl::InlinedVector<string_view, 4> names;
+  for (size_t i = 0; i < values.size(); i += 2)
+    names.push_back(values[i]);
+  const ParsedArgs fields{ArgSlice{names}};
+  FieldExpiry{op_args, key, fields, exp_params, *op_res}.Apply(ExpireFlags::EXPIRE_ALWAYS);
+  return CbVariant<uint32_t>{1u};
+}
+
 // Evaluates the FNX/FXX collective condition of HSETEX.
 //   fnx=true  (FNX): holds only if NONE of the fields exist.
 //   fnx=false (FXX): holds only if ALL of the fields exist.
@@ -948,6 +1005,7 @@ struct HSetExParams {
   OpSetParams op_sp;
   ExpiryOption expiry;
   CmdArgParser::Range fields;  // field/value pairs; valid only when the parser has no error.
+  optional<DbSlice::ExpireParams> passed_deadline;
 };
 
 // Field deadlines are stored with second resolution and rounded up, so a maximal relative TTL
@@ -983,9 +1041,11 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name, uint64_t no
 
   if (expiry.value) {
     DbSlice::ExpireParams expire_params{expiry.type, *expiry.value, now_ms};
-    if (!IsValidFieldExpiry(expire_params, expiry.type, now_ms) ||
-        expire_params.IsExpired(now_ms)) {
+    // Zero and past deadlines are allowed, but negative input must not become "expire now".
+    if (*expiry.value < 0 || !IsValidFieldExpiry(expire_params, expiry.type, now_ms)) {
       parser->ReportCustom(InvalidExpireTime(cmd_name));
+    } else if (expire_params.IsExpired(now_ms)) {
+      res.passed_deadline = expire_params;
     } else {
       op_sp.ttl = expire_params.TtlSec(now_ms);
     }
@@ -1033,6 +1093,8 @@ void HSetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
       if (!*cond)
         return CbVariant<uint32_t>{uint32_t(0)};  // condition not met -> nothing set
     }
+    if (parsed.passed_deadline)
+      return OpSetExpired(op_args, key, parsed.fields, *parsed.passed_deadline);
     return OpSet(op_args, key, parsed.fields, op_sp);
   };
 
@@ -1355,10 +1417,16 @@ void CmdHIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view field = parser.Next();
-  double dval = parser.Next<Validated<double, Finite<kNanOrInfDuringIncr>>>();
+  string_view incr_arg = parser.Next();
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  IncrByParam param{dval};
+  long double incr = 0;
+  if (!ParseLongDouble(incr_arg, &incr))
+    return cmd_cntx->SendError(kInvalidFloatErr);
+  if (isinf(incr))
+    return cmd_cntx->SendError(kNanOrInfDuringIncr);
+
+  IncrByParam param{incr};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
@@ -1368,7 +1436,7 @@ void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (status == OpStatus::OK) {
     auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-    rb->SendDouble(get<double>(param));
+    rb->SendBulkString(get<string>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
@@ -1624,7 +1692,8 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(HMGet)
             << CI{"HMSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
             << CI{"HINCRBY", CO::RW | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)
-            << CI{"HINCRBYFLOAT", CO::RW | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrByFloat)
+            << CI{"HINCRBYFLOAT", CO::RW | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, 4, 1, 1}
+                   .HFUNC(HIncrByFloat)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
             << CI{"HEXPIRE", kExpiryOpts, -5, 1, 1}.HFUNC(HExpire)
             << CI{"HPEXPIRETIME", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HPExpireTime)

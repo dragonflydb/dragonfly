@@ -57,6 +57,7 @@ using testing::Contains;
 using testing::ElementsAre;
 using testing::HasSubstr;
 using testing::Key;
+using testing::Not;
 using testing::Pair;
 using testing::UnorderedElementsAre;
 
@@ -141,6 +142,21 @@ TEST_F(DflyEngineTest, LuaErrors) {
 
   resp = Run({"eval", "return redis.pcall('incrby', 'foo', 'bar')", "1"});
   EXPECT_THAT(resp, ErrArg("ERR Number of keys can't be greater than number of args"));
+
+  // Precompiled bytecode is rejected.
+  const string kBytecode = "\x1bLua return 1";
+  EXPECT_THAT(Run({"eval", kBytecode, "0"}), ErrArg("attempt to load a binary chunk"));
+  EXPECT_THAT(Run({"script", "load", kBytecode}), ErrArg("attempt to load a binary chunk"));
+
+  // Error stats keys must not grow with errors chosen by scripts.
+  for (string_view msg : {"script-err-1", "script-err-2", "-script-err-3"}) {
+    EXPECT_THAT(Run({"eval", "return {err = ARGV[1]}", "0", msg}),
+                ErrArg(absl::StripPrefix(msg, "-")));
+  }
+  const string errorstats = Run({"INFO", "ERRORSTATS"}).GetString();
+  EXPECT_THAT(errorstats, Not(HasSubstr("script-err")));
+  EXPECT_THAT(errorstats, Not(HasSubstr("some error")));
+  EXPECT_THAT(errorstats, HasSubstr("script_error:"));
 }
 
 TEST_F(DflyEngineTest, EvalStallTimeout) {
@@ -394,6 +410,9 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
       ElementsAre("server", "redis", "version", "7.4.0", "dragonfly_version",
                   ArgType(RespExpr::STRING), "proto", IntArg(3), "id", ArgType(RespExpr::INT64),
                   "mode", testing::AnyOf("standalone", "cluster"), "role", "master"));
+
+  // A bare HELLO keeps the current protocol.
+  EXPECT_THAT(Run({"hello"}).GetVec()[7], IntArg(3));
 
   EXPECT_THAT(Run({"hello", "2", "AUTH", "uname", "pwd"}),
               ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
@@ -819,13 +838,13 @@ class FailedCmdSink : public absl::LogSink {
 
   void Send(const absl::LogEntry& entry) override {
     if (absl::StrContains(entry.text_message(), "failed with reason")) {
-      absl::MutexLock lk(&mu_);
+      absl::MutexLock lk(mu_);
       lines_.emplace_back(entry.text_message());
     }
   }
 
   vector<string> Lines() {
-    absl::MutexLock lk(&mu_);
+    absl::MutexLock lk(mu_);
     return lines_;
   }
 
@@ -1481,6 +1500,249 @@ TEST_F(DflyEngineTest, NotifyPendingExpiresWithoutSuspending) {
   vector<string> expired = {string(GetPublishedMessage("IO3", 0).message),
                             string(GetPublishedMessage("IO3", 1).message)};
   EXPECT_THAT(expired, UnorderedElementsAre(kKeySid0, key2));
+}
+
+namespace {
+
+// Stands in for a snapshot that serializes one bucket, e.g. a big value between its chunks.
+// IsAnyBucketBlocked() reports it for the whole slice; writes to the bucket wait like OnChange.
+struct BlockedBucket : public DbSlice::ChangeConsumerInterface {
+  void OnChange(DbIndex, const DbSlice::ChangeReq& req) override {
+    for (auto it : req.buckets())
+      WaitForBucketUnblocked(it.bucket_address());
+  }
+
+  bool IsAnyBucketBlocked() const override {
+    return blocked;
+  }
+
+  void WaitForNoBucketBlocked() const override {
+    released.Wait();
+  }
+
+  bool IsBucketBlocked(BucketIdentity b) const override {
+    return blocked && b == bucket;
+  }
+
+  void WaitForBucketUnblocked(BucketIdentity b) const override {
+    if (IsBucketBlocked(b)) {
+      waiting.Notify();
+      released.Wait();
+    }
+  }
+
+  bool blocked = true;
+  BucketIdentity bucket = 0;  // 0 stands for a bucket no key lives in
+  mutable fb2::Done waiting, released;
+};
+
+BucketIdentity BucketOnShard0(string_view key) {
+  return shard_set->Await(0, [key] {
+    auto* pt = namespaces->GetDefaultNamespace().GetDbSlice(0).GetTables(0);
+    return pt->Find(key).bucket_address();
+  });
+}
+
+void RegisterOnShard0(BlockedBucket* consumer) {
+  shard_set->pool()->at(0)->Await([consumer] {
+    EngineShard* shard = EngineShard::tlocal();
+
+    // RegisterOnChange requires the shard lock to be held (see #7153).
+    shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    namespaces->GetDefaultNamespace().GetDbSlice(0).RegisterOnChange(consumer);
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+  });
+}
+
+// Release before unregistering: UnregisterOnChange waits for the fibers waiting on the consumer.
+void ReleaseOnShard0(BlockedBucket* consumer) {
+  shard_set->pool()->at(0)->Await([consumer] {
+    consumer->blocked = false;
+    consumer->released.Notify();
+  });
+}
+
+void UnregisterOnShard0(BlockedBucket* consumer) {
+  shard_set->pool()->at(0)->Await(
+      [consumer] { namespaces->GetDefaultNamespace().GetDbSlice(0).UnregisterOnChange(consumer); });
+}
+
+size_t DbSizeOnShard0() {
+  return shard_set->Await(0,
+                          [] { return namespaces->GetDefaultNamespace().GetDbSlice(0).DbSize(0); });
+}
+
+}  // namespace
+
+// A bucket blocked by a snapshot does not stop active expiry of keys in other buckets.
+TEST_F(DflyEngineTest, HeartbeatExpiresWhileOtherBucketBlocked) {
+  Run({"set", kKeySid0, "v", "PX", "10"});
+  BlockedBucket snapshot;
+  RegisterOnShard0(&snapshot);
+  absl::Cleanup cleanup = [&] {
+    ReleaseOnShard0(&snapshot);
+    UnregisterOnShard0(&snapshot);
+  };
+  AdvanceTime(20);
+
+  EXPECT_TRUE(WaitUntilCondition([] { return DbSizeOnShard0() == 0; }, 1s));
+}
+
+// Active expiry skips a key whose bucket is blocked and expires it once the bucket is released.
+TEST_F(DflyEngineTest, HeartbeatDefersExpiryInBlockedBucket) {
+  Run({"set", kKeySid0, "v", "PX", "10"});
+  BlockedBucket snapshot;
+  snapshot.bucket = BucketOnShard0(kKeySid0);
+  RegisterOnShard0(&snapshot);
+  absl::Cleanup unregister = [&] { UnregisterOnShard0(&snapshot); };
+  AdvanceTime(20);
+
+  ThisFiber::SleepFor(100ms);  // ~10 heartbeats at the default hz=100
+  EXPECT_EQ(DbSizeOnShard0(), 1u);
+
+  ReleaseOnShard0(&snapshot);
+  EXPECT_TRUE(WaitUntilCondition([] { return DbSizeOnShard0() == 0; }, 1s));
+}
+
+// Expiry appends DEL to the journal and deletes the key, and the journal append can suspend
+// (journal throttling). For a lookup outside a transaction callback, another command could expire
+// and rewrite the key during such a wait, and the resumed expiry would delete the new value while
+// the journal ends with the SET. TryExpire journals and deletes atomically and throttles only
+// after the deletion, so the key is already gone when the consumer parks, and the rewrite survives.
+TEST_F(DflyEngineTest, ExpireKeepsKeyRewrittenDuringJournalWait) {
+  Run({"set", kKeySid0, "BAR", "PX", "10"});
+
+  ParkFirstDel consumer;
+  const uint32_t consumer_id = StartJournalWithConsumer(&consumer, 0);
+  absl::Cleanup unregister = [&] {
+    pp_->at(0)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+
+  // An expiring lookup outside any transaction. The clock advances on the shard thread right
+  // before it, so the heartbeat cannot expire the key first.
+  auto lookup = pp_->at(0)->LaunchFiber([&] {
+    AdvanceTime(20);
+    auto& ns = namespaces->GetDefaultNamespace();
+    DbContext cntx{&ns, 0, GetCurrentTimeMs()};
+    EXPECT_FALSE(ns.GetDbSlice(0).FindReadOnly(cntx, kKeySid0, OBJ_STRING).ok());
+  });
+  if (!consumer.parked.WaitFor(5s)) {
+    consumer.release.Notify();  // In case the lookup parks right after the timeout.
+    lookup.Join();
+    FAIL() << "the expiry never reached the journal";
+  }
+
+  // The expiry is parked in the throttle, after the deletion. The key is rewritten meanwhile.
+  EXPECT_THAT(Run({"get", kKeySid0}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"set", kKeySid0, "1"}), "OK");
+
+  consumer.release.Notify();
+  lookup.Join();
+
+  vector<string> cmds = pp_->at(0)->Await([&] { return consumer.cmds(); });
+  EXPECT_THAT(cmds, ElementsAre("DEL", "SET"));
+  EXPECT_EQ(Run({"get", kKeySid0}), "1");
+}
+
+// An expired key whose bucket is mid-serialization is hidden from reads without journaling or
+// deleting it. A write waits for the bucket and journals the expiry before itself.
+TEST_F(DflyEngineTest, ExpiryDefersInBlockedBucket) {
+  Run({"set", kKeySid0, "BAR", "PX", "10"});
+
+  ParkFirstDel journal_consumer;
+  journal_consumer.release.Notify();  // Do not park.
+  const uint32_t consumer_id = StartJournalWithConsumer(&journal_consumer, 0);
+
+  BlockedBucket snapshot;
+  snapshot.bucket = BucketOnShard0(kKeySid0);
+  RegisterOnShard0(&snapshot);
+  absl::Cleanup cleanup = [&] {
+    ReleaseOnShard0(&snapshot);
+    UnregisterOnShard0(&snapshot);
+    pp_->at(0)->Await([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+  AdvanceTime(20);
+
+  auto journaled = [&] { return pp_->at(0)->Await([&] { return journal_consumer.cmds(); }); };
+
+  EXPECT_THAT(Run({"get", kKeySid0}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(journaled(), ElementsAre());
+  EXPECT_EQ(DbSizeOnShard0(), 1u);
+
+  auto writer = pp_->at(1)->LaunchFiber([&] { EXPECT_EQ(Run({"set", kKeySid0, "1"}), "OK"); });
+  if (!snapshot.waiting.WaitFor(5s)) {
+    ReleaseOnShard0(&snapshot);
+    writer.Join();
+    FAIL() << "the write never waited for the blocked bucket";
+  }
+  EXPECT_THAT(journaled(), ElementsAre());
+
+  ReleaseOnShard0(&snapshot);
+  writer.Join();
+
+  EXPECT_THAT(journaled(), ElementsAre("DEL", "SET"));
+  EXPECT_EQ(Run({"get", kKeySid0}), "1");
+}
+
+// SCAN does not wait for blocked buckets: it hides an expired key in one without deleting it.
+TEST_F(DflyEngineTest, ScanDoesNotWaitForBlockedBucket) {
+  Run({"set", kKeySid0, "v", "PX", "10"});
+  BlockedBucket snapshot;
+  snapshot.bucket = BucketOnShard0(kKeySid0);
+  RegisterOnShard0(&snapshot);
+  absl::Cleanup cleanup = [&] {
+    ReleaseOnShard0(&snapshot);
+    UnregisterOnShard0(&snapshot);
+  };
+  AdvanceTime(20);
+
+  util::fb2::Done scanned;
+  auto scan = pp_->at(1)->LaunchFiber([&] {
+    auto resp = Run({"scan", "0", "count", "100"});
+    ASSERT_THAT(resp, ArrLen(2));
+    EXPECT_THAT(resp.GetVec()[1], ArrLen(0));
+    scanned.Notify();
+  });
+  bool done = scanned.WaitFor(5s);
+  if (!done)
+    ReleaseOnShard0(&snapshot);
+  scan.Join();
+  EXPECT_TRUE(done) << "SCAN waited for the blocked bucket";
+  EXPECT_EQ(DbSizeOnShard0(), 1u);
+}
+
+// A reader woken by a stream expired in a blocked bucket must not see it at its pre-block time.
+TEST_F(DflyEngineTest, XReadGroupWakesOnExpiryInBlockedBucket) {
+  Run({"xgroup", "create", kKeySid0, "g", "$", "mkstream"});
+  Run({"pexpire", kKeySid0, "10"});
+
+  RespExpr resp;
+  auto reader = pp_->at(1)->LaunchFiber([&] {
+    resp =
+        Run("reader", {"xreadgroup", "group", "g", "c", "block", "5000", "streams", kKeySid0, ">"});
+  });
+  absl::Cleanup join_reader = [&] { reader.JoinIfNeeded(); };
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("reader"); }, 1s));
+
+  BlockedBucket snapshot;
+  snapshot.bucket = BucketOnShard0(kKeySid0);
+  RegisterOnShard0(&snapshot);
+  absl::Cleanup cleanup = [&] {
+    ReleaseOnShard0(&snapshot);
+    UnregisterOnShard0(&snapshot);
+  };
+
+  // The readiness check hides the expired stream without deleting it, and wakes the reader.
+  pp_->at(0)->Await([&] {
+    AdvanceTime(20);
+    auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(0);
+    bc->Awaken(0, kKeySid0);
+    bc->NotifyPending();
+  });
+  reader.Join();
+
+  EXPECT_THAT(resp, ErrArg("NOGROUP"));
+  EXPECT_EQ(DbSizeOnShard0(), 1u);
 }
 
 // AddListener picks the accept-loop proactor via the pool's shared round-robin, so listener

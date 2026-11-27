@@ -229,6 +229,13 @@ SortedMap::ScoredArray CollectByPath(BPTreePath<SortedMap::ScoreSds> path, const
   return out;
 }
 
+// Ranges that will always be empty - (+inf, anything) or (anything, -inf).
+// Must be checked before comparing members against range bounds, since sdscmp
+// does not understand the sentinel strings.
+bool IsEmptyLexRange(const zlexrangespec& range) {
+  return range.min == cmaxstring || range.max == cminstring;
+}
+
 }  // namespace
 
 double ZzlGetScore(const uint8_t* sptr) {
@@ -696,8 +703,9 @@ int SortedMap::AddElem(double score, std::string_view ele, int in_flags, int* ou
     return 1;
   }
 
+  const double curscore = GetObjScore(obj);
   if (in_flags & ZADD_IN_INCR) {
-    score += GetObjScore(obj);
+    score += curscore;
     if (isnan(score)) {
       *out_flags = ZADD_OUT_NAN;
       return 0;
@@ -705,10 +713,17 @@ int SortedMap::AddElem(double score, std::string_view ele, int in_flags, int* ou
   }
 
   // GT/LT? Only update if score is greater/less than current.
-  double curscore = GetObjScore(obj);
   if (((in_flags & ZADD_IN_LT) && score >= curscore) ||
       ((in_flags & ZADD_IN_GT) && score <= curscore)) {
     *out_flags = ZADD_OUT_NOP;
+    return 1;
+  }
+
+  *newscore = score;
+
+  // Like Redis, an unchanged score is neither a NOP nor an update.
+  if (score == curscore) {
+    *out_flags = 0;
     return 1;
   }
 
@@ -717,7 +732,6 @@ int SortedMap::AddElem(double score, std::string_view ele, int in_flags, int* ou
   SetObjScore(obj, score);
   CHECK(score_tree->Insert(obj));
   *out_flags = ZADD_OUT_UPDATED;
-  *newscore = score;
   return 1;
 }
 
@@ -799,7 +813,7 @@ SortedMap::ScoredArray SortedMap::GetRange(const zrangespec& range, unsigned off
 
 SortedMap::ScoredArray SortedMap::GetLexRange(const zlexrangespec& range, unsigned offset,
                                               unsigned limit, bool reverse) const {
-  if (score_tree->Size() <= offset || limit == 0)
+  if (score_tree->Size() <= offset || limit == 0 || IsEmptyLexRange(range))
     return {};
 
   detail::BPTreePath<ScoreSds> path;
@@ -949,7 +963,7 @@ size_t SortedMap::DeleteRangeByScore(const zrangespec& range) {
 }
 
 size_t SortedMap::DeleteRangeByLex(const zlexrangespec& range) {
-  if (score_tree->Size() == 0)
+  if (score_tree->Size() == 0 || IsEmptyLexRange(range))
     return 0;
 
   size_t deleted = 0;
@@ -1078,13 +1092,8 @@ size_t SortedMap::Count(const zrangespec& range) const {
 }
 
 size_t SortedMap::LexCount(const zlexrangespec& range) const {
-  if (score_tree->Size() == 0)
+  if (score_tree->Size() == 0 || IsEmptyLexRange(range))
     return 0;
-
-  // Ranges that will always be zero - (+inf, anything) or (anything, -inf)
-  if (range.min == cmaxstring || range.max == cminstring) {
-    return 0;
-  }
 
   uint32_t min_rank = 0;
   detail::BPTreePath<ScoreSds> path;

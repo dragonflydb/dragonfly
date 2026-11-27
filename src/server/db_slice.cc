@@ -4,9 +4,12 @@
 
 #include "server/db_slice.h"
 
+#include <absl/container/inlined_vector.h>
+
 #include <ranges>
 
 #include "core/dense_set.h"
+#include "core/memory_accounting.h"
 #include "core/oah_set.h"
 #include "core/qlist.h"
 #include "strings/human_readable.h"
@@ -27,7 +30,6 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
-#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
@@ -176,7 +178,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
   unsigned res = 0;
 
-  if (db_slice_->WillBlockOnJournalWrite()) {
+  if (db_slice_->IsJournalAppendBlocked()) {
     return res;
   }
 
@@ -212,16 +214,24 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
 }
 
 unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
-  if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
+  if (!can_evict_)
     return 0;
-
-  // Disable flush journal changes to prevent preemtion in evict.
-  journal::DisableFlushGuard journal_flush_guard;
 
   constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.stash_buckets);
 
   // choose "randomly" a stash bucket to evict an item.
   auto bucket_it = eb.probes.stash_buckets[eb.key_hash % kNumStashBuckets];
+
+  // Both the deletion and ShiftRight below must not touch a bucket that is mid-serialization.
+  // Eviction bypasses OnChange, so it must also skip buckets that a snapshot has not serialized
+  // yet: the evicted key would be missing from the point-in-time snapshot.
+  if (!db_slice_->CanDeleteWithoutBlocking(bucket_it.bucket_address()) ||
+      !db_slice_->IsBucketSerialized(bucket_it.GetVersion()))
+    return 0;
+
+  // Disable flush journal changes to prevent preemtion in evict.
+  journal::DisableFlushGuard journal_flush_guard;
+
   auto last_slot_it = bucket_it;
   last_slot_it += (PrimeTable::kSlotNum - 1);
   if (!last_slot_it.is_done()) {
@@ -420,7 +430,7 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable*
 
   db->stats.AddTypeMemoryUsage(type, delta);
   if (type == OBJ_KEY)
-    EngineShard::tlocal()->AddTypeMemDelta(OBJ_KEY, delta);
+    ChargeMemory(OBJ_KEY, delta);
   UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage", type, slot);
 }
 
@@ -762,11 +772,26 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   if (it->first.HasExpire()) {
     ExpireResult res = TryExpire(cntx, it);
 
-    // If expiry is paused, hide expired keys from read lookups. Mutable lookups must still see
-    // them: the entry is physically present, and reporting it missing would make AddOrFind insert
-    // a duplicate.
-    const bool hide_paused_expiry = mode == LookupMode::kReadOnly;
-    if (res == ExpireResult::Deleted || (res == ExpireResult::ExpiryPaused && hide_paused_expiry)) {
+    // A mutable lookup waits for the serialization like any write and retries, so the expiry is
+    // journaled before the write. The table may be replaced meanwhile, so do not use `db`.
+    while (res == ExpireResult::Deferred && mode == LookupMode::kMutable) {
+      // With tagged chunks disabled, a suspended stream mutex holder has a bucket dependency.
+      if (IsJournalAppendBlocked())
+        WaitForNoBucketBlocked();
+      else
+        CallChangeCallbacks(cntx.db_index, ChangeReq{it});
+
+      it = db_arr_[cntx.db_index]->prime.Find(key, key_hash);
+      if (!IsValid(it))
+        return OpStatus::KEY_NOTFOUND;
+      res = TryExpire(cntx, it);
+    }
+
+    // Hide expired keys that were not deleted from read lookups. Mutable lookups must still see
+    // paused ones: the entry is physically present, and reporting it missing would make AddOrFind
+    // insert a duplicate.
+    const bool hide_expired = mode == LookupMode::kReadOnly;
+    if (res == ExpireResult::Deleted || (res != ExpireResult::Valid && hide_expired)) {
       record_miss();
       return OpStatus::KEY_NOTFOUND;
     }
@@ -774,7 +799,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   DCHECK(IsValid(it));
 
-  // Preemptions happen only if the entry is being deleted during expiry, so `db` is valid here.
+  // Read-only lookups preempt only after deleting the entry, so `db` is valid for them here.
   if (req_obj_type.has_value() && it->second.ObjType() != req_obj_type.value()) {
     record_miss();
     return OpStatus::WRONG_TYPE;
@@ -925,7 +950,9 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_v
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
-  DeductFromTxScope(table_increase);
+
+  // Table storage is shared infrastructure rather than object memory.
+  ChargeMemory(kUntrackedMemory, table_increase);
   memory_budget_ -= table_increase;
 
   table_memory_ += table_increase;
@@ -1033,6 +1060,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
 
   ServerState& etl = *ServerState::tlocal();
   const float cpu_budget = GetFlag(FLAGS_migration_buckets_cpu_budget);
+  base::CycleBucketAggregator& cpu_aggregator = owner_->migration_cpu_aggregator();
   for (DbIndex db_ind = 0; db_ind < tables.size() && etl.gstate() != GlobalState::SHUTTING_DOWN;
        ++db_ind) {
     table = tables[db_ind];
@@ -1049,7 +1077,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
 
     do {
       {
-        base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
+        base::CpuTimeGuard guard(&cpu_aggregator);
         cursor = pt->TraverseBuckets(cursor, iterate_bucket);
       }
 
@@ -1063,7 +1091,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
       }
 
       while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN &&
-             flush_slots_cpu_aggregator_.IsOverloaded(cpu_budget)) {
+             cpu_aggregator.IsOverloaded(cpu_budget)) {
         ThisFiber::SleepFor(300us);
       }
     } while (cursor && table == db_arr_[db_ind] && etl.gstate() != GlobalState::SHUTTING_DOWN);
@@ -1106,7 +1134,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
       return;
 
     FiberAtomicGuard fg;
-    base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
+    base::CpuTimeGuard guard(&owner_->migration_cpu_aggregator());
 
     auto process_bucket = [&](PrimeTable::bucket_iterator it) {
       std::string tmp;
@@ -1362,9 +1390,11 @@ uint64_t DbSlice::ExpireParams::TtlSec(uint64_t now_ms) const {
   return DeadlineSec() - now_ms / 1000;
 }
 
-void DbSlice::ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv) {
+void DbSlice::PrepareOverwrite(const Context& cntx, std::string_view key, PrimeValue* pv) {
+  if (pv->ObjType() == OBJ_HASH || pv->ObjType() == OBJ_JSON)
+    shard_owner()->search_indices()->RemoveDoc(key, cntx, *pv);
   if (pv->IsExternal())
-    shard_owner()->tiered_storage()->Delete(db_ind, key, pv);
+    shard_owner()->tiered_storage()->Delete(cntx.db_index, key, pv);
 }
 
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
@@ -1433,7 +1463,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
 
   auto& it = res.it;
 
-  ReleaseOffloadedValue(cntx.db_index, key, &it->second);
+  PrepareOverwrite(cntx, key, &it->second);
   it->second = std::move(obj);
 
   if (expire_at_ms) {
@@ -1588,9 +1618,16 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it) const -> ExpireRe
   if (!AllowExpiredDeletions())
     return expire_allowed_ ? ExpireResult::Valid : ExpireResult::ExpiryPaused;
 
+  // A serializer may still reference the entry, and the journal append may block.
+  if (!CanDeleteWithoutBlocking(it.bucket_address()))
+    return ExpireResult::Deferred;
+
   string scratch;
   string_view key = it->first.GetSlice(&scratch);
 
+  // Journal and delete atomically: a suspension in between would let other fibers rewrite the
+  // entry, which we would then delete through a stale iterator.
+  journal::DisableFlushGuard flush_guard;
   RecordExpiryBlocking(cntx.db_index, key);
   QueueExpiredKeyEvent(cntx.db_index, key);
 
@@ -1626,7 +1663,7 @@ void DbSlice::SendQueuedExpiredKeyEventsSlow() {
 void DbSlice::ExpireAllIfNeeded() {
   // We hold no locks to any of the keys so we should Wait() here such that
   // we don't preempt in TryExpire
-  WaitForUnblockedJournalWrites();
+  WaitForNoBucketBlocked();
 
   {
     // Disable flush journal changes to prevent preemtion in traverse.
@@ -1668,14 +1705,41 @@ bool DbSlice::UnregisterOnChange(ChangeConsumerInterface* consumer) {
   return true;
 }
 
-bool DbSlice::WillBlockOnJournalWrite() const {
+bool DbSlice::IsAnyBucketBlocked() const {
   return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsAnyBucketBlocked);
 }
 
-void DbSlice::WaitForUnblockedJournalWrites() const {
+void DbSlice::WaitForNoBucketBlocked() const {
   std::lock_guard lk{change_cb_latch_};
-  while (WillBlockOnJournalWrite())
+  while (IsAnyBucketBlocked())
     ranges::for_each(change_cb_, &ChangeConsumerInterface::WaitForNoBucketBlocked);
+}
+
+bool DbSlice::IsJournalAppendBlocked() const {
+  return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsJournalAppendBlocked);
+}
+
+bool DbSlice::CanDeleteWithoutBlocking(BucketIdentity bucket) const {
+  return ranges::none_of(change_cb_, [bucket](const ChangeConsumerInterface* cb) {
+    return cb->IsJournalAppendBlocked() || cb->IsBucketBlocked(bucket);
+  });
+}
+
+bool DbSlice::IsBucketSerialized(uint64_t bucket_version) const {
+  return ranges::all_of(change_cb_, [bucket_version](const ChangeConsumerInterface* cb) {
+    return !cb->SerializesBaselines() || bucket_version >= cb->snapshot_version_;
+  });
+}
+
+void DbSlice::WaitForBucketUnblocked(BucketIdentity bucket) const {
+  std::lock_guard lk{change_cb_latch_};
+  auto blocked = [bucket](const ChangeConsumerInterface* cb) {
+    return cb->IsBucketBlocked(bucket);
+  };
+  while (ranges::any_of(change_cb_, blocked)) {
+    for (const auto* cb : change_cb_)
+      cb->WaitForBucketUnblocked(bucket);
+  }
 }
 
 // Ordering invariant (PIT mode):
@@ -1736,9 +1800,12 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count,
       return;
     }
 
-    result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
-    TryExpire(cntx, it);
-    ++result.deleted;
+    // Deferred entries are retried on a later step.
+    size_t bytes = it->first.MallocUsed() + it->second.MallocUsed();
+    if (TryExpire(cntx, it) == ExpireResult::Deleted) {
+      result.deleted_bytes += bytes;
+      ++result.deleted;
+    }
   };
 
   auto quota_remains = [running_time_cycles_start] {
@@ -1783,7 +1850,9 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
 
   size_t evicted_items = 0, evicted_bytes = 0;
 
-  if (owner_->tiered_storage()) {
+  // Reclaiming changes values in place, so it keeps the shard-wide check.
+  // TODO: reclaim per bucket. Needs a check that a serializer can't reference the cool value.
+  if (owner_->tiered_storage() && !IsAnyBucketBlocked()) {
     evicted_bytes = owner_->tiered_storage()->ReclaimMemory(increase_goal_bytes);
     if (evicted_bytes >= increase_goal_bytes)
       return {0, evicted_bytes};
@@ -1829,6 +1898,12 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
         const auto& lt = db_table->trans_locks;
         string_view key = evict_it->first.GetSlice(&tmp);
         if (lt.Find(LockTag(key)).has_value())
+          continue;
+
+        // Eviction bypasses OnChange: skip buckets that are mid-serialization, and buckets that a
+        // snapshot has not serialized yet, so that the evicted key keeps its baseline.
+        if (!CanDeleteWithoutBlocking(evict_it.bucket_address()) ||
+            !IsBucketSerialized(evict_it.GetVersion()))
           continue;
 
         if (record_keys)
@@ -1973,6 +2048,16 @@ void DbSlice::QueueInvalidationTrackingMessageAtomic(std::string_view key) {
 
   ConnectionHashSet moved_set = std::move(it->second);
   client_tracking_map_.erase(it);
+
+  // The writer stops tracking the key as well, it just gets no message. Other fibers may change
+  // keys while its command is suspended, so only its own fiber counts.
+  if (tracking_noloop_client_ != 0 && util::fb2::detail::FiberActive() == tracking_noloop_fiber_) {
+    absl::erase_if(moved_set, [this](const facade::ConnectionRef& ref) {
+      return ref.GetClientId() == tracking_noloop_client_;
+    });
+    if (moved_set.empty())
+      return;
+  }
 
   auto [pend_it, inserted] = pending_send_map_.emplace(key, std::move(moved_set));
   if (!inserted) {
@@ -2236,14 +2321,19 @@ void DbSlice::OnCbFinishBlocking() {
       }
 
       if (!change_cb_.empty()) {
+        // CVCUponBump reports no bucket for a regular-bucket entry, but BumpUp still swaps slots
+        // within its bucket.
+        absl::InlinedVector<BucketIdentity, 4> touched{it.bucket_address()};
         auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
           CallChangeCallbacks(db_index, ChangeReq{bit});
+          touched.push_back(bit.bucket_address());
         };
         db.prime.CVCUponBump(it, key_hash, bump_cb);
-      }
 
-      // We must not change the bucket's internal order during serialization
-      WaitForUnblockedJournalWrites();
+        // We must not change the order of the touched buckets during serialization
+        for (BucketIdentity bucket : touched)
+          WaitForBucketUnblocked(bucket);
+      }
       PrimeBumpPolicy policy;
       auto bump_it = db.prime.BumpUp(it, key_hash, policy);
       if (bump_it != it) {  // the item was bumped

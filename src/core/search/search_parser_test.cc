@@ -80,6 +80,9 @@ struct AstDumper {
   string operator()(const AstVectorRangeNode& n) const {
     return absl::StrCat("VRANGE(", n.field, ";", n.radius, ")");
   }
+  string operator()(const AstIsMissingNode&) const {
+    return "MISSING";
+  }
 
   string operator()(const AstTagsNode::TagValue& tag) const {
     switch (tag.type) {
@@ -281,6 +284,8 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_TOK(TOK_LCURLBR);
   NEXT_EQ(TOK_TAG_VAL, string, "Tag:value");
   NEXT_TOK(TOK_RCURLBR);
+  SetInput("\tTag:value\\ \n");
+  NEXT_EQ(TOK_TAG_VAL, string, "Tag:value ");
 
   // Prefix simple
   SetInput("pre*");
@@ -600,6 +605,7 @@ TEST_F(SearchParserTest, VectorRangeParse) {
   params["radius"] = "1";
   // 4 bytes = one float dimension
   params["vec"] = std::string(4, '\0');
+  params["empty"] = "";
   SetParams(&params);
 
   // Basic syntax parses without error
@@ -611,6 +617,8 @@ TEST_F(SearchParserTest, VectorRangeParse) {
   EXPECT_NE(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$EPSILON: 2000000}"));
   EXPECT_NE(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$EPSILON: inf}"));
   EXPECT_NE(0, Parse("*=>[KNN 1 @f $vec]=>{$EPSILON: 0.1}"));
+  EXPECT_NE(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: $empty}"));
+  EXPECT_NE(0, Parse("*=>[KNN 1 @f $vec]=>{$YIELD_DISTANCE_AS: $empty}"));
 }
 
 TEST_F(SearchParserTest, VectorRangeCombinations) {
@@ -1125,6 +1133,33 @@ TEST_F(SearchParserTest, GluedWordReusedDriver) {
     query_driver_.SetInput(good);
     ASSERT_EQ(Parser(&query_driver_)(), 0) << bad;
     EXPECT_EQ(DumpAst(query_driver_.Take()), ast) << bad;
+  }
+}
+
+TEST_F(SearchParserTest, IsMissingAndEscapedFieldNames) {
+  QueryParams params;
+  params["vec"] = string(8, '\0');
+  SetParams(&params);
+
+  const pair<string, string> kCases[] = {
+      {"ismissing(@brand)", "brand:MISSING"},
+      {"IsMissing\t( @brand )", "brand:MISSING"},
+      {"~ismissing(@brand)", "OPT(brand:MISSING)"},
+      {"ismissing(@brand)=>{$weight:2}", "ATTR(brand:MISSING,w=2)"},
+      {"ismissing(@brand)foo", "AND{brand:MISSING T(foo)}"},
+      {"ismissing", "T(ismissing)"},
+      {"@title:ismissing", "title:T(ismissing)"},
+      {R"(ismissing(@user\.name))", "user.name:MISSING"},
+      {R"(@size\-cm:[40 45])", "size-cm:R[40,45]"},
+      {R"(*=>[KNN 2 @v\.x $vec])", "KNN(*;2;v.x;__v.x_score)"},
+  };
+  for (const auto& [query, ast] : kCases)
+    EXPECT_EQ(ParseDump(query), ast) << query;
+
+  for (string query :
+       {"ismissing(brand)", "ismissing()", "ismissing(@a @b)", "ismissing(@brand:x)",
+        "@title:ismissing(@brand)", "@title:(ismissing(@brand))", "ismissing (foo)", "@a.b:x"}) {
+    EXPECT_EQ(ParseDump(query), "error") << query;
   }
 }
 

@@ -5,6 +5,7 @@
 #include "server/transaction.h"
 
 #include <absl/base/config.h>
+#include <absl/flags/reflection.h>
 #include <gmock/gmock.h>
 
 // Like dfly_main, route operator new/delete through mimalloc, so that benchmarks measure the
@@ -17,6 +18,7 @@
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/memory_accounting.h"
 #include "facade/conn_context.h"
 #include "facade/facade_stats.h"
 #include "server/acl/acl_commands_def.h"
@@ -26,13 +28,13 @@
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
 #include "server/engine_shard_set.h"
-#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 #include "util/fibers/pool.h"
 #include "util/fibers/synchronization.h"
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
+ABSL_DECLARE_FLAG(bool, enable_scope_based_mem_track);
 
 namespace dfly {
 
@@ -149,11 +151,13 @@ class TransactionTest : public Test {
   }
 
   std::unique_ptr<ProactorPool> pp_;
+  absl::FlagSaver flag_saver_;
   // Keep argument backing storage alive for the duration of the test.
   std::vector<std::pair<StringVec, std::shared_ptr<CmdArgVec>>> arg_holders_;
 };
 
 void TransactionTest::SetUp() {
+  absl::SetFlag(&FLAGS_enable_scope_based_mem_track, true);
   StartShards(fb2::Pool::Epoll(kNumThreads));
 }
 
@@ -652,71 +656,41 @@ TEST_F(TransactionTest, AwakenedTxPollDroppedWhileRunning) {
   EXPECT_TRUE(t_ran) << "T awakened on shard 0 was stranded";
 }
 
-namespace {
-
-TypeAttributedMemory DeltaDiff(const TypeAttributedMemory& before,
-                               const TypeAttributedMemory& after) {
-  TypeAttributedMemory diffs = after;
-  for (size_t i = 0; i < before.size(); ++i)
-    diffs[i] -= before[i];
-  return diffs;
-}
-
-void AllButOneDeltaIs(const TypeAttributedMemory& deltas, size_t pos, int64_t expected) {
-  ASSERT_GT(deltas.size(), pos);
-  for (size_t i = 0; i < deltas.size(); ++i)
-    if (i == pos)
-      ASSERT_EQ(deltas[i], expected);
-    else
-      ASSERT_EQ(deltas[i], 0);
-}
-
-template <typename F> auto WithMemTrack(int obj_type, F f) {
-  AtomicMemoryScope scope(obj_type);
-  return f();
-}
-
-}  // namespace
-
-TEST_F(TransactionTest, DeltaChanges) {
+TEST_F(TransactionTest, DeltaTxScopeWhenAccountingDisabled) {
   OnShard(0, [] {
-    const auto shard = EngineShard::tlocal();
-    const auto mr = shard->memory_resource();
-    void* p = nullptr;
-    const auto before = shard->type_attributed_memory();
-    WithMemTrack(OBJ_STRING, [&] { p = mr->allocate(1024); });
-    AllButOneDeltaIs(DeltaDiff(before, shard->type_attributed_memory()), OBJ_STRING, 1024);
-    mr->deallocate(p, 1024);
-  });
-}
-
-TEST_F(TransactionTest, DeltaAllocAndFree) {
-  OnShard(0, [] {
-    const auto shard = EngineShard::tlocal();
-    const auto mr = shard->memory_resource();
-    void* p = mr->allocate(1024);
-    const auto before = shard->type_attributed_memory();
-    WithMemTrack(OBJ_LIST, [&] { mr->deallocate(p, 1024); });
-    AllButOneDeltaIs(DeltaDiff(before, shard->type_attributed_memory()), OBJ_LIST, -1024);
+    auto& resource = *static_cast<MiMemoryResource*>(EngineShard::tlocal()->memory_resource());
+    ShutdownMemoryAccounting();
+    {
+      TxMemoryScope scope{OBJ_STRING};
+      ThisFiber::Yield();
+    }
+    EXPECT_FALSE(MemoryAccountingEnabled());
+    EXPECT_EQ(GetTypeAttributedMemory(), TypeAttributedMemory{});
+    InitMemoryAccounting(resource);
   });
 }
 
 TEST_F(TransactionTest, DeltaInterleavedFibers) {
   // A tx scope yields and another fiber opens a scope while tx is suspended
   OnShard(0, [] {
-    const auto shard = EngineShard::tlocal();
-    const auto mr = shard->memory_resource();
+    const auto mr = EngineShard::tlocal()->memory_resource();
 
-    const auto before = shard->type_attributed_memory();
+    const auto before = GetTypeAttributedMemory();
     void* p = nullptr;
     void* q = nullptr;
     void* r = nullptr;
+    void* background = nullptr;
 
     {
       bool other_ran = false;
       fb2::Fiber other{"other", [&] {
-                         AtomicMemoryScope list_scope{OBJ_LIST};
-                         q = mr->allocate(128);
+                         {
+                           AtomicMemoryScope list_scope{OBJ_LIST};
+                           q = mr->allocate(128);
+                         }
+
+                         // Only suspension tracking excludes this unattributed allocation.
+                         background = mr->allocate(64);
                          other_ran = true;
                        }};
       TxMemoryScope scope_for_string{OBJ_STRING};
@@ -726,49 +700,23 @@ TEST_F(TransactionTest, DeltaInterleavedFibers) {
       other.Join();
       ASSERT_TRUE(other_ran);
 
+      AtomicMemoryScope hash_scope{OBJ_HASH};
       r = mr->allocate(512);
     }
 
     TypeAttributedMemory expected{};
-    expected[OBJ_STRING] = 1024 + 512;
+    expected[OBJ_STRING] = 1024;
+    expected[OBJ_HASH] = 512;
     expected[OBJ_LIST] = 128;
-    EXPECT_EQ(DeltaDiff(before, shard->type_attributed_memory()), expected);
+    auto delta = GetTypeAttributedMemory();
+    for (size_t i = 0; i < delta.size(); ++i)
+      delta[i] -= before[i];
+    EXPECT_EQ(delta, expected);
 
     mr->deallocate(p, 1024);
     mr->deallocate(q, 128);
     mr->deallocate(r, 512);
-  });
-}
-
-TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
-  OnShard(0, [] {
-    const auto shard = EngineShard::tlocal();
-    const auto mr = shard->memory_resource();
-    std::vector<std::pair<void*, size_t>> tracked;
-
-    // these allocations of size s are actually counted for the size, and cleaned up later
-    auto track = [&](size_t s) { tracked.emplace_back(mr->allocate(s), s); };
-
-    const auto before = shard->type_attributed_memory();
-    {
-      TxMemoryScope scope{OBJ_STRING};
-      track(1024);
-      WithMemTrack(OBJ_LIST, [&] { track(512); });
-      WithMemTrack(OBJ_HASH, [&] {
-        // Temporary allocations freed in the same scope should not contribute to its delta.
-        void* p = mr->allocate(256);
-        track(128);
-        mr->deallocate(p, 256);
-      });
-    }
-    TypeAttributedMemory expected{};
-    expected[OBJ_STRING] = 1024;
-    expected[OBJ_LIST] = 512;
-    expected[OBJ_HASH] = 128;
-    EXPECT_EQ(DeltaDiff(before, shard->type_attributed_memory()), expected);
-
-    for (const auto& [ptr, size] : tracked)
-      mr->deallocate(ptr, size);
+    mr->deallocate(background, 64);
   });
 }
 

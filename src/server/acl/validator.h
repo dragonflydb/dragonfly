@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include <absl/types/span.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "facade/facade_types.h"
@@ -28,6 +31,9 @@ struct AclRulesView {
   size_t db;  // The only database the user may access, or kAllDbs.
 };
 
+// Whether the connection holds a channel or pattern subscription that `pub_sub` does not allow.
+bool HasForbiddenSubscription(const ConnectionContext& cntx, const AclPubSub& pub_sub);
+
 // Checks whether `rules` allow running `id` with `tail_args` while `db_index` is selected.
 // Returns the reason of a denial or nullopt if the command is allowed. Has no side effects and
 // needs no connection, so it can also simulate commands (ACL DRYRUN).
@@ -39,6 +45,10 @@ std::optional<AclLog::Reason> CheckCommand(const AclRulesView& rules, size_t db_
 // running script started. Records denials in the ACL log.
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
                                                 const facade::ParsedArgs& tail_args);
+
+// Whether the same rules allow op on every key of database 0 under prefixes; "" or none: all keys.
+[[nodiscard]] bool ArePrefixesAllowed(const ConnectionContext& cntx,
+                                      absl::Span<const std::string> prefixes, KeyOp op);
 
 }  // namespace acl
 }  // namespace dfly

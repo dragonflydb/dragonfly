@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "base/logging.h"
 #include "server/search/doc_index.h"
@@ -191,11 +192,14 @@ Reducer::Func FindReducerFunc(ReducerFunc name) {
         return static_cast<double>(seen.size());
       };
     case ReducerFunc::SUM:
-      return [](ValueIterator it) -> Value { return kSumReducer(it).first; };
+      return [](ValueIterator it) -> Value {
+        auto [sum, count] = kSumReducer(it);
+        return count > 0 ? sum : std::numeric_limits<double>::quiet_NaN();
+      };
     case ReducerFunc::AVG:
       return [](ValueIterator it) -> Value {
         auto [sum, count] = kSumReducer(it);
-        return count > 0 ? Value{sum / count} : Value{};
+        return count > 0 ? sum / count : std::numeric_limits<double>::quiet_NaN();
       };
     case ReducerFunc::MAX:
       return [](ValueIterator it) -> Value {
@@ -209,6 +213,8 @@ Reducer::Func FindReducerFunc(ReducerFunc name) {
           if (std::holds_alternative<std::monostate>(result) || result < v)
             result = v;
         }
+        if (std::holds_alternative<std::monostate>(result))
+          return -std::numeric_limits<double>::infinity();
         return result;
       };
     case ReducerFunc::MIN:
@@ -223,6 +229,8 @@ Reducer::Func FindReducerFunc(ReducerFunc name) {
           if (std::holds_alternative<std::monostate>(result) || v < result)
             result = v;
         }
+        if (std::holds_alternative<std::monostate>(result))
+          return std::numeric_limits<double>::infinity();
         return result;
       };
   }

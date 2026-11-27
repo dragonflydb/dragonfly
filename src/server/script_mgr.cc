@@ -187,17 +187,23 @@ void ScriptMgr::ConfigCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder
     // to load a script; holding mu_ across this hop would make the two commands wait on each other.
     lock_guard lk{mu_};
     ScriptKey key{sha};
-    auto& data = db_[key];
+    auto it = db_.find(key);
 
+    // Apply the flags to a copy, so an invalid flag leaves the script unchanged.
+    ScriptParams params = it == db_.end() ? ScriptParams{} : ScriptParams{it->second};
     while (parser.HasNext()) {
-      if (auto err = ScriptParams::ApplyFlags(parser.Next<string_view>(), &data); err)
+      if (auto err = ScriptParams::ApplyFlags(parser.Next<string_view>(), &params); err)
         return builder->SendError("Invalid config format: " + err.Format());
     }
 
+    if (it == db_.end())
+      it = db_.emplace(key, InternalScriptData{}).first;
+    static_cast<ScriptParams&>(it->second) = params;
+
     // The per-thread params cache doubles as the EVALSHA existence check, so publish only scripts
     // that are actually loaded. Flags of a not yet loaded script stay in db_ until Insert() runs.
-    if (data.body) {
-      UpdateScriptCaches(key, data);
+    if (it->second.body) {
+      UpdateScriptCaches(key, it->second);
     }
   }
 

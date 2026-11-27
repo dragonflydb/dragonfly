@@ -4,8 +4,8 @@
 
 #include "server/search/search_family.h"
 
-#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/inlined_vector.h>
 #include <absl/flags/flag.h>
 #include <absl/functional/function_ref.h>
 #include <absl/strings/match.h>
@@ -17,9 +17,9 @@
 #include <absl/types/span.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
-#include <exception>
 #include <functional>
 #include <ranges>
 #include <variant>
@@ -35,6 +35,7 @@
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/validator.h"
 #include "server/cluster/coordinator.h"
 #include "server/command_registry.h"
 #include "server/config_registry.h"
@@ -67,6 +68,9 @@ ABSL_FLAG(size_t, subset_knn_search_threshold, 8192,
           "instead of HNSW graph search");
 
 namespace dfly {
+namespace acl {
+constexpr uint32_t kFtDangerous = FT_SEARCH | DANGEROUS;
+}  // namespace acl
 
 using namespace std;
 using namespace facade;
@@ -87,7 +91,8 @@ bool CheckQueryLength(string_view query, string_view what, SinkReplyBuilder* rb)
 }
 
 template <typename T> using ParseResult = io::Result<T, ErrorReply>;
-using HnswSearchResult = io::Result<vector<SearchResult>, OpStatus>;
+enum class HnswLoadError { kIndexNotFound, kIndexNotBuilt };
+using HnswSearchResult = io::Result<vector<SearchResult>, HnswLoadError>;
 
 nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string message) {
   return make_unexpected(ErrorReply{std::move(message), kSyntaxErrType});
@@ -99,6 +104,11 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 
 string IndexNotFoundMsg(string_view index_name) {
   return absl::StrCat("-ERR ", index_name, ": no such index");
+}
+
+ErrorReply HnswLoadErrorReply(HnswLoadError error, string_view index_name) {
+  return ErrorReply{error == HnswLoadError::kIndexNotFound ? IndexNotFoundMsg(index_name)
+                                                           : string{kIndexNotBuilt}};
 }
 
 std::string ResolveIndexName(string_view requested_name) {
@@ -125,6 +135,53 @@ std::vector<std::string> ResolveIndexNames(absl::Span<const string_view> request
   else
     shard_set->Await(0, resolve);
   return canonical_names;
+}
+
+// Replies NOPERM unless the ACL rules allow op on every key under prefixes; none: all keys.
+bool CheckPrefixAccess(absl::Span<const string> prefixes, acl::KeyOp op, CommandContext* cmd_cntx) {
+  const ConnectionContext& cntx = *cmd_cntx->server_conn_cntx();
+  if (acl::ArePrefixesAllowed(cntx, prefixes, op))
+    return true;
+
+  ServerState::tlocal()->acl_log.Add(cntx, string{cmd_cntx->cid()->name()},
+                                     acl::AclLog::Reason::KEY);
+  cmd_cntx->SendError("-NOPERM User does not have the required permissions to query the index",
+                      "NOPERM");
+  return false;
+}
+
+// Call before any hop, so a denial schedules no transaction; unknown names fail or set *missing.
+bool CheckIndexAccess(absl::Span<const string_view> names, acl::KeyOp op, CommandContext* cmd_cntx,
+                      string_view not_found = {}, bool* missing = nullptr) {
+  if (acl::ArePrefixesAllowed(*cmd_cntx->server_conn_cntx(), {}, op))
+    return true;
+
+  absl::InlinedVector<string, 2> prefixes;  // "" for an index without PREFIX, which holds every key
+  optional<string_view> unknown;            // the first name that resolves to no index
+  auto resolve = [&] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    for (string_view name : names) {
+      const ShardDocIndex* index = indices->ResolveIndex(name);
+      if (index == nullptr)
+        unknown = unknown.value_or(name);
+      else if (const auto& p = index->base().prefixes; p.empty())
+        prefixes.emplace_back();
+      else
+        prefixes.insert(prefixes.end(), p.begin(), p.end());
+    }
+  };
+  if (EngineShard::tlocal())
+    resolve();
+  else
+    shard_set->Await(0, resolve);
+
+  if (unknown && !missing) {
+    cmd_cntx->SendError(not_found.empty() ? IndexNotFoundMsg(*unknown) : string{not_found});
+    return false;
+  }
+  if (missing)
+    *missing = unknown.has_value();
+  return (missing && unknown && prefixes.empty()) || CheckPrefixAccess(prefixes, op, cmd_cntx);
 }
 
 // Send error from parser or result
@@ -247,6 +304,12 @@ ParsedSchemaField ParseTag(CmdArgParser* parser) {
   return std::make_pair(search::SchemaField::TAG, kTagParamsGrammar.Apply(parser));
 }
 
+ParsedSchemaField ParseJsonTag(CmdArgParser* parser) {
+  search::SchemaField::TagParams params{.separator = std::nullopt};
+  kTagParamsGrammar.Apply(parser, &params);
+  return std::make_pair(search::SchemaField::TAG, params);
+}
+
 ParsedSchemaField ParseText(CmdArgParser* parser) {
   return std::make_pair(search::SchemaField::TEXT, kTextParamsGrammar.Apply(parser));
 }
@@ -327,7 +390,7 @@ ParseResult<bool> ParseIndexLanguageField(CmdArgParser* parser, DocIndex* index)
 }
 
 // NOOFFSETS (index-level): disable storing token positions in TEXT posting lists.
-// Saves memory but breaks phrase queries.
+// Saves memory; a phrase then matches its words in any order.
 ParseResult<bool> ParseNoOffsets(CmdArgParser* /*parser*/, DocIndex* index) {
   index->options.no_offsets = true;
   return true;
@@ -460,6 +523,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
     auto params_parser =
         parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv, &ParseNumeric,
                            "VECTOR"sv, &ParseVector, "GEO", &ParseGeo);
+    if (index->type == DocIndex::JSON && params_parser == &ParseTag)
+      params_parser = &ParseJsonTag;
     if (!params_parser) {
       if (!parser->HasNext())
         return CreateSyntaxError(
@@ -650,6 +715,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
         return CreateSyntaxError("bad arguments for FILTER: empty field name"sv);
     } else if (parser->Check("WITHSORTKEYS")) {
       params.with_sortkeys = true;
+    } else if (parser->Check("WITHPAYLOADS")) {
+      params.with_payloads = true;
     } else if (parser->Check("WITHSCORES")) {
       params.with_scores = true;
     } else if (parser->Check("SCORER")) {
@@ -1235,10 +1302,24 @@ std::vector<aggregate::DocValues> MergeJoinedKeysWithData(
   return merged_data;
 }
 
+// Numbers in fields and rows: integers without a fraction, others with 12 significant digits.
+string FormatNumber(double d) {
+  // The sign of a nan depends on the CPU: x86 makes 0/0 negative.
+  if (std::isnan(d))
+    return "nan";
+  if (d >= -0x1p63 && d < 0x1p63 && std::trunc(d) == d)
+    return absl::StrCat(static_cast<int64_t>(d));
+  return absl::StrFormat("%.12g", d);
+}
+
 auto SortableValueSender(RedisReplyBuilder* rb) {
   return Overloaded{
       [rb](monostate) { rb->SendNull(); },
-      [rb](double d) { rb->SendDouble(d); },
+      [rb](double d) {
+        // Short enough to be copied inline, so it may die before a reply scope ends.
+        const string number = FormatNumber(d);
+        rb->SendBulkString(string_view{number});
+      },
       [rb](const string& s) { rb->SendBulkString(s); },
   };
 }
@@ -1281,6 +1362,92 @@ float GlobalMaxTextScore(absl::Span<const SearchResult> results) {
   auto max_it = rng::max_element(
       results, [](const auto& a, const auto& b) { return a.max_text_score < b.max_text_score; });
   return max_it == results.end() ? 0.0f : max_it->max_text_score;
+}
+
+// RESP3 replies of FT.SEARCH and FT.AGGREGATE are maps: the results come first, the total after.
+void StartResp3Reply(size_t results, RedisReplyBuilder* rb) {
+  rb->StartCollection(5, CollectionType::MAP);
+  rb->SendSimpleString("attributes");
+  rb->SendEmptyArray();
+  rb->SendSimpleString("format");
+  rb->SendSimpleString("STRING");
+  rb->SendSimpleString("results");
+  rb->StartArray(results);
+}
+
+void EndResp3Reply(size_t total, RedisReplyBuilder* rb) {
+  rb->SendSimpleString("total_results");
+  rb->SendLong(total);
+  rb->SendSimpleString("warning");
+  rb->SendEmptyArray();
+}
+
+void SendSortKey(const search::SortableValue& value, RedisReplyBuilder* rb) {
+  Overloaded sortable_value_sender{
+      [rb](monostate) { rb->SendNull(); },
+      [rb](double d) { rb->SendBulkString(absl::StrFormat("#%.17g", d)); },
+      [rb](const string& s) { rb->SendBulkString(absl::StrCat("$", s)); },
+  };
+  visit(sortable_value_sender, value);
+}
+
+void SendSearchResultsResp2(const SearchParams& params, size_t total_hits,
+                            absl::Span<SerializedSearchDoc* const> docs, RedisReplyBuilder* rb) {
+  const bool reply_with_ids_only = params.IdsOnly();
+  const size_t items_per_field = (reply_with_ids_only ? 1 : 2) + params.with_sortkeys +
+                                 params.with_scores + params.with_payloads;
+  rb->StartArray(docs.size() * items_per_field + 1);
+  rb->SendLong(total_hits);
+  for (const auto* doc : docs) {
+    rb->SendBulkString(doc->key);
+    if (params.with_scores)
+      rb->SendBulkString(absl::StrCat(doc->text_score));
+    if (params.with_payloads)  // Documents have no payloads.
+      rb->SendNull();
+    if (params.with_sortkeys)
+      SendSortKey(doc->sort_score, rb);
+    if (!reply_with_ids_only)
+      SendSerializedDoc(*doc, rb);
+  }
+}
+
+// RESP3 makes each result a map and names its parts.
+void SendSearchResultsResp3(const SearchParams& params, size_t total_hits,
+                            absl::Span<SerializedSearchDoc* const> docs, RedisReplyBuilder* rb) {
+  const bool reply_with_ids_only = params.IdsOnly();
+  const size_t parts_per_result = (reply_with_ids_only ? 2 : 3) + params.with_sortkeys +
+                                  params.with_scores + params.with_payloads;
+  StartResp3Reply(docs.size(), rb);
+  for (const auto* doc : docs) {
+    rb->StartCollection(parts_per_result, CollectionType::MAP);
+    rb->SendSimpleString("id");
+    rb->SendBulkString(doc->key);
+    if (params.with_scores) {
+      rb->SendSimpleString("score");
+      rb->SendDouble(doc->text_score);
+    }
+    if (params.with_payloads) {  // Documents have no payloads.
+      rb->SendSimpleString("payload");
+      rb->SendNull();
+    }
+    if (params.with_sortkeys) {
+      rb->SendSimpleString("sortkey");
+      SendSortKey(doc->sort_score, rb);
+    }
+    if (!reply_with_ids_only) {
+      rb->SendSimpleString("extra_attributes");
+      SendSerializedDoc(*doc, rb);
+    }
+    rb->SendSimpleString("values");
+    rb->SendEmptyArray();
+  }
+  EndResp3Reply(total_hits, rb);
+}
+
+void SendSearchResultsResp(const SearchParams& params, size_t total_hits,
+                           absl::Span<SerializedSearchDoc* const> docs, RedisReplyBuilder* rb) {
+  auto* reply = rb->IsResp3() ? &SendSearchResultsResp3 : &SendSearchResultsResp2;
+  reply(params, total_hits, docs, rb);
 }
 
 void SearchReply(const SearchParams& params,
@@ -1350,39 +1517,18 @@ void SearchReply(const SearchParams& params,
   if (params.sort_option && !ignore_sort)
     PartialSortBySortScore(absl::MakeSpan(docs), end, params.sort_option->order);
 
-  const bool reply_with_ids_only = params.IdsOnly();
+  const auto page = absl::MakeConstSpan(docs).subspan(offset, limit);
+  if (knn_score_ret_field && !params.IdsOnly()) {
+    for (auto* doc : page)
+      doc->values[*knn_score_ret_field] = doc->knn_score;
+  }
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  const size_t items_per_field =
-      (reply_with_ids_only ? 1 : 2) + params.with_sortkeys + params.with_scores;
+
   // Batch the reply so temporary sortkeys are copied into the batching buffer instead of referenced
   // past their lifetime — a >kMaxInlineSize bulk string enqueued by reference under a reply scope
   // is copied only when the scope ends, after the "$" + s temporary is gone (use-after-free).
   SinkReplyBuilder::ReplyAggregator agg{rb};
-  rb->StartArray(limit * items_per_field + 1);
-
-  Overloaded sortable_value_sender{
-      [rb](monostate) { rb->SendNull(); },
-      [rb](double d) { rb->SendBulkString(absl::StrCat("#", d)); },
-      [rb](const string& s) { rb->SendBulkString(absl::StrCat("$", s)); },
-  };
-
-  rb->SendLong(total_hits);
-  for (size_t i = offset; i < end; i++) {
-    rb->SendBulkString(docs[i]->key);
-    if (params.with_scores) {
-      rb->SendBulkString(absl::StrCat(docs[i]->text_score));
-    }
-    if (params.with_sortkeys) {
-      visit(sortable_value_sender, docs[i]->sort_score);
-    }
-
-    if (!reply_with_ids_only) {
-      if (knn_score_ret_field)
-        docs[i]->values[*knn_score_ret_field] = docs[i]->knn_score;
-
-      SendSerializedDoc(*docs[i], builder);
-    }
-  }
+  SendSearchResultsResp(params, total_hits, page, rb);
 }
 
 // Warms up the query parser to avoid first-call slowness
@@ -1403,13 +1549,12 @@ struct HnswSearchOptions {
   const SearchParams& params;
 };
 
-// SORTBY by anything but the KNN score needs the sort value loaded from the document.
-std::optional<DocField> HnswSortField(
-    const search::Schema& schema, const SearchParams& params,
-    const std::optional<search::KnnScoreSortOption>& knn_score_option) {
+// SORTBY by anything but the KNN score needs the sort value of each document.
+const FieldReference* HnswSortField(
+    const SearchParams& params, const std::optional<search::KnnScoreSortOption>& knn_score_option) {
   if (!params.sort_option || (knn_score_option && params.sort_option->IsSame(*knn_score_option)))
-    return std::nullopt;
-  return ResolveField(schema, params.sort_option->field);
+    return nullptr;
+  return &params.sort_option->field;
 }
 
 HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
@@ -1427,6 +1572,7 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
   // Indicator if we serialized document on shard
   std::vector<std::vector<bool>> shard_docs_serialized_indicator(shard_size);
   std::atomic missing_index = false;
+  std::atomic not_built = false;
 
   // Fetch all docs from shards
   auto cb = [&](Transaction* t, EngineShard* es) {
@@ -1436,14 +1582,17 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
       missing_index.store(true, std::memory_order_relaxed);
       return OpStatus::OK;
     }
+    if (!index->IsBuilt()) {
+      not_built.store(true, std::memory_order_relaxed);
+      return OpStatus::OK;
+    }
 
     if (shard_docs[es->shard_id()].empty()) {
       return OpStatus::OK;
     }
 
     const auto& schema = index->base().schema;
-    const std::optional<DocField> sort_field =
-        HnswSortField(schema, options.params, options.score_sort);
+    const FieldReference* sort_field = HnswSortField(options.params, options.score_sort);
     const bool ids_only_without_sort_load = options.params.IdsOnly() && !sort_field;
 
     // Resize shard with default `true` value
@@ -1463,8 +1612,8 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
         continue;
       }
 
-      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
-                                                sort_field ? &*sort_field : nullptr);
+      if (auto doc =
+              index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields, sort_field);
           doc) {
         shard_doc.key = std::string{doc->key};
         shard_doc.values = std::move(doc->values);
@@ -1479,7 +1628,9 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
   cmd_cntx.tx()->Execute(std::move(cb), true);
 
   if (missing_index.load(std::memory_order_relaxed))
-    return make_unexpected(OpStatus::KEY_NOTFOUND);
+    return make_unexpected(HnswLoadError::kIndexNotFound);
+  if (not_built.load(std::memory_order_relaxed))
+    return make_unexpected(HnswLoadError::kIndexNotBuilt);
 
   // Transform shard results back to a flat list of serialized docs.
   size_t shard_id = 0;
@@ -1622,21 +1773,25 @@ HnswSearchResult SearchGlobalHnswIndexRange(const search::AstVectorRangeNode* ra
   }
 
   std::atomic missing_index = false;
+  std::atomic not_built = false;
   cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* idx = es->search_indices()->GetIndex(options.index_name);
     if (!idx) {
       missing_index.store(true, std::memory_order_relaxed);
       return OpStatus::OK;
     }
+    if (!idx->IsBuilt()) {
+      not_built.store(true, std::memory_order_relaxed);
+      return OpStatus::OK;
+    }
     if (shard_docs[es->shard_id()].empty())
       return OpStatus::OK;
     const auto& schema = idx->base().schema;
     const auto doc_fields = ResolveFields(schema, options.params.return_fields);
-    const std::optional<DocField> sort_field =
-        HnswSortField(schema, options.params, options.score_sort);
+    const FieldReference* sort_field = HnswSortField(options.params, options.score_sort);
     for (auto& shard_doc : shard_docs[es->shard_id()]) {
-      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
-                                              sort_field ? &*sort_field : nullptr);
+      if (auto doc =
+              idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields, sort_field);
           doc) {
         shard_doc.key = std::string{doc->key};
         shard_doc.values = std::move(doc->values);
@@ -1647,7 +1802,9 @@ HnswSearchResult SearchGlobalHnswIndexRange(const search::AstVectorRangeNode* ra
   });
 
   if (missing_index.load(std::memory_order_relaxed))
-    return make_unexpected(OpStatus::KEY_NOTFOUND);
+    return make_unexpected(HnswLoadError::kIndexNotFound);
+  if (not_built.load(std::memory_order_relaxed))
+    return make_unexpected(HnswLoadError::kIndexNotBuilt);
 
   std::vector<SerializedSearchDoc> serialized_docs;
   serialized_docs.reserve(range_results.size());
@@ -2090,7 +2247,7 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
     const bool emit_vsim = yield_vsim_score && doc.has_knn;
     const size_t n_pairs = (emit_text ? 1 : 0) + (emit_vsim ? 1 : 0) +
                            (emit_fields ? doc.values.size() + (yield_combined_score ? 1 : 0) : 2);
-    rb->StartArray(n_pairs * 2);
+    rb->StartCollection(n_pairs, CollectionType::MAP);
 
     if (emit_text) {
       rb->SendBulkString(params.yield_text_score_as);
@@ -2122,10 +2279,27 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
   rb->StartArray(0);
 
   rb->SendBulkString("execution_time");
-  rb->SendBulkString(absl::StrFormat("%.6f", absl::ToDoubleMilliseconds(total_took)));
+  rb->SendDouble(absl::ToDoubleMilliseconds(total_took));
 }
 
-// Returns false if the index is not found on any shard; caller must Conclude() the tx.
+// Concludes the hop left open when a query handler returns. Skipped in an atomic MULTI/EXEC or
+// script: UnlockMulti releases the shards there, and these commands have nothing to journal.
+class ConcludeGuard {
+ public:
+  [[nodiscard]] explicit ConcludeGuard(CommandContext* cmd_cntx) : tx_{cmd_cntx->tx()} {
+    DCHECK(cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL);
+  }
+
+  ~ConcludeGuard() {
+    if (!tx_->IsAtomicMulti())
+      tx_->Conclude();
+  }
+
+ private:
+  Transaction* tx_;
+};
+
+// Returns false if the index is not found on any shard. Its hop leaves the transaction open.
 bool CollectGlobalScoringStats(string_view index_name, search::SearchAlgorithm& text_algo,
                                Transaction* tx, size_t shard_count,
                                search::GlobalScoringStats& out_stats) {
@@ -2362,10 +2536,19 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   apply_return_fields(text_sp);
 
   const std::string resolved_name = ResolveIndexName(index_name);
+  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+    return false;
 
   const bool use_hnsw =
       GlobalHnswIndexRegistry::Instance().Exist(resolved_name, params->vsim_field);
   const bool have_filter = !params->vsim_filter.empty();
+
+  // Parsed on its own so that a FLAT index reports FILTER errors like an HNSW one.
+  search::SearchAlgorithm filter_algo;
+  if (have_filter && !filter_algo.Init(params->vsim_filter, &params->query_params, nullptr)) {
+    rb->SendError("Query syntax error in VSIM FILTER clause");
+    return false;
+  }
 
   search::SearchAlgorithm knn_algo;
   SearchParams knn_sp;
@@ -2401,14 +2584,9 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     apply_return_fields(knn_sp);
   }
 
-  search::SearchAlgorithm filter_algo;
   SearchParams filter_sp;
   vector<SearchResult> hnsw_filter_docs(shard_count);
   if (use_hnsw && have_filter) {
-    if (!filter_algo.Init(params->vsim_filter, &params->query_params, nullptr)) {
-      rb->SendError("Query syntax error in VSIM FILTER clause");
-      return false;
-    }
     filter_sp.limit_total = params->num_candidates;
     apply_return_fields(filter_sp);
 
@@ -2428,7 +2606,6 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   search::GlobalScoringStats global_stats;
   if (needs_global_stats && !CollectGlobalScoringStats(resolved_name, text_algo, cmd_cntx->tx(),
                                                        shard_count, global_stats)) {
-    cmd_cntx->tx()->Conclude();
     cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     return false;
   }
@@ -2439,8 +2616,6 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   if (use_hnsw && !have_filter) {
     const absl::Time t = absl::Now();
     if (auto err = RunHnswPreSearch(resolved_name, *params, hnsw_shard_docs)) {
-      if (needs_global_stats)
-        cmd_cntx->tx()->Conclude();
       rb->SendError(*err);
       return false;
     }
@@ -2452,7 +2627,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   std::once_flag schema_validated;
   bool vsim_not_vector = false;
   bool vsim_dim_mismatch = false;
-  size_t vsim_query_dim = 0, vsim_index_dim = 0, vsim_width = sizeof(float);
+  size_t vsim_query_bytes = 0, vsim_index_dim = 0, vsim_width = sizeof(float);
   search::VectorSimilarity captured_metric = search::VectorSimilarity::L2;
 
   vector<SearchResult> text_docs(shard_count);
@@ -2480,7 +2655,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
         if (!vec_bytes.empty() && vec_bytes.size() != vp.dim * vsim_width) {
           vsim_dim_mismatch = true;
           vsim_index_dim = vp.dim;
-          vsim_query_dim = vec_bytes.size() / vsim_width;
+          vsim_query_bytes = vec_bytes.size();
         }
       }
     });
@@ -2528,10 +2703,20 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     return false;
   }
   if (vsim_dim_mismatch) {
-    rb->SendError(absl::StrCat("Query vector blob size (", vsim_query_dim * vsim_width,
+    rb->SendError(absl::StrCat("Query vector blob size (", vsim_query_bytes,
                                ") does not match index's expected size (",
                                vsim_index_dim * vsim_width, ")"));
     return false;
+  }
+
+  // Report the first shard error, the SEARCH clause before the VSIM one.
+  const std::array clause_results{absl::MakeConstSpan(text_docs),
+                                  absl::MakeConstSpan(use_hnsw ? hnsw_filter_docs : flat_knn_docs)};
+  for (const SearchResult& res : clause_results | std::views::join) {
+    if (res.error) {
+      cmd_cntx->SendError(*res.error);
+      return false;
+    }
   }
 
   absl::Duration hnsw_post_search_took;
@@ -2633,6 +2818,9 @@ void RenderShardProfileTree(RedisReplyBuilder* rb, const SearchResult& shard_res
   RenderProfileEvent(rb, shard_result.profile->events, 0, limited);
 }
 
+constexpr string_view kUnknownIndexMsg = "Unknown index name or name is alias";
+constexpr string_view kNoAliasMsg = "Alias does not exist";
+
 void RunAliasCommand(CommandContext* cmd_cntx, string_view command, string_view alias,
                      ArgSlice journal_args, absl::FunctionRef<OpStatus(ShardDocIndices*)> mutate) {
   using enum OpStatus;
@@ -2661,8 +2849,7 @@ void RunAliasCommand(CommandContext* cmd_cntx, string_view command, string_view 
     case KEY_EXISTS:
       return cmd_cntx->SendError("Alias already exists");
     case KEY_NOTFOUND:
-      return cmd_cntx->SendError(command == "FT.ALIASDEL" ? "Alias does not exist"
-                                                          : "Unknown index name or name is alias");
+      return cmd_cntx->SendError(command == "FT.ALIASDEL" ? kNoAliasMsg : kUnknownIndexMsg);
     case INVALID_VALUE:
       return cmd_cntx->SendError("Alias name conflicts with an existing index");
     default:
@@ -2673,6 +2860,8 @@ void RunAliasCommand(CommandContext* cmd_cntx, string_view command, string_view 
 void CmdFtAliasAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view alias = parser.Next();
   string_view target = parser.Next();
+  if (!CheckIndexAccess({target}, acl::KeyOp::READ_WRITE, cmd_cntx, kUnknownIndexMsg))
+    return;
   RunAliasCommand(cmd_cntx, "FT.ALIASADD", alias, ArgSlice{alias, target},
                   [alias, target](auto* indices) { return indices->AddAlias(alias, target); });
 }
@@ -2680,12 +2869,19 @@ void CmdFtAliasAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdFtAliasUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view alias = parser.Next();
   string_view target = parser.Next();
+  bool add = false;  // a restricted caller adds a missing alias, never repoints one made since
+  if (!CheckIndexAccess({target}, acl::KeyOp::READ_WRITE, cmd_cntx, kUnknownIndexMsg) ||
+      !CheckIndexAccess({alias}, acl::KeyOp::READ_WRITE, cmd_cntx, {}, &add))
+    return;
+  auto update = add ? &ShardDocIndices::AddAlias : &ShardDocIndices::UpdateAlias;
   RunAliasCommand(cmd_cntx, "FT.ALIASUPDATE", alias, ArgSlice{alias, target},
-                  [alias, target](auto* indices) { return indices->UpdateAlias(alias, target); });
+                  [=](auto* indices) { return (indices->*update)(alias, target); });
 }
 
 void CmdFtAliasDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view alias = parser.Next();
+  if (!CheckIndexAccess({alias}, acl::KeyOp::READ_WRITE, cmd_cntx, kNoAliasMsg))
+    return;
   RunAliasCommand(cmd_cntx, "FT.ALIASDEL", alias, ArgSlice{alias},
                   [alias](auto* indices) { return indices->DeleteAlias(alias); });
 }
@@ -2714,6 +2910,8 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (SendErrorIfOccurred(parsed_index, &parser, cmd_cntx)) {
     return;
   }
+  if (!CheckPrefixAccess(parsed_index->prefixes, acl::KeyOp::READ_WRITE, cmd_cntx))
+    return;
 
   // Check if the name is already occupied by an index or alias.
   atomic_uint exists_cnt = 0;
@@ -2761,6 +2959,7 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
+  cmd_cntx->tx()->ReviveAutoJournal();
   cmd_cntx->tx()->Execute(
       [idx_name, idx_ptr, is_journal](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr, is_journal);
@@ -2777,6 +2976,8 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.ExpectTag("ADD");
   auto* builder = cmd_cntx->rb();
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (!CheckIndexAccess({idx_name}, acl::KeyOp::READ_WRITE, cmd_cntx))
+    return;
 
   // First, extract existing index info
   shared_ptr<DocIndex> index_info;
@@ -2828,16 +3029,18 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
   // TODO: Introduce partial rebuild
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
   auto upd_cb = [canonical_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
+    auto* index = es->search_indices()->GetIndex(canonical_name);
+    DCHECK(index);
+    index->CancelBuilder();
+
     unique_ptr<ShardDocIndex> old_index = es->search_indices()->ExtractIndex(canonical_name);
     Synonyms synonyms = old_index ? old_index->GetSynonyms() : Synonyms{};
-    // Destroying the old index waits for its builder, so the replacement builder never runs next
-    // to it on the same global vector index. The old index is already unregistered, so no new
-    // caller can reach that builder meanwhile.
     old_index.reset();
     es->search_indices()->InitIndex(tx->GetOpArgs(es), canonical_name, index_info, is_journal,
                                     std::move(synonyms));
     return OpStatus::OK;
   };
+  cmd_cntx->tx()->ReviveAutoJournal();
   cmd_cntx->tx()->Execute(upd_cb, true);
 
   builder->SendOk();
@@ -2848,6 +3051,8 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Parse optional DD (Delete Documents) parameter
   bool delete_docs = parser.Check("DD");
+  if (!CheckIndexAccess({idx_name}, acl::KeyOp::READ_WRITE, cmd_cntx))
+    return;
 
   shared_ptr<DocIndex> index_info;
   std::string canonical_name;
@@ -2892,6 +3097,9 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
     }
 
+    if (es->journal())
+      t->LogJournalOnShard({cmd_cntx->cid()->name(), cmd_cntx->tail_args()});
+
     // Defer destruction — will be destroyed on the shard thread after the transaction.
     dropped[es->shard_id()] = std::move(index);
     return OpStatus::OK;
@@ -2925,6 +3133,42 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendOk();
 }
 
+// An FT.INFO attribute parameter keeps its type: text, integer or double.
+using InfoParam = pair<string_view, variant<string_view, int64_t, double>>;
+
+void SendInfoParams(absl::Span<const InfoParam> params, RedisReplyBuilder* rb) {
+  Overloaded send_value{[rb](string_view s) { rb->SendBulkString(s); },
+                        [rb](int64_t i) { rb->SendLong(i); },
+                        [rb](double d) { rb->SendDouble(d); }};
+  for (const auto& [key, value] : params) {
+    rb->SendBulkString(key);
+    visit(send_value, value);
+  }
+}
+
+void SendAttributeResp2(absl::Span<const InfoParam> params, absl::Span<const string_view> flags,
+                        RedisReplyBuilder* rb) {
+  rb->StartArray(params.size() * 2 + flags.size());
+  SendInfoParams(params, rb);
+  for (string_view flag : flags)
+    rb->SendBulkString(flag);
+}
+
+// RESP3 makes the attribute a map and lists its flags under one key.
+void SendAttributeResp3(absl::Span<const InfoParam> params, absl::Span<const string_view> flags,
+                        RedisReplyBuilder* rb) {
+  rb->StartCollection(params.size() + 1, CollectionType::MAP);
+  SendInfoParams(params, rb);
+  rb->SendBulkString("flags");
+  rb->SendSimpleStrArr(flags);
+}
+
+void SendAttributeResp(absl::Span<const InfoParam> params, absl::Span<const string_view> flags,
+                       RedisReplyBuilder* rb) {
+  auto* reply = rb->IsResp3() ? &SendAttributeResp3 : &SendAttributeResp2;
+  reply(params, flags, rb);
+}
+
 void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view idx_name = parser.Next();
 
@@ -2946,6 +3190,9 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (num_notfound > 0u)
     return rb->SendError(IndexNotFoundMsg(idx_name));
+  for (const auto& info : infos)  // a hop may read each shard at another moment
+    if (!CheckPrefixAccess(info.base_index.prefixes, acl::KeyOp::READ, cmd_cntx))
+      return;
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
@@ -2965,8 +3212,8 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   const auto& schema = info.base_index.schema;
 
   bool has_custom_stopwords = info.base_index.options.custom_stopwords;
-  // Reply with a flat array under RESP3 too, not a map.
-  rb->StartArray((has_custom_stopwords ? 8 : 7) * 2);
+  SinkReplyBuilder::ReplyAggregator agg{rb};
+  rb->StartCollection(has_custom_stopwords ? 8 : 7, CollectionType::MAP);
 
   rb->SendSimpleString("index_name");
   rb->SendBulkString(info.base_index.name);
@@ -2975,7 +3222,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   {
     const bool has_lang = schema.default_language != "english";
     const bool has_lang_field = !schema.language_field.empty();
-    rb->StartArray((3 + has_lang + has_lang_field) * 2);
+    rb->StartCollection(3 + has_lang + has_lang_field, CollectionType::MAP);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefixes");
@@ -3010,51 +3257,37 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->StartArray(schema.fields.size());
   for (const auto& [alias, field_ptr] : schema.Ordered()) {
     const auto& field_info = *field_ptr;
-    vector<string> info;
-    char buf[128];
-
-    string_view base[] = {"identifier"sv, field_info.identifier,
-                          "attribute"sv,  alias,
-                          "type"sv,       SearchFieldTypeToString(field_info.type)};
-    info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
+    vector<InfoParam> params = {{"identifier", field_info.identifier},
+                                {"attribute", alias},
+                                {"type", SearchFieldTypeToString(field_info.type)}};
+    vector<string_view> flags;
 
     if (field_info.type == search::SchemaField::VECTOR) {
       auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
-      info.emplace_back("algorithm");
-      info.emplace_back(vparams.use_hnsw ? "HNSW" : "FLAT");
-      info.emplace_back("data_type");
-      info.emplace_back(search::VectorDataTypeToString(vparams.data_type));
-      info.emplace_back("dim");
-      info.emplace_back(std::to_string(vparams.dim));
-      info.emplace_back("distance_metric");
-      info.emplace_back(search::VectorSimilarityToString(vparams.sim));
-      info.emplace_back("initial_cap");
-      info.emplace_back(std::to_string(vparams.capacity));
+      params.emplace_back("algorithm", vparams.use_hnsw ? "HNSW"sv : "FLAT"sv);
+      params.emplace_back("data_type", search::VectorDataTypeToString(vparams.data_type));
+      params.emplace_back("dim", static_cast<int64_t>(vparams.dim));
+      params.emplace_back("distance_metric", search::VectorSimilarityToString(vparams.sim));
+      params.emplace_back("initial_cap", static_cast<int64_t>(vparams.capacity));
       if (vparams.use_hnsw) {
-        info.emplace_back("M");
-        info.emplace_back(std::to_string(vparams.hnsw_m));
-        info.emplace_back("ef_construction");
-        info.emplace_back(std::to_string(vparams.hnsw_ef_construction));
-        info.emplace_back("ef_runtime");
-        info.emplace_back(std::to_string(vparams.hnsw_ef_runtime));
-        info.emplace_back("epsilon");
-        info.emplace_back(RedisReplyBuilder::FormatDouble(vparams.hnsw_epsilon, buf, sizeof(buf)));
+        params.emplace_back("M", static_cast<int64_t>(vparams.hnsw_m));
+        params.emplace_back("ef_construction", static_cast<int64_t>(vparams.hnsw_ef_construction));
+        params.emplace_back("ef_runtime", static_cast<int64_t>(vparams.hnsw_ef_runtime));
+        params.emplace_back("epsilon", vparams.hnsw_epsilon);
       }
     } else if (field_info.type == search::SchemaField::TAG) {
       auto& tparams = std::get<search::SchemaField::TagParams>(field_info.special_params);
-      info.emplace_back("SEPARATOR");
-      info.emplace_back(std::string(1, tparams.separator));
+      params.emplace_back("SEPARATOR",
+                          tparams.separator ? string_view{&*tparams.separator, 1} : ""sv);
       if (tparams.case_sensitive)
-        info.emplace_back("CASESENSITIVE");
+        flags.emplace_back("CASESENSITIVE");
     } else if (field_info.type == search::SchemaField::TEXT) {
       auto& tparams = std::get<search::SchemaField::TextParams>(field_info.special_params);
-      info.emplace_back("WEIGHT");
-      info.emplace_back(RedisReplyBuilder::FormatDouble(tparams.weight, buf, sizeof(buf)));
+      params.emplace_back("WEIGHT", tparams.weight);
     } else if (field_info.type == search::SchemaField::NUMERIC) {
       auto& numeric_params =
           std::get<search::SchemaField::NumericParams>(field_info.special_params);
-      info.emplace_back("blocksize"sv);
-      info.emplace_back(std::to_string(numeric_params.block_size));
+      params.emplace_back("blocksize", static_cast<int64_t>(numeric_params.block_size));
     }
 
     // Flags in the reference order, with UNF where the reference shows it.
@@ -3063,25 +3296,25 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
     const auto* tag_params =
         std::get_if<search::SchemaField::TagParams>(&field_info.special_params);
     if (field_info.flags & search::SchemaField::SORTABLE) {
-      info.emplace_back("SORTABLE"sv);
+      flags.emplace_back("SORTABLE"sv);
       if ((field_info.flags & search::SchemaField::UNF) ||
           field_info.type == search::SchemaField::NUMERIC ||
           (tag_params && tag_params->case_sensitive) || on_json)
-        info.emplace_back("UNF"sv);
+        flags.emplace_back("UNF"sv);
     }
     if (text_params && text_params->no_stem)
-      info.emplace_back("NOSTEM"sv);
+      flags.emplace_back("NOSTEM"sv);
     if (field_info.flags & search::SchemaField::NOINDEX)
-      info.emplace_back("NOINDEX"sv);
+      flags.emplace_back("NOINDEX"sv);
     if ((text_params && text_params->with_suffixtrie) ||
         (tag_params && tag_params->with_suffixtrie))
-      info.emplace_back("WITHSUFFIXTRIE"sv);
+      flags.emplace_back("WITHSUFFIXTRIE"sv);
     if (field_info.flags & search::SchemaField::INDEXEMPTY)
-      info.emplace_back("INDEXEMPTY"sv);
+      flags.emplace_back("INDEXEMPTY"sv);
     if (field_info.flags & search::SchemaField::INDEXMISSING)
-      info.emplace_back("INDEXMISSING"sv);
+      flags.emplace_back("INDEXMISSING"sv);
 
-    rb->SendBulkStrArr(info);
+    SendAttributeResp(params, flags, rb);
   }
 
   rb->SendSimpleString("num_docs");
@@ -3114,7 +3347,7 @@ void CmdFtList(CmdArgParser /*parser*/, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   });
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->SendBulkStrArr(names);
+  rb->SendBulkStrArr(names, CollectionType::SET);
 }
 
 static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view query,
@@ -3173,6 +3406,7 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
 }
 
 void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ConcludeGuard conclude_guard{cmd_cntx};
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
 
@@ -3206,6 +3440,8 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     search_algo.SetScorer(search::ScorerSpec{});
 
   const std::string resolved_name = ResolveIndexName(index_name);
+  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+    return;
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, resolved_name);
 
@@ -3238,14 +3474,6 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
   const bool hnsw_range_has_prefilter = hnsw_range_prefilter != nullptr;
 
-  // The KNN-prefilter flow leaves the transaction open between hops; conclude it if an exception
-  // unwinds out of the command, otherwise the scheduled global tx leaks and stalls the shards.
-  const int uncaught_on_entry = std::uncaught_exceptions();
-  absl::Cleanup conclude_on_unwind = [&] {
-    if (std::uncaught_exceptions() > uncaught_on_entry)
-      cmd_cntx->tx()->Conclude();
-  };
-
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
@@ -3275,7 +3503,6 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
         false);
 
     if (index_not_found.load(memory_order_relaxed)) {
-      cmd_cntx->tx()->Conclude();  // phase 1 ran with conclude=false
       return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     }
 
@@ -3304,8 +3531,6 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     cmd_cntx->tx()->Execute(std::move(search_cb), /*conclude=*/!knn_has_prefilter);
 
     if (index_not_found.load(memory_order_relaxed)) {
-      if (knn_has_prefilter)
-        cmd_cntx->tx()->Conclude();
       return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     }
 
@@ -3313,12 +3538,11 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
       for (const auto& res : knn_prefilter_docs) {
         empty_prefilter_result &= res.ids.empty();
         if (res.error) {
-          cmd_cntx->tx()->Conclude();
           return cmd_cntx->SendError(*res.error);
         }
       }
       if (empty_prefilter_result)
-        cmd_cntx->tx()->Conclude();
+        cmd_cntx->tx()->Conclude();  // no load hop follows
     } else {
       for (const auto& res : docs) {
         empty_prefilter_result &= res.docs.empty();
@@ -3331,13 +3555,9 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (knn_node && (!knn_has_prefilter || !empty_prefilter_result)) {
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(resolved_name, knn->field);
     if (!hnsw_index) {
-      if (knn_has_prefilter)
-        cmd_cntx->tx()->Conclude();
       return builder->SendError(string{index_name} + ": no such global hnsw index");
     }
     if (auto err = ValidateHnswKnnBlob(knn, *hnsw_index)) {
-      if (knn_has_prefilter)
-        cmd_cntx->tx()->Conclude();
       return builder->SendError(*err);
     }
     const HnswSearchOptions hnsw_options{.index_name = resolved_name,
@@ -3348,7 +3568,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
             ? SearchGlobalHnswIndex(knn, hnsw_index, hnsw_options, knn_prefilter_docs, *cmd_cntx)
             : SearchGlobalHnswIndex(knn, hnsw_index, hnsw_options, *cmd_cntx, shard_set->size());
     if (!result)
-      return builder->SendError(IndexNotFoundMsg(index_name));
+      return cmd_cntx->SendError(HnswLoadErrorReply(result.error(), index_name));
     docs = std::move(*result);
   }
 
@@ -3365,7 +3585,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
         .index_name = resolved_name, .score_sort = knn_sort_option, .params = *params};
     auto result = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, hnsw_options, *cmd_cntx);
     if (!result)
-      return builder->SendError(IndexNotFoundMsg(index_name));
+      return cmd_cntx->SendError(HnswLoadErrorReply(result.error(), index_name));
     docs = std::move(*result);
   }
 
@@ -3479,8 +3699,16 @@ void SendFtProfileSearchResponse(const SearchParams& params,
   // First element -> Result of the search command
   // Second element -> Profile information
   SinkReplyBuilder::ReplyAggregator agg{rb};
-  rb->StartArray(2);
-  SearchReply(params, knn_sort_option, inject_score_alias, search_results, rb, false);
+  if (rb->IsResp3()) {
+    // RESP3 names both parts.
+    rb->StartCollection(2, CollectionType::MAP);
+    rb->SendSimpleString("Results");
+    SearchReply(params, knn_sort_option, inject_score_alias, search_results, rb, false);
+    rb->SendSimpleString("Profile");
+  } else {
+    rb->StartArray(2);
+    SearchReply(params, knn_sort_option, inject_score_alias, search_results, rb, false);
+  }
 
   // Profile information
   rb->StartArray(profile_results.size() + 1);
@@ -3505,6 +3733,7 @@ void SendFtProfileSearchResponse(const SearchParams& params,
 }
 
 void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ConcludeGuard conclude_guard{cmd_cntx};
   string_view index_name = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -3548,15 +3777,9 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   absl::Time start = absl::Now();
   const size_t shards_count = shard_set->size();
 
-  // Prefilter/range profile flows leave the transaction open between hops; conclude it if an
-  // exception unwinds out of the command so the scheduled global tx cannot leak.
-  const int uncaught_on_entry = std::uncaught_exceptions();
-  absl::Cleanup conclude_on_unwind = [&] {
-    if (std::uncaught_exceptions() > uncaught_on_entry)
-      cmd_cntx->tx()->Conclude();
-  };
-
   const std::string resolved_name = ResolveIndexName(index_name);
+  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+    return;
 
   auto [profile_knn_node, profile_knn] = TryPopHnswKnnNode(search_algo, resolved_name);
   if (profile_knn) {
@@ -3582,7 +3805,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (needs_global_stats) {
       if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
-        cmd_cntx->tx()->Conclude();
         return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
@@ -3610,7 +3832,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
           false);
 
       if (index_not_found.load(memory_order_relaxed)) {
-        cmd_cntx->tx()->Conclude();
         return rb->SendError(IndexNotFoundMsg(index_name));
       }
 
@@ -3619,7 +3840,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
         auto& res = knn_prefilter_docs[shard_id];
         empty_prefilter_result &= res.ids.empty();
         if (res.error) {
-          cmd_cntx->tx()->Conclude();
           return cmd_cntx->SendError(*res.error);
         }
         profile_search_results[shard_id].total_hits = res.total_hits;
@@ -3627,19 +3847,19 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
 
       if (empty_prefilter_result) {
-        cmd_cntx->tx()->Conclude();
+        cmd_cntx->tx()->Conclude();  // no load hop follows
       } else {
         auto result = SearchGlobalHnswIndex(profile_knn, hnsw_index, hnsw_options,
                                             knn_prefilter_docs, *cmd_cntx);
         if (!result)
-          return rb->SendError(IndexNotFoundMsg(index_name));
+          return cmd_cntx->SendError(HnswLoadErrorReply(result.error(), index_name));
         search_results = std::move(*result);
       }
     } else {
       auto result =
           SearchGlobalHnswIndex(profile_knn, hnsw_index, hnsw_options, *cmd_cntx, shards_count);
       if (!result)
-        return rb->SendError(IndexNotFoundMsg(index_name));
+        return cmd_cntx->SendError(HnswLoadErrorReply(result.error(), index_name));
       search_results = std::move(*result);
       profile_search_results.clear();
       profile_results.clear();
@@ -3693,7 +3913,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
         .index_name = resolved_name, .score_sort = hnsw_range_sort_option, .params = *params};
     auto result = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, hnsw_options, *cmd_cntx);
     if (!result)
-      return rb->SendError(IndexNotFoundMsg(index_name));
+      return cmd_cntx->SendError(HnswLoadErrorReply(result.error(), index_name));
     auto search_results = std::move(*result);
     std::vector<SearchResult> profile_search_results;
     std::vector<absl::Duration> profile_results;
@@ -3715,7 +3935,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (needs_global_stats) {
       if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
-        cmd_cntx->tx()->Conclude();
         return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
@@ -3777,7 +3996,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (needs_global_stats) {
     if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                    global_scoring_stats)) {
-      cmd_cntx->tx()->Conclude();
       return rb->SendError(IndexNotFoundMsg(index_name));
     }
     global_stats_ptr = &global_scoring_stats;
@@ -3824,30 +4042,112 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
                               absl::MakeSpan(profile_results), took, rb, limited);
 }
 
+// Appends the union of the sorted ranges [a, a_end) and [b, b_end) to `out`; a value present in
+// both ranges is appended once. As in timsort, once one range supplies kMinGallop values in a
+// row, the rest of its run below the other head is found by exponential search and copied at
+// once, so a long run costs O(log(run)) comparisons instead of O(run).
+static void AppendSortedUnion(const string_view* a, const string_view* a_end, const string_view* b,
+                              const string_view* b_end, vector<string_view>* out) {
+  constexpr size_t kMinGallop = 4;
+  size_t wins = 0;  // Values taken from `a` in a row.
+  while (a != a_end && b != b_end) {
+    int cmp = a->compare(*b);
+    if (cmp > 0) {
+      // Keep the range with the smaller head in `a`.
+      std::swap(a, b);
+      std::swap(a_end, b_end);
+      wins = 0;
+    } else if (cmp == 0) {
+      ++b;
+      wins = 0;
+    }
+    out->push_back(*a++);
+
+    if (++wins == kMinGallop) {
+      // Probe a[0], a[1], a[3], a[7], ... until reaching *b, then binary search the last gap.
+      size_t size = a_end - a, step = 1;
+      while (step <= size && a[step - 1] < *b)
+        step *= 2;
+      const string_view* run_end = std::lower_bound(a + step / 2, a + std::min(step - 1, size), *b);
+      out->insert(out->end(), a, run_end);
+      a = run_end;
+      wins = 0;
+    }
+  }
+  out->insert(out->end(), a, a_end);
+  out->insert(out->end(), b, b_end);
+}
+
+// Merges lists that are each sorted and without repeats into one such list. The lists come from
+// the shards, so the same value can be in several of them. The result points into the lists.
+static vector<string_view> MergeSortedUnique(const vector<StringVec>& lists) {
+  size_t total_size = 0;
+  for (const auto& list : lists)
+    total_size += list.size();
+
+  // Concatenate the non-empty lists into one buffer of sorted runs; run i ends at ends[i].
+  vector<string_view> values, merged;
+  vector<size_t> ends;
+  values.reserve(total_size);
+  for (const auto& list : lists) {
+    if (!list.empty()) {
+      values.insert(values.end(), list.begin(), list.end());
+      ends.push_back(values.size());
+    }
+  }
+
+  // Each round merges neighboring runs into the other buffer and halves the number of runs, so a
+  // value takes part in at most ceil(log2(lists.size())) merges.
+  while (ends.size() > 1) {
+    merged.clear();
+    merged.reserve(values.size());
+    size_t begin = 0, runs = 0;
+    for (size_t i = 0; i < ends.size(); i += 2) {
+      // With an odd number of runs, the last one is merged with an empty range, i.e. copied.
+      size_t mid = ends[i], end = i + 1 < ends.size() ? ends[i + 1] : mid;
+      AppendSortedUnion(values.data() + begin, values.data() + mid, values.data() + mid,
+                        values.data() + end, &merged);
+      ends[runs++] = merged.size();
+      begin = end;
+    }
+    ends.resize(runs);
+    values.swap(merged);
+  }
+  return values;
+}
+
 void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view index_name = parser.Next();
   string_view field_name = parser.Next();
   VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
 
   vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
+  vector<optional<vector<string>>> prefixes(shard_set->size());
 
   cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->ResolveIndex(index_name); index)
+    if (auto* index = es->search_indices()->ResolveIndex(index_name); index) {
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
-    else
+      prefixes[es->shard_id()] = index->base().prefixes;
+    } else {
       shard_results[es->shard_id()] =
           nonstd::make_unexpected(ErrorReply(IndexNotFoundMsg(index_name)));
+    }
 
     return OpStatus::OK;
   });
+  for (const auto& p : prefixes)  // a hop may read each shard at another moment
+    if (p && !CheckPrefixAccess(*p, acl::KeyOp::READ, cmd_cntx))
+      return;
 
-  absl::flat_hash_set<string> result_set;
+  vector<StringVec> lists;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  // Check first if either shard had errors. Also merge the results into a single set.
+  // Check first if any shard had errors. Also collect the sorted lists to merge them below.
   for (auto& res : shard_results) {
     if (res) {
-      result_set.insert(make_move_iterator(res->begin()), make_move_iterator(res->end()));
+      DCHECK(rng::is_sorted(*res));
+      DCHECK(rng::adjacent_find(*res) == res->end());
+      lists.push_back(std::move(*res));
     } else {
       res.error().kind = facade::kSearchErrType;
       return cmd_cntx->SendError(res.error());
@@ -3855,16 +4155,18 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   shard_results.clear();
-  vector<string> vec(result_set.begin(), result_set.end());
+  vector<string_view> vec = MergeSortedUnique(lists);
 
   rb->SendBulkStrArr(vec, CollectionType::SET);
 }
 
-// Runs the ids-only prefilter search (a non-finalizing tx hop) and returns the matched global ids.
+// Runs the ids-only prefilter search (a non-finalizing tx hop) and stores the matched global ids.
 // When ADDSCORES is on, also records per-shard text scores for later __score injection.
-static std::vector<search::GlobalDocId> RunAggregatePrefilter(
+// Returns false if a shard error was already sent.
+static bool RunAggregatePrefilter(
     CommandContext* cmd_cntx, const AggregateParams& params, search::SearchAlgorithm& search_algo,
-    std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores) {
+    std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores,
+    std::vector<search::GlobalDocId>* ids) {
   std::vector<SearchResult> prefilter_docs(shard_set->size());
   cmd_cntx->tx()->Execute(
       [&](Transaction* t, EngineShard* es) {
@@ -3879,28 +4181,41 @@ static std::vector<search::GlobalDocId> RunAggregatePrefilter(
       },
       false);
 
+  for (const auto& res : prefilter_docs) {
+    if (res.error) {
+      cmd_cntx->SendError(*res.error);
+      return false;
+    }
+  }
+
   if (params.add_scores) {
     for (size_t shard_id = 0; shard_id < prefilter_docs.size(); shard_id++)
       for (const auto& doc : prefilter_docs[shard_id].docs)
         text_scores[shard_id][doc.id] = doc.text_score;
   }
-  return CollectPrefilterGlobalIds(prefilter_docs);
+  *ids = CollectPrefilterGlobalIds(prefilter_docs);
+  return true;
 }
 
 // Loads HNSW result docs (KNN or VECTOR_RANGE) into query_results in a concluding hop.
-// Returns KEY_NOTFOUND if any shard's index is missing.
-static OpStatus RunHnswAggregateLoad(
+// Returns the error if any shard's index is missing or not built.
+static std::optional<HnswLoadError> RunHnswAggregateLoad(
     CommandContext* cmd_cntx, const AggregateParams& params,
     std::vector<std::vector<SearchDocData>>& query_results,
     const std::vector<std::vector<std::pair<search::DocId, float>>>& shard_docs,
     std::string_view score_alias,
     const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores) {
   std::atomic missing_index = false;
-  auto cb = [&query_results, &params, &shard_docs, score_alias, &text_scores, &missing_index](
-                Transaction* t, EngineShard* es) {
+  std::atomic not_built = false;
+  auto cb = [&query_results, &params, &shard_docs, score_alias, &text_scores, &missing_index,
+             &not_built](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(params.index);
     if (!index) {
       missing_index.store(true, std::memory_order_relaxed);
+      return OpStatus::OK;
+    }
+    if (!index->IsBuilt()) {
+      not_built.store(true, std::memory_order_relaxed);
       return OpStatus::OK;
     }
     if (shard_docs[es->shard_id()].empty())
@@ -3912,7 +4227,11 @@ static OpStatus RunHnswAggregateLoad(
     return OpStatus::OK;
   };
   cmd_cntx->tx()->Execute(std::move(cb), true);
-  return missing_index.load(std::memory_order_relaxed) ? OpStatus::KEY_NOTFOUND : OpStatus::OK;
+  if (missing_index.load(std::memory_order_relaxed))
+    return HnswLoadError::kIndexNotFound;
+  if (not_built.load(std::memory_order_relaxed))
+    return HnswLoadError::kIndexNotBuilt;
+  return std::nullopt;
 }
 
 // FT.AGGREGATE over a global HNSW KNN query. Returns false if an error was already sent.
@@ -3941,16 +4260,17 @@ static bool AggregateHnswKnn(CommandContext* cmd_cntx, AggregateParams& params,
   const bool has_prefilter = knn->HasPreFilter();
   std::vector<absl::flat_hash_map<search::DocId, float>> text_scores(shard_set->size());
   std::optional<std::vector<search::GlobalDocId>> prefilter_ids;
-  if (has_prefilter)
-    prefilter_ids = RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores);
+  if (has_prefilter &&
+      !RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores, &prefilter_ids.emplace()))
+    return false;
 
   auto knn_results =
       prefilter_ids ? hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, *prefilter_ids)
                     : hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime);
   auto shard_docs = GroupByShardId(knn_results, shard_set->size());
-  if (RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, knn->score_alias,
-                           text_scores) != OpStatus::OK) {
-    cmd_cntx->rb()->SendError(IndexNotFoundMsg(index_name));
+  if (auto err = RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, knn->score_alias,
+                                      text_scores)) {
+    cmd_cntx->SendError(HnswLoadErrorReply(*err, index_name));
     return false;
   }
   return true;
@@ -3983,9 +4303,10 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
   std::vector<absl::flat_hash_map<search::DocId, float>> text_scores(shard_set->size());
   std::optional<std::vector<search::GlobalDocId>> prefilter_ids;
   if (has_prefilter) {
-    auto ids = RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores);
-    rng::sort(ids);  // sorted for the binary_search intersection below
-    prefilter_ids = std::move(ids);
+    if (!RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores,
+                               &prefilter_ids.emplace()))
+      return false;
+    rng::sort(*prefilter_ids);  // sorted for the binary_search intersection below
   }
 
   // Intersect the range hits with the filter matches: keep only range results whose global id is
@@ -3997,17 +4318,18 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
              [&](const auto& r) { return !rng::binary_search(*prefilter_ids, r.second); });
   }
   auto shard_docs = GroupByShardId(range_results, shard_set->size());
-  if (RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, hnsw_range->score_alias,
-                           text_scores) != OpStatus::OK) {
-    builder->SendError(IndexNotFoundMsg(index_name));
+  if (auto err = RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs,
+                                      hnsw_range->score_alias, text_scores)) {
+    cmd_cntx->SendError(HnswLoadErrorReply(*err, index_name));
     return false;
   }
   return true;
 }
 
 // FT.AGGREGATE over a non-vector query: optional global-stats phase, then per-shard search.
-static void AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
-                             search::SearchAlgorithm& search_algo,
+// Returns false if an error was already sent.
+static bool AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
+                             string_view index_name, search::SearchAlgorithm& search_algo,
                              std::vector<std::vector<SearchDocData>>& query_results) {
   // Same global-stats phase as FT.SEARCH so SORTBY @__score is stable across shard counts.
   const bool scoring_active = params.scorer || params.add_scores;
@@ -4028,16 +4350,76 @@ static void AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
     params.global_scoring_stats = &global_stats;
   }
 
+  std::vector<ShardDocIndex::AggregateShardResult> shard_results(shard_set->size());
+  std::atomic index_not_found = false;
   auto search_cb = [&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(params.index); index)
-      query_results[es->shard_id()] =
+      shard_results[es->shard_id()] =
           index->SearchForAggregator(t->GetOpArgs(es), params, &search_algo);
+    else
+      index_not_found.store(true, std::memory_order_relaxed);
     return OpStatus::OK;
   };
   cmd_cntx->tx()->Execute(std::move(search_cb), true);
+
+  if (index_not_found.load(std::memory_order_relaxed)) {
+    cmd_cntx->SendError(IndexNotFoundMsg(index_name));
+    return false;
+  }
+  for (size_t i = 0; i < shard_results.size(); i++) {
+    if (!shard_results[i]) {
+      cmd_cntx->SendError(shard_results[i].error());
+      return false;
+    }
+    query_results[i] = std::move(*shard_results[i]);
+  }
+  return true;
+}
+
+// A row of FT.AGGREGATE as a map of the printed fields it has.
+void SendAggregateRow(const aggregate::DocValues& row,
+                      const absl::flat_hash_set<string>& fields_to_print, RedisReplyBuilder* rb) {
+  const size_t fields_count =
+      rng::count_if(fields_to_print, [&row](const string& field) { return row.contains(field); });
+
+  auto sortable_value_sender = SortableValueSender(rb);
+  rb->StartCollection(fields_count, CollectionType::MAP);
+  for (const auto& field : fields_to_print) {
+    auto it = row.find(field);
+    if (it != row.end()) {
+      rb->SendBulkString(field);
+      std::visit(sortable_value_sender, it->second);
+    }
+  }
+}
+
+void SendAggregateResp2(const aggregate::AggregationResult& result, RedisReplyBuilder* rb) {
+  rb->StartArray(result.values.size() + 1);
+  rb->SendLong(result.values.size());
+  for (const auto& row : result.values)
+    SendAggregateRow(row, result.fields_to_print, rb);
+}
+
+// RESP3 makes each row a map with the fields under extra_attributes.
+void SendAggregateResp3(const aggregate::AggregationResult& result, RedisReplyBuilder* rb) {
+  StartResp3Reply(result.values.size(), rb);
+  for (const auto& row : result.values) {
+    rb->StartCollection(2, CollectionType::MAP);
+    rb->SendSimpleString("extra_attributes");
+    SendAggregateRow(row, result.fields_to_print, rb);
+    rb->SendSimpleString("values");
+    rb->SendEmptyArray();
+  }
+  EndResp3Reply(result.values.size(), rb);
+}
+
+void SendAggregateResp(const aggregate::AggregationResult& result, RedisReplyBuilder* rb) {
+  auto* reply = rb->IsResp3() ? &SendAggregateResp3 : &SendAggregateResp2;
+  reply(result, rb);
 }
 
 void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ConcludeGuard conclude_guard{cmd_cntx};
   auto* builder = cmd_cntx->rb();
 
   auto params = ParseAggregatorParams(&parser);
@@ -4062,9 +4444,11 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     std::vector<std::vector<SearchDocData>> query_results(shard_set->size());
 
-    // Keep the requested name on a miss to preserve FT.AGGREGATE's empty-result behavior.
+    // The requested name is kept for error messages; lookups use the resolved name.
     const string_view index_name = params->index;
     const std::string resolved_name = ResolveIndexName(index_name);
+    if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+      return;
     params->index = resolved_name;
 
     auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, params->index);
@@ -4090,10 +4474,12 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
       } else {
         if (vr->epsilon)
           return builder->SendError("EPSILON is supported only for HNSW VECTOR_RANGE");
-        AggregateGeneric(cmd_cntx, params.value(), search_algo, query_results);
+        if (!AggregateGeneric(cmd_cntx, params.value(), index_name, search_algo, query_results))
+          return;
       }
     } else {
-      AggregateGeneric(cmd_cntx, params.value(), search_algo, query_results);
+      if (!AggregateGeneric(cmd_cntx, params.value(), index_name, search_algo, query_results))
+        return;
     }
 
     // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
@@ -4137,27 +4523,49 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(data_for_join.error());
     }
 
+    const auto requested_names = data_for_join->indexes;
     const auto canonical_index_names = ResolveIndexNames(data_for_join->indexes);
     for (size_t i = 0; i < indexes_count; ++i)
       data_for_join->indexes[i] = canonical_index_names[i];
+    if (!CheckIndexAccess(data_for_join->indexes, acl::KeyOp::READ, cmd_cntx))
+      return;
 
     // preaggregated_shard_data is preaggregation results per index per shard
     // preaggregated_shard_data[shard_id][i] is the results of index i on shard shard_id
     using JoinDataVector = join::Vector<join::OwnedEntry>;
     std::vector<std::vector<JoinDataVector>> preaggregated_shard_data(
         shard_set->size(), std::vector<JoinDataVector>(indexes_count));
+    std::vector<std::optional<ErrorReply>> shard_errors(shard_set->size());
+    std::atomic<int> missing_index = -1;
     cmd_cntx->tx()->Execute(
         [&](Transaction* t, EngineShard* es) {
           auto& shard_data = preaggregated_shard_data[es->shard_id()];
           for (size_t i = 0; i < indexes_count; ++i) {
-            if (auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]); index) {
-              shard_data[i] = index->PreagregateDataForJoin(
-                  t->GetOpArgs(es), data_for_join->needed_fields[i], &search_algos[i]);
+            auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]);
+            if (!index) {
+              if (missing_index.load(std::memory_order_relaxed) < 0)
+                missing_index.store(static_cast<int>(i), std::memory_order_relaxed);
+              break;
             }
+            auto result = index->PreagregateDataForJoin(
+                t->GetOpArgs(es), data_for_join->needed_fields[i], &search_algos[i]);
+            if (result)
+              shard_data[i] = std::move(*result);
+            else if (!shard_errors[es->shard_id()])
+              shard_errors[es->shard_id()] = std::move(result.error());
           }
           return OpStatus::OK;
         },
         false);
+
+    if (int i = missing_index.load(std::memory_order_relaxed); i >= 0) {
+      return cmd_cntx->SendError(IndexNotFoundMsg(requested_names[i]));
+    }
+    for (const auto& err : shard_errors) {
+      if (err) {
+        return cmd_cntx->SendError(*err);
+      }
+    }
 
     // Do join
     auto joined_entries = DoJoin(preaggregated_shard_data, *params, *data_for_join);
@@ -4219,29 +4627,8 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto agg_results = aggregate::Process(std::move(values), load_fields, params->steps);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  auto sortable_value_sender = SortableValueSender(rb);
-
-  const size_t result_size = agg_results.values.size();
-  RedisReplyBuilder::ArrayScope scope{rb, result_size + 1};
-  rb->SendLong(result_size);
-
-  for (const auto& value : agg_results.values) {
-    size_t fields_count = 0;
-    for (const auto& field : agg_results.fields_to_print) {
-      if (value.find(field) != value.end()) {
-        fields_count++;
-      }
-    }
-
-    rb->StartArray(fields_count * 2);
-    for (const auto& field : agg_results.fields_to_print) {
-      auto it = value.find(field);
-      if (it != value.end()) {
-        rb->SendBulkString(field);
-        std::visit(sortable_value_sender, it->second);
-      }
-    }
-  }
+  SinkReplyBuilder::ReplyScope scope{rb};
+  SendAggregateResp(agg_results, rb);
 }
 
 void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -4252,6 +4639,7 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Store per-shard synonym data
   vector<absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>>> shard_term_groups(
       shard_set->size());
+  vector<optional<vector<string>>> prefixes(shard_set->size());
 
   // Collect synonym data from all shards
   cmd_cntx->tx()->Execute(
@@ -4260,6 +4648,9 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
         if (!index)
           return OpStatus::OK;
 
+        // A retried idempotent run must not merge synonyms of two indexes.
+        shard_term_groups[es->shard_id()].clear();
+        prefixes[es->shard_id()] = index->base().prefixes;
         index_not_found.store(false, std::memory_order_relaxed);
 
         // Get synonym data from current shard
@@ -4279,6 +4670,9 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (index_not_found.load(std::memory_order_relaxed))
     return rb->SendError(IndexNotFoundMsg(index_name));
+  for (const auto& p : prefixes)
+    if (p && !CheckPrefixAccess(*p, acl::KeyOp::READ, cmd_cntx))
+      return;
 
   // Merge data from all shards into a single map
   absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> merged_term_groups;
@@ -4289,9 +4683,8 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
   }
 
-  // Format response according to Redis protocol:
-  // Array of term + array of group ids pairs
-  rb->StartArray(merged_term_groups.size() * 2);
+  // Each term with the array of its group ids.
+  rb->StartCollection(merged_term_groups.size(), CollectionType::MAP);
   for (const auto& [term, group_ids] : merged_term_groups) {
     rb->SendBulkString(term);
     rb->StartArray(group_ids.size());
@@ -4304,6 +4697,55 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
       rb->SendBulkString(id);
     }
   }
+}
+
+void SendConfigHelpResp2(absl::Span<absl::CommandLineFlag* const> flags, RedisReplyBuilder* rb) {
+  rb->StartArray(flags.size());
+  for (const auto* flag : flags) {
+    rb->StartArray(5);
+    rb->SendBulkString(flag->Name());
+    rb->SendBulkString("Description"sv);
+    rb->SendBulkString(flag->Help());
+    rb->SendBulkString("Value"sv);
+    rb->SendBulkString(flag->CurrentValue());
+  }
+}
+
+// RESP3 maps each name to its description and value.
+void SendConfigHelpResp3(absl::Span<absl::CommandLineFlag* const> flags, RedisReplyBuilder* rb) {
+  rb->StartCollection(flags.size(), CollectionType::MAP);
+  for (const auto* flag : flags) {
+    rb->SendBulkString(flag->Name());
+    rb->StartCollection(2, CollectionType::MAP);
+    rb->SendBulkString("Description"sv);
+    rb->SendBulkString(flag->Help());
+    rb->SendBulkString("Value"sv);
+    rb->SendBulkString(flag->CurrentValue());
+  }
+}
+
+void SendConfigHelpResp(absl::Span<absl::CommandLineFlag* const> flags, RedisReplyBuilder* rb) {
+  auto* reply = rb->IsResp3() ? &SendConfigHelpResp3 : &SendConfigHelpResp2;
+  reply(flags, rb);
+}
+
+// RESP2 nests each name-value pair.
+void SendConfigValuesResp2(absl::Span<const string> names_and_values, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ArrayScope scope{rb, names_and_values.size() / 2};
+  for (size_t i = 0; i < names_and_values.size(); i += 2) {
+    rb->StartArray(2);
+    rb->SendBulkString(names_and_values[i]);
+    rb->SendBulkString(names_and_values[i + 1]);
+  }
+}
+
+void SendConfigValuesResp3(absl::Span<const string> names_and_values, RedisReplyBuilder* rb) {
+  rb->SendBulkStrArr(names_and_values, CollectionType::MAP);
+}
+
+void SendConfigValuesResp(absl::Span<const string> names_and_values, RedisReplyBuilder* rb) {
+  auto* reply = rb->IsResp3() ? &SendConfigValuesResp3 : &SendConfigValuesResp2;
+  reply(names_and_values, rb);
 }
 
 void FtConfigHelp(CmdArgParser* parser, CommandContext* cmd_cntx) {
@@ -4321,15 +4763,7 @@ void FtConfigHelp(CmdArgParser* parser, CommandContext* cmd_cntx) {
   }
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->StartArray(res.size());
-  for (const auto& flag : res) {
-    rb->StartArray(5);
-    rb->SendBulkString(flag->Name());
-    rb->SendBulkString("Description"sv);
-    rb->SendBulkString(flag->Help());
-    rb->SendBulkString("Value"sv);
-    rb->SendBulkString(flag->CurrentValue());
-  }
+  SendConfigHelpResp(res, rb);
 }
 
 void FtConfigGet(CmdArgParser* parser, CommandContext* cmd_cntx) {
@@ -4350,7 +4784,7 @@ void FtConfigGet(CmdArgParser* parser, CommandContext* cmd_cntx) {
     }
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  return rb->SendBulkStrArr(res, CollectionType::MAP);
+  SendConfigValuesResp(res, rb);
 }
 
 void FtConfigSet(CmdArgParser* parser, CommandContext* cmd_cntx) {
@@ -4418,6 +4852,8 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
+  if (!CheckIndexAccess({index_name}, acl::KeyOp::READ_WRITE, cmd_cntx))
+    return;
 
   std::atomic_bool index_not_found{true};
 
@@ -4436,6 +4872,8 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}},
             group_id, terms);
 
+        if (es->journal())
+          t->LogJournalOnShard({cmd_cntx->cid()->name(), cmd_cntx->tail_args()});
         return OpStatus::OK;
       },
       true);
@@ -4476,6 +4914,7 @@ void CmdFtDebug(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdFtHybrid(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ConcludeGuard conclude_guard{cmd_cntx};
   string_view index_name = parser.Next();
 
   auto params = ParseHybridParams(&parser);
@@ -4503,38 +4942,37 @@ void SearchFamily::Register(CommandRegistry* registry) {
   const uint32_t kReadOnlyMask =
       CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL | CO::IDEMPOTENT;
 
+  // An index change journals itself only once it succeeds.
+  const uint32_t kChangeMask = CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL;
+
+  // As in the reference, without the @write, @slow and @dangerous that the option masks imply.
+  const uint32_t kSearch = acl::FT_SEARCH, kQuery = acl::FT_SEARCH | acl::READ;
+
   registry->StartFamily();
   *registry
-      << CI{"FT.CREATE", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
-      << CI{"FT.ALIASADD", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
-            acl::FT_SEARCH}
-             .HFUNC(FtAliasAdd)
-      << CI{"FT.ALIASUPDATE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
-            acl::FT_SEARCH}
-             .HFUNC(FtAliasUpdate)
-      << CI{"FT.ALIASDEL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 2, 0, 0,
-            acl::FT_SEARCH}
-             .HFUNC(FtAliasDel)
-      << CI{"FT.ALTER", CO::JOURNALED | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
-      << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
-             FtDropIndex)
-      << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL,
-            -2,        0,
-            0,         acl::FT_SEARCH}
+      << CI{"FT.CREATE", kChangeMask, -2, 0, 0}.SetAclCategories(kSearch).HFUNC(FtCreate)
+      << CI{"FT.ALIASADD", kChangeMask, 3, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAliasAdd)
+      << CI{"FT.ALIASUPDATE", kChangeMask, 3, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAliasUpdate)
+      << CI{"FT.ALIASDEL", kChangeMask, 2, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAliasDel)
+      << CI{"FT.ALTER", kChangeMask, -3, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAlter)
+      << CI{"FT.DROPINDEX", kChangeMask, -2, 0, 0, acl::kFtDangerous}.HFUNC(FtDropIndex)
+      << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL, -2,
+            0, 0}
+             .SetAclCategories(kSearch)
              .HFUNC(FtInfo)
-      << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
-             FtConfig)
+      << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0}
+             .SetAclCategories(kSearch | acl::ADMIN)
+             .HFUNC(FtConfig)
       // Underscore same as in RediSearch because it's "temporary" (long time already)
-      << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
-      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
-      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
-      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
-      << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
-      << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
-      << CI{"FT.SYNUPDATE", CO::JOURNALED | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
-             FtSynUpdate)
-      << CI{"FT._DEBUG", kReadOnlyMask, -1, 0, 0, acl::FT_SEARCH}.HFUNC(FtDebug)
-      << CI{"FT.HYBRID", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtHybrid);
+      << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH | acl::ADMIN}.HFUNC(FtList)
+      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0}.SetAclCategories(kQuery).HFUNC(FtSearch)
+      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0}.SetAclCategories(kQuery).HFUNC(FtAggregate)
+      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0}.SetAclCategories(kQuery).HFUNC(FtProfile)
+      << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::kFtDangerous | acl::READ}.HFUNC(FtTagVals)
+      << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0}.SetAclCategories(kSearch).HFUNC(FtSynDump)
+      << CI{"FT.SYNUPDATE", kChangeMask, -4, 0, 0}.SetAclCategories(kSearch).HFUNC(FtSynUpdate)
+      << CI{"FT._DEBUG", kReadOnlyMask, -1, 0, 0, acl::kFtDangerous | acl::ADMIN}.HFUNC(FtDebug)
+      << CI{"FT.HYBRID", kReadOnlyMask, -3, 0, 0}.SetAclCategories(kQuery).HFUNC(FtHybrid);
 }
 
 void SearchFamily::Shutdown() {

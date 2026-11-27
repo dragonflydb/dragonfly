@@ -8,7 +8,14 @@ class FakeRedisNode:
     Diskless replication uses an EOF marker because the size is not known in advance.
     """
 
-    def __init__(self, rdb: bytes, *, rdb_framing: Literal["length", "eof"] = "length"):
+    def __init__(
+        self,
+        rdb: bytes,
+        *,
+        rdb_framing: Literal["length", "eof"] = "length",
+        eof_marker: bytes = b"b" * 40,
+        eof_trailer: bytes | None = None,
+    ):
         self.host = "127.0.0.1"
         self.port = 0
         self.sync_attempts = 0
@@ -19,8 +26,8 @@ class FakeRedisNode:
         if rdb_framing == "length":
             payload = f"${len(rdb)}\r\n".encode() + rdb
         elif rdb_framing == "eof":
-            marker = b"b" * 40
-            payload = b"$EOF:" + marker + b"\r\n" + rdb + marker
+            trailer = eof_marker if eof_trailer is None else eof_trailer
+            payload = b"$EOF:" + eof_marker + b"\r\n" + rdb + trailer
         else:
             raise ValueError(f"Unknown RDB framing: {rdb_framing}")
         self._sync_response = b"+FULLRESYNC " + b"a" * 40 + b" 0\r\n" + payload

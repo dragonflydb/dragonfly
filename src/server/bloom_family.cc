@@ -127,10 +127,8 @@ OpStatus OpLoadChunk(const OpArgs& op_args, std::string_view blob, std::string_v
 
     // LOADCHUNK overwrites existing key
     if (!op_res->is_new) {
-      // existing key might not necessarily be SBF, it could be HASH/JSON, and indexed
-      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, op_res->it->second, op_args.shard);
       db_slice.RemoveExpire(op_args.db_cntx.db_index, op_res->it);
-      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &op_res->it->second);
+      db_slice.PrepareOverwrite(op_args.db_cntx, key, &op_res->it->second);
     }
 
     op_res->it->second.SetSBF(load_result.value());
@@ -189,7 +187,7 @@ void CmdAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   OpStatus status = res.status();
   if (res) {
     if (res->front())
-      return cmd_cntx->SendLong(*res->front());
+      return static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBool(*res->front());
     else
       status = res->front().status();
   }
@@ -211,7 +209,7 @@ void CmdExists(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!res && res.status() == OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS)
     return cmd_cntx->SendError(res.status());
 
-  return cmd_cntx->SendLong(res ? res->front() : 0);
+  return static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBool(res && res->front());
 }
 
 void CmdMAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -232,7 +230,7 @@ void CmdMAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   RedisReplyBuilder::ArrayScope scope{rb, add_res.size()};
   for (const OpResult<bool>& val : add_res) {
     if (val) {
-      rb->SendLong(*val);
+      rb->SendBool(*val);
     } else {
       rb->SendError(val.status());
     }
@@ -292,6 +290,24 @@ void CmdLoadChunk(CmdArgParser parser, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
+void SendInfoFieldResp2(string_view /*name*/, int64_t value, RedisReplyBuilder* rb) {
+  rb->StartArray(1);
+  rb->SendLong(value);
+}
+
+// RESP3 names the field.
+void SendInfoFieldResp3(string_view name, int64_t value, RedisReplyBuilder* rb) {
+  rb->StartCollection(1, CollectionType::MAP);
+  rb->SendSimpleString(name);
+  rb->SendLong(value);
+}
+
+void SendInfoFieldResp(string_view name, int64_t value, RedisReplyBuilder* rb) {
+  SinkReplyBuilder::ReplyScope scope{rb};
+  auto* reply = rb->IsResp3() ? &SendInfoFieldResp3 : &SendInfoFieldResp2;
+  reply(name, value, rb);
+}
+
 void CmdInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const string_view key = parser.Next();
@@ -330,14 +346,15 @@ void CmdInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (field) {
     for (size_t i = 0; i < std::size(kShortNames); ++i) {
       if (absl::EqualsIgnoreCase(*field, kShortNames[i]))
-        return rb->SendLong((*res)[i]);
+        return SendInfoFieldResp(kNames[i], (*res)[i], rb);
     }
     return rb->SendError("Invalid info arguments");
   }
 
-  RedisReplyBuilder::ArrayScope scope{rb, std::size(kNames) * 2};
+  SinkReplyBuilder::ReplyScope scope{rb};
+  rb->StartCollection(std::size(kNames), CollectionType::MAP);
   for (size_t i = 0; i < std::size(kNames); ++i) {
-    rb->SendBulkString(kNames[i]);
+    rb->SendSimpleString(kNames[i]);
     rb->SendLong((*res)[i]);
   }
 }
@@ -359,7 +376,7 @@ void CmdMExists(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   RedisReplyBuilder::ArrayScope scope{rb, items.size()};
   for (size_t i = 0; i < items.size(); ++i) {
-    rb->SendLong(res ? res->at(i) : 0);
+    rb->SendBool(res && res->at(i));
   }
 }
 

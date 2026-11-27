@@ -40,7 +40,6 @@
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/validator.h"
-#include "server/cluster_support.h"
 #include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/server_state.h"
@@ -343,10 +342,7 @@ void AclFamily::List(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::StreamUpdatesToConnections(string_view username, const User& user) {
-  if (!main_listener_ || main_listener_->protocol() != facade::Protocol::REDIS)
-    return;
-
-  main_listener_->TraverseConnections([&](unsigned, util::Connection* conn) {
+  auto update = [&](unsigned, util::Connection* conn) {
     auto* connection = static_cast<facade::Connection*>(conn);
     if (connection->IsHttp() || !connection->cntx())
       return;
@@ -359,11 +355,13 @@ void AclFamily::StreamUpdatesToConnections(string_view username, const User& use
                                .ns = {},
                                .db = user.Db()});
     }
-  });
+  };
+  for (auto* listener : listeners_)
+    listener->TraverseConnections(update);
 }
 
-void AclFamily::EvictConnections(absl::FunctionRef<bool(string_view username)> pred) {
-  if (!main_listener_)
+void AclFamily::EvictConnections(absl::FunctionRef<bool(const ConnectionContext&)> pred) {
+  if (listeners_.empty())
     return;
 
   pool_->AwaitFiberOnAll([&](unsigned, util::ProactorBase* pb) {
@@ -371,10 +369,11 @@ void AclFamily::EvictConnections(absl::FunctionRef<bool(string_view username)> p
     auto collect = [&](unsigned, util::Connection* conn) {
       auto* connection = static_cast<facade::Connection*>(conn);
       auto* cntx = static_cast<ConnectionContext*>(connection->cntx());
-      if (cntx && pred(cntx->authed_username))
+      if (cntx && pred(*cntx))
         connections.push_back(connection->Borrow());
     };
-    main_listener_->TraverseConnectionsOnThread(collect, UINT32_MAX, nullptr);
+    for (auto* listener : listeners_)
+      listener->TraverseConnectionsOnThread(collect, UINT32_MAX, nullptr);
 
     for (auto& weak_conn : connections) {
       facade::Connection* conn = weak_conn.Get();
@@ -420,7 +419,8 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
 
   if (reset_channels)
-    EvictConnections([username](string_view name) { return name == username; });
+    EvictConnections(
+        [username](const ConnectionContext& cntx) { return cntx.authed_username == username; });
   else
     StreamUpdatesToConnections(username, user);
 }
@@ -434,15 +434,15 @@ void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (!users.empty()) {
     VLOG(1) << "Evicting open acl connections";
-    EvictConnections([&users](string_view name) { return users.contains(name); });
+    EvictConnections(
+        [&users](const ConnectionContext& cntx) { return users.contains(cntx.authed_username); });
     VLOG(1) << "Done evicting open acl connections";
   }
   cmd_cntx->SendLong(users.size());
 }
 
 void AclFamily::WhoAmI(CmdArgParser parser, CommandContext* cmd_cntx) {
-  GetRedisReplyBuilder(cmd_cntx)->SendBulkString(
-      absl::StrCat("User is ", cmd_cntx->server_conn_cntx()->authed_username));
+  GetRedisReplyBuilder(cmd_cntx)->SendBulkString(cmd_cntx->server_conn_cntx()->authed_username);
 }
 
 void AclFamily::Save(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -558,11 +558,22 @@ void AclFamily::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Reply first because the connection might get evicted.
   cmd_cntx->SendOk();
-  EvictConnections(
-      [&reg](string_view name) { return name != "default" && reg.registry.contains(name); });
+  EvictConnections([&reg](const ConnectionContext& cntx) {
+    return cntx.authed_username != "default" && reg.registry.contains(cntx.authed_username);
+  });
   reg.registry.clear();
   registry_->ResetStats();
   AddUsers(std::move(requests), &reg.registry);
+
+  // Default user connections stay open, so they must pick up its reloaded rules.
+  const User& default_user = reg.registry.at("default");
+  StreamUpdatesToConnections("default", default_user);
+
+  // Like Valkey, drop the ones holding subscriptions that the reloaded rules forbid.
+  EvictConnections([&default_user](const ConnectionContext& cntx) {
+    return cntx.authed_username == "default" &&
+           HasForbiddenSubscription(cntx, default_user.PubSub());
+  });
 }
 
 void AclFamily::Log(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -736,8 +747,12 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
                                   cid->AclTarget(simulated_args).first, "' command"));
 }
 
-void AclFamily::Init(facade::Listener* main_listener) {
-  main_listener_ = main_listener;
+void AclFamily::Init(const std::vector<facade::Listener*>& listeners) {
+  // Only main and memcached connections are subject to ACL rules.
+  for (auto* listener : listeners) {
+    if (listener->IsMainInterface() || listener->protocol() == facade::Protocol::MEMCACHE)
+      listeners_.push_back(listener);
+  }
 
   // Like Redis: replaces all of default's passwords, and an empty value means nopass.
   config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {
@@ -825,9 +840,6 @@ variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(facade::Pars
       if (req.select_db)
         return ErrorReply("ERR Error, select db $ was used twice");
 
-      // AUTH switches the connection to this db, bypassing the SELECT restriction.
-      if (IsClusterEnabled() && *db != 0 && *db != kAllDbs)
-        return ErrorReply("ERR Error, select db $ is not allowed in cluster mode");
       req.select_db = db;
       continue;
     }

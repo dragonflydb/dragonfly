@@ -26,6 +26,8 @@ class Listener;
 
 namespace dfly {
 
+class ConnectionContext;
+
 using facade::CmdArgList;
 using facade::CmdArgParser;
 
@@ -36,7 +38,7 @@ class AclFamily final {
   explicit AclFamily(UserRegistry* registry, util::ProactorPool* pool);
 
   void Register(CommandRegistry* registry);
-  void Init(facade::Listener* listener);
+  void Init(const std::vector<facade::Listener*>& listeners);
 
  private:
   void Acl(CmdArgParser parser, CommandContext* cmd_cntx);
@@ -57,8 +59,8 @@ class AclFamily final {
   // Pushes the user's updated ACL rules to all its open connections.
   void StreamUpdatesToConnections(std::string_view username, const User& user);
 
-  // Closes all open connections whose authenticated user matches `pred`.
-  void EvictConnections(absl::FunctionRef<bool(std::string_view username)> pred);
+  // Closes all open connections that match `pred`.
+  void EvictConnections(absl::FunctionRef<bool(const ConnectionContext&)> pred);
 
   using UserRequests = std::vector<std::pair<std::string, User::UpdateRequest>>;
 
@@ -79,7 +81,8 @@ class AclFamily final {
 
   void BuildIndexers(RevCommandsIndexStore families);
 
-  facade::Listener* main_listener_{nullptr};
+  // Listeners whose connections enforce ACL rules: main and memcached.
+  std::vector<facade::Listener*> listeners_;
   UserRegistry* registry_;
   CommandRegistry* cmd_registry_{nullptr};
   util::ProactorPool* pool_;
