@@ -4,7 +4,7 @@ import aiohttp
 
 from . import dfly_args
 from .instance import DflyInstance
-from .utility import info_tick_timer
+from .utility import info_tick_timer, tick_timer
 
 
 def get_http_session(*args):
@@ -225,3 +225,78 @@ async def test_http_api_json_response(df_server: DflyInstance):
             json_object = get_json_object(text)
             assert json_object != None
             assert json_object["result"] == ["k1", "k2"]
+
+        # Quotes in replies and errors nested in an EXEC reply must keep the JSON valid.
+        for cmd, expected in (
+            (["multi"], {"result": "OK"}),
+            (["incr", "foo"], {"result": "QUEUED"}),
+            (["get", "foo"], {"result": "QUEUED"}),
+            (["exec"], {"result": [{"error": "value is not an integer or out of range"}, "bar"]}),
+            (['foo"'], {"error": 'unknown command `FOO"`'}),
+            (["eval", "return {ok='a\"b'}", "0"], {"result": 'a"b'}),
+        ):
+            async with session.post(f"http://localhost:{df_server.port}/api", json=cmd) as resp:
+                assert json.loads(await resp.text()) == expected
+
+
+@dfly_args({"proactor_threads": "1", "expose_http_api": "true"})
+async def test_http_api_client_killed_mid_request(df_server: DflyInstance):
+    """Killing an HTTP client while its first request runs used to fail a CHECK."""
+    client = df_server.client()
+    await client.execute_command("CLIENT", "PAUSE", "10000", "WRITE")
+
+    # Requests in the first read run before the HTTP loop starts. After PING, SET waits on the pause.
+    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    bodies = ('["ping"]', '["set", "k", "v"]')
+    requests = "".join(f"POST /api HTTP/1.1\r\nContent-Length: {len(b)}\r\n\r\n{b}" for b in bodies)
+    writer.write(requests.encode())
+    await reader.readuntil(b"PONG")
+
+    http_ids = [c["id"] for c in await client.client_list() if c.get("http") == "true"]
+    await client.execute_command("CLIENT", "KILL", "ID", http_ids[0])
+    await client.execute_command("CLIENT", "UNPAUSE")
+
+    # The killed connection closes once SET returns.
+    async for clients, breaker in tick_timer(client.client_list):
+        with breaker:
+            assert not any(c.get("http") == "true" for c in clients)
+    writer.close()
+
+
+@dfly_args({"proactor_threads": "1", "expose_http_api": "true"})
+async def test_http_api_unsupported_commands(df_server: DflyInstance):
+    """An HTTP connection gets one reply per request, so commands that push messages to it later or
+    block are rejected, as are DFLY commands. MONITOR used to crash the server."""
+    client = df_server.client()
+    url = f"http://localhost:{df_server.port}/api"
+    unsupported = {"error": "This command is not supported over the HTTP API"}
+
+    async with get_http_session() as session:
+
+        async def post(cmd):
+            async with session.post(url, json=cmd) as resp:
+                return await resp.json()
+
+        for cmd in (
+            ["monitor"],
+            ["subscribe", "ch"],
+            ["blpop", "q", "1"],
+            ["client", "tracking", "on"],
+            ["dfly", "thread", "0"],
+        ):
+            assert await post(cmd) == unsupported
+
+        # Like other errors while queuing, a rejected command fails the transaction.
+        assert await post(["multi"]) == {"result": "OK"}
+        assert await post(["monitor"]) == unsupported
+        assert "EXECABORT" in (await post(["exec"]))["error"]
+
+        assert await post(["watch", "k1", "k2"]) == {"result": "OK"}
+
+    # Closing the connection unwatches its keys.
+    async for clients, breaker in tick_timer(client.client_list):
+        with breaker:
+            assert not any(c.get("http") == "true" for c in clients)
+
+    # A leftover watch on k1 is written through by SET, one on k2 fails a debug check at shutdown.
+    assert await client.set("k1", "v")
