@@ -122,18 +122,25 @@ unsigned ChannelStore::SendMessages(string_view channel, facade::ArgRange messag
   }
 
   auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
-  auto cb = [subscribers_ptr, send = BuildSender(channel, messages, sharded)](unsigned idx, auto*) {
-    auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
-                          ChannelStore::Subscriber::ByThreadId);
-    while (it != subscribers_ptr->end() && it->LastKnownThreadId() == idx) {
-      // Subscribers with an expired JWT get nothing until they re-AUTH.
-      if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr &&
-                                 !static_cast<ConnectionContext*>(ptr->cntx())->IsAuthExpired())
-        send(ptr, it->pattern);
-      it++;
-    }
-  };
-  shard_set->pool()->DispatchBrief(std::move(cb));
+  auto send = BuildSender(channel, messages, sharded);
+  for (auto begin = subscribers_ptr->begin(); begin != subscribers_ptr->end();) {
+    auto end = begin;
+    unsigned thread_id = begin->LastKnownThreadId();
+    do {
+      ++end;
+    } while (end != subscribers_ptr->end() && end->LastKnownThreadId() == thread_id);
+
+    // Use the same per-proactor queue as the pool broadcast, including for the publishing thread.
+    shard_set->pool()->at(thread_id)->DispatchBrief([subscribers_ptr, send, begin, end] {
+      for (auto it = begin; it != end; ++it) {
+        // Subscribers with an expired JWT get nothing until they re-AUTH.
+        if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr &&
+                                   !static_cast<ConnectionContext*>(ptr->cntx())->IsAuthExpired())
+          send(ptr, it->pattern);
+      }
+    });
+    begin = end;
+  }
 
   return subscribers_ptr->size();
 }
