@@ -376,6 +376,9 @@ class DbSlice {
   OpResult<ItAndUpdater> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
                                      uint64_t expire_at_ms);
 
+  // Removes an unpublished, empty entry after insertion throws. Safe during allocation failure.
+  void RollbackEmptyInsert(const Context& cntx, std::string_view key) noexcept;
+
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
   // Returns OpStatus::OUT_OF_MEMORY if bad_alloc is thrown
@@ -702,7 +705,7 @@ class DbSlice {
 
   // 'key' is the entry's key. It may point into the entry, so it is not used after Erase.
   void PerformDeletionAtomic(PrimeIterator del_it, std::string_view key, DbTable* table,
-                             bool async = false);
+                             bool async = false, bool notify_tracking = true);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
